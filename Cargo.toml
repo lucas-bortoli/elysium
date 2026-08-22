@@ -3,6 +3,10 @@ name = "elysium-os"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "elysium-os"
+path = "kernel/main.rs"
+
 [dependencies]
 rquickjs = { version = "0.12.2", features = ["loader"] }
 swc_common = "26.0.0"

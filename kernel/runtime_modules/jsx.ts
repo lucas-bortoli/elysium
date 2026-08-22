@@ -1,4 +1,4 @@
-// User-space JSX factory, paired with src/transform/jsx.rs.
+// User-space JSX factory, paired with kernel/transform/jsx.rs.
 //
 // The transform rewrites `<Tag prop={x}>child</Tag>` into `h("Tag", props,
 // ...children)` calls and `<>...</>` into `h(Fragment, null, ...children)`.

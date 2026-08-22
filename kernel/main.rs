@@ -5,7 +5,7 @@ use runtime::{ElysiumRuntime, GuardedError};
 pub mod transform;
 
 fn main() {
-    let path = "programs/main.ts";
+    let path = "userland/programs/init/index.ts";
     let program =
         std::fs::read_to_string(path).unwrap_or_else(|err| panic!("failed to read {path}: {err}"));
 

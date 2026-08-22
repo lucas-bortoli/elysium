@@ -11,10 +11,10 @@ use crate::transform;
 /// TS(X) modules that are part of the Elysium VM itself rather than user
 /// programs, so their source is baked into the executable at build time
 /// instead of being read from disk at runtime (only *building* the VM needs
-/// these files to exist under `runtime/`). Each is importable from any
-/// program as `import ... from "<name>"`; to add another, drop the file
-/// under `runtime/` and add an entry here.
-const EMBEDDED_RUNTIME_MODULES: &[(&str, &str)] = &[("jsx", include_str!("../runtime/jsx.tsx"))];
+/// these files to exist under `runtime_modules/`). Each is importable from
+/// any program as `import ... from "<name>"`; to add another, drop the file
+/// under `runtime_modules/` and add an entry here.
+const EMBEDDED_RUNTIME_MODULES: &[(&str, &str)] = &[("jsx", include_str!("runtime_modules/jsx.ts"))];
 
 /// Prefix marking a module name as one of [`EMBEDDED_RUNTIME_MODULES`]
 /// rather than an on-disk path — chosen so it can never collide with
