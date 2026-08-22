@@ -1,3 +1,7 @@
+use std::cell::Cell;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
 use rquickjs::function::Rest;
 use rquickjs::loader::{FileResolver, ImportAttributes, Loader, Resolver};
 use rquickjs::{Context, Ctx, Error, Function, Module, Result, Runtime as JsRuntime, Type, Value};
@@ -10,8 +14,7 @@ use crate::transform;
 /// these files to exist under `runtime/`). Each is importable from any
 /// program as `import ... from "<name>"`; to add another, drop the file
 /// under `runtime/` and add an entry here.
-const EMBEDDED_RUNTIME_MODULES: &[(&str, &str)] =
-    &[("jsx", include_str!("../runtime/jsx.tsx"))];
+const EMBEDDED_RUNTIME_MODULES: &[(&str, &str)] = &[("jsx", include_str!("../runtime/jsx.tsx"))];
 
 /// Prefix marking a module name as one of [`EMBEDDED_RUNTIME_MODULES`]
 /// rather than an on-disk path — chosen so it can never collide with
@@ -25,21 +28,73 @@ fn embedded_module_source(name: &str) -> Option<&'static str> {
         .map(|(_, source)| *source)
 }
 
+/// Deadline bookkeeping shared between `ElysiumRuntime` and the interrupt
+/// handler closure installed on its `JsRuntime`. `Rc`/`Cell` (not
+/// `Arc`/`Mutex`/atomics) are enough since nothing here crosses an OS thread
+/// boundary and the crate's `"parallel"` feature isn't enabled.
+#[derive(Default)]
+struct GuardState {
+    /// `None` when no guarded call is in progress; `Some(deadline)` = the
+    /// absolute instant the current call must finish by.
+    deadline: Cell<Option<Instant>>,
+    /// Set by the interrupt handler itself, the moment *it* decides to
+    /// interrupt — the ground-truth signal `run_guarded` uses to tell "this
+    /// failure was a timeout" apart from "the program threw". Needed because
+    /// rquickjs doesn't distinguish the two at the type level: both come
+    /// back as the same `Error::Exception`.
+    fired: Cell<bool>,
+}
+
+/// The two ways a guarded call into the VM can fail. On `Timeout`, per
+/// Elysium's failure contract, the VM is destroyed but Elysium soldiers on:
+/// the owning `ElysiumRuntime` is poisoned and must be dropped, never
+/// reused, while the caller (kernel) continues running everything else. An
+/// `Exception` is just an ordinary uncaught error and carries no such
+/// requirement.
+pub enum GuardedError {
+    Timeout,
+    Exception(String),
+}
+
+/// Budget for one top-level module evaluation. Generous relative to a
+/// future per-callback budget (e.g. a `love.update`/`love.draw`-style call)
+/// since program initialization can legitimately take longer than a single
+/// frame.
+const DEFAULT_EVAL_BUDGET: Duration = Duration::from_secs(5);
+
 pub struct ElysiumRuntime {
     _js_runtime: JsRuntime,
     context: Context,
+    guard: Rc<GuardState>,
 }
 
 impl ElysiumRuntime {
     pub fn new() -> Result<Self> {
         let js_runtime = JsRuntime::new()?;
+
+        let guard = Rc::new(GuardState::default());
+        {
+            let guard = Rc::clone(&guard);
+            js_runtime.set_interrupt_handler(Some(Box::new(move || {
+                match guard.deadline.get() {
+                    Some(deadline) if Instant::now() >= deadline => {
+                        guard.fired.set(true);
+                        true
+                    }
+                    _ => false,
+                }
+            })));
+        }
+
         // Programs are TS(X) files on disk; `import`/`export` resolve to
         // sibling `.ts`/`.tsx` files, each compiled (JSX -> h(), then TS
         // erased) as it's loaded. A bare specifier matching one of
         // EMBEDDED_RUNTIME_MODULES resolves to that embedded source instead.
         js_runtime.set_loader(
             EmbeddedOrFileResolver(
-                FileResolver::default().with_pattern("{}.ts").with_pattern("{}.tsx"),
+                FileResolver::default()
+                    .with_pattern("{}.ts")
+                    .with_pattern("{}.tsx"),
             ),
             CompilingLoader,
         );
@@ -56,25 +111,51 @@ impl ElysiumRuntime {
         Ok(Self {
             _js_runtime: js_runtime,
             context,
+            guard,
         })
     }
 
     /// Compiles and evaluates `source` as an ES module named `name` (its
     /// path, used as the base for resolving any relative imports it has).
-    pub fn eval_module(&self, name: &str, source: &str) -> std::result::Result<(), String> {
-        let compiled = transform::compile(source)?;
+    pub fn eval_module(&self, name: &str, source: &str) -> std::result::Result<(), GuardedError> {
+        let compiled = transform::compile(source).map_err(GuardedError::Exception)?;
 
-        self.context.with(|ctx| -> std::result::Result<(), String> {
-            let module_result =
-                Module::declare(ctx.clone(), name, compiled).and_then(Module::eval);
-            let (_module, promise) = match module_result {
-                Ok(pair) => pair,
-                Err(err) => return Err(describe_exception(&ctx, err)),
-            };
-            promise
-                .finish::<()>()
-                .map_err(|err| describe_exception(&ctx, err))
+        self.run_guarded(DEFAULT_EVAL_BUDGET, |ctx| {
+            let (_module, promise) = Module::declare(ctx.clone(), name, compiled)?.eval()?;
+            promise.finish::<()>()
         })
+    }
+
+    /// The one entry point every call into this VM goes through. Sets a
+    /// deadline before running `f`, clears it after, and — on failure —
+    /// distinguishes "the interrupt handler fired" (`Timeout`) from any
+    /// other thrown/returned error (`Exception`) via [`GuardState::fired`].
+    ///
+    /// Forward-looking note: a future per-callback entry point (e.g. a
+    /// `call_function(name, args)` for `love.update`/`love.draw`-style
+    /// kernel calls) would call this same helper with a much tighter budget
+    /// than `DEFAULT_EVAL_BUDGET` — no new timeout logic, just a new
+    /// constant and closure body.
+    fn run_guarded<T>(
+        &self,
+        budget: Duration,
+        f: impl FnOnce(&Ctx<'_>) -> Result<T>,
+    ) -> std::result::Result<T, GuardedError> {
+        self.guard.fired.set(false);
+        self.guard.deadline.set(Some(Instant::now() + budget));
+
+        let result = self.context.with(|ctx| -> std::result::Result<T, GuardedError> {
+            f(&ctx).map_err(|err| {
+                if self.guard.fired.get() {
+                    GuardedError::Timeout
+                } else {
+                    GuardedError::Exception(describe_exception(&ctx, err))
+                }
+            })
+        });
+
+        self.guard.deadline.set(None);
+        result
     }
 }
 
@@ -97,8 +178,8 @@ fn bootstrap_jsx_runtime(ctx: &Ctx<'_>) -> Result<()> {
 fn declare_embedded_module<'js>(ctx: &Ctx<'js>, name: &str) -> Result<Module<'js>> {
     let module_name = format!("{EMBEDDED_MODULE_SCHEME}{name}");
     let source = embedded_module_source(name).ok_or_else(|| Error::new_loading(&module_name))?;
-    let compiled = transform::compile(source)
-        .map_err(|err| Error::new_loading_message(&module_name, err))?;
+    let compiled =
+        transform::compile(source).map_err(|err| Error::new_loading_message(&module_name, err))?;
     Module::declare(ctx.clone(), module_name, compiled)
 }
 

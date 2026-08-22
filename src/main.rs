@@ -1,6 +1,6 @@
 mod runtime;
 
-use runtime::ElysiumRuntime;
+use runtime::{ElysiumRuntime, GuardedError};
 
 pub mod transform;
 
@@ -10,8 +10,15 @@ fn main() {
         std::fs::read_to_string(path).unwrap_or_else(|err| panic!("failed to read {path}: {err}"));
 
     let rt = ElysiumRuntime::new().expect("failed to initialize Elysium runtime");
-    if let Err(err) = rt.eval_module(path, &program) {
-        eprintln!("uncaught exception: {err}");
-        std::process::exit(1);
+    match rt.eval_module(path, &program) {
+        Ok(()) => {}
+        Err(GuardedError::Timeout) => {
+            eprintln!("program timed out");
+            std::process::exit(1);
+        }
+        Err(GuardedError::Exception(err)) => {
+            eprintln!("uncaught exception: {err}");
+            std::process::exit(1);
+        }
     }
 }
