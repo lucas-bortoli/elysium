@@ -31,7 +31,7 @@ impl ElysiumRuntime {
         self.context.with(|ctx| -> Result<(), String> {
             ctx.eval::<(), _>(source).map_err(|err| {
                 if let rquickjs::Error::Exception = err {
-                    format!("{}", ctx.catch().as_exception().unwrap())
+                    ctx.catch().as_exception().unwrap().to_string()
                 } else {
                     err.to_string()
                 }
