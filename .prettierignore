@@ -1,0 +1,5 @@
+# Golden fixtures for kernel/transform's type-erasure tests: the exact
+# whitespace (erased tokens are replaced in place, not removed) and the
+# column-aligned `^^^^` marker comments are the point of the file.
+# Reformatting these would silently break the tests they back.
+kernel/transform/fixtures/

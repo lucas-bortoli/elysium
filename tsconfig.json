@@ -49,5 +49,11 @@
     "kernel/runtime_modules/**/*.ts",
     "kernel/runtime_modules/**/*.tsx",
     "kernel/runtime_modules/**/*.d.ts"
-  ]
+  ],
+
+  // Golden fixtures for kernel/transform's type-erasure tests: deliberately
+  // invalid/unusual TS syntax exercising the erasure transform, not meant to
+  // type-check. Excluded (rather than `// @ts-nocheck`'d) so the fixtures'
+  // exact byte content, which the tests compare against, stays untouched.
+  "exclude": ["kernel/transform/fixtures"]
 }
