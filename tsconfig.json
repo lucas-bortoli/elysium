@@ -5,14 +5,24 @@
     "target": "ES2023",
     "lib": ["ES2023"],
 
-    // Programs run as plain top-level scripts evaluated directly in a VM
-    // (src/runtime.rs's ElysiumRuntime::eval), not as ES modules with a
-    // loader/resolver — so there's no module graph to resolve. "preserve"
-    // is the closest fit since nothing here ever emits: the type-stripping
-    // transform (src/transform/type_stripping.rs) only erases type syntax,
-    // it doesn't touch import/export.
+    // Programs are evaluated as real ES modules (src/runtime.rs's
+    // ElysiumRuntime::eval_module + CompilingLoader resolve relative
+    // imports straight off disk). "preserve" is still the closest fit since
+    // nothing here ever emits: the type-stripping transform
+    // (src/transform/type_stripping.rs) only erases type syntax, it doesn't
+    // touch import/export.
     "module": "preserve",
     "moduleDetection": "force",
+
+    // JSX is rewritten by src/transform/jsx.rs into calls to the `h`/
+    // `Fragment` factory exported from runtime/jsx.tsx (see types/jsx.d.ts
+    // for the ambient `JSX` namespace this pairs with). src/runtime.rs
+    // bootstraps `h`/`Fragment` as globals, so programs never need to
+    // import them — there's no React runtime, so "react-jsx"'s automatic
+    // `react/jsx-runtime` import isn't applicable here.
+    "jsx": "react",
+    "jsxFactory": "h",
+    "jsxFragmentFactory": "Fragment",
 
     // The type-stripping transform (src/transform/type_stripping.rs) only
     // erases type syntax; it performs no type checking of its own, so this
@@ -31,5 +41,11 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["programs/**/*.ts", "types/**/*.d.ts"]
+  "include": [
+    "programs/**/*.ts",
+    "programs/**/*.tsx",
+    "runtime/**/*.ts",
+    "runtime/**/*.tsx",
+    "types/**/*.d.ts"
+  ]
 }
