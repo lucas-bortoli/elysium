@@ -33,3 +33,23 @@ an argument into disconnected fragments and makes the reader do the work of
 reassembling it. A short document doesn't need section headers at all; a
 longer one should still read as connected reasoning under each heading, not
 a list of one-liners.
+
+## Committing
+
+When asked to commit, split the changes into separate commits along
+logical lines rather than one commit for everything in the working tree —
+e.g. a behavioral/code change as one commit, and documentation added or
+updated alongside it as another. Each commit should stand on its own as a
+coherent, reviewable unit.
+
+Commit subject lines must follow Conventional Commits:
+`type(optional scope): description`, lowercase, imperative mood, no
+trailing period — e.g. `feat: guard every call into a VM with a
+cooperative timeout`, `docs(transform): explain the jsx/type-stripping
+pipeline`, `fix: resolve embedded modules before disk paths`. Use `feat`
+for new behavior, `fix` for bug fixes, `docs` for documentation-only
+changes, `refactor` for internal restructuring with no behavior change,
+`test` for test-only changes, and `chore` for everything else
+(dependency bumps, tooling). Add a scope in parentheses when a commit is
+narrowly about one area (`runtime`, `transform`, etc.) and omit it when
+the commit already reads clearly without one.
