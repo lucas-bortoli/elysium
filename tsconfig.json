@@ -15,8 +15,8 @@
     "moduleDetection": "force",
 
     // JSX is rewritten by kernel/transform/jsx.rs into calls to the `h`/
-    // `Fragment` factory exported from kernel/runtime_modules/jsx.ts (see
-    // kernel/runtime_modules/jsx.d.ts for the ambient `JSX` namespace
+    // `Fragment` factory exported from kernel/runtime_modules/jsx-runtime.ts
+    // (see kernel/runtime_modules/jsx.d.ts for the ambient `JSX` namespace
     // this pairs with). kernel/runtime.rs bootstraps `h`/`Fragment` as
     // globals, so programs never need to import them — there's no React
     // runtime, so "react-jsx"'s automatic `react/jsx-runtime` import isn't

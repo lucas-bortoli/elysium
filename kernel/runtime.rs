@@ -14,7 +14,8 @@ use crate::transform;
 /// these files to exist under `runtime_modules/`). Each is importable from
 /// any program as `import ... from "<name>"`; to add another, drop the file
 /// under `runtime_modules/` and add an entry here.
-const EMBEDDED_RUNTIME_MODULES: &[(&str, &str)] = &[("jsx", include_str!("runtime_modules/jsx.ts"))];
+const EMBEDDED_RUNTIME_MODULES: &[(&str, &str)] =
+    &[("jsx", include_str!("runtime_modules/jsx-runtime.ts"))];
 
 /// Prefix marking a module name as one of [`EMBEDDED_RUNTIME_MODULES`]
 /// rather than an on-disk path — chosen so it can never collide with
