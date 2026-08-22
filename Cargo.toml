@@ -1,0 +1,11 @@
+[package]
+name = "elysium-os"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rquickjs = "0.12.2"
+swc_common = "26.0.0"
+swc_ecma_ast = "29.0.0"
+swc_ecma_parser = "45.0.0"
+swc_ecma_visit = "29.0.0"
