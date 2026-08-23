@@ -18,8 +18,8 @@ fn main() {
         std::fs::read_to_string(path).unwrap_or_else(|err| panic!("failed to read {path}: {err}"));
 
     let draw_commands = Rc::new(RefCell::new(Vec::new()));
-    let runtime =
-        ElysiumRuntime::new(Rc::clone(&draw_commands)).expect("failed to initialize Elysium runtime");
+    let runtime = ElysiumRuntime::new(Rc::clone(&draw_commands))
+        .expect("failed to initialize Elysium runtime");
 
     match runtime.eval_module(path, &program) {
         Ok(()) => {}
