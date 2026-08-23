@@ -1,8 +1,8 @@
 # Input
 
-Elysium exposes the pointing device to programs through `ely:input`. The
-pointer has one button — there's no secondary or middle button to check —
-plus a scroll wheel.
+Elysium exposes the pointing device and the keyboard to programs through
+`ely:input`. The pointer has one button — there's no secondary or middle
+button to check — plus a scroll wheel.
 
 Unlike the Framebuffer's draw handler, reading input isn't gated behind a
 registered callback: a program can call any of `ely:input`'s functions from
@@ -36,6 +36,33 @@ addDrawHandler(() => {
   const { x, y } = getPointerPosition();
   const color = isPointerDown() ? Color.Amber400 : Color.Slate600;
   fillRectangle(x - 25, y - 25, 50, 50, color);
+});
+```
+
+The keyboard follows the same polling model, and the same down/up versus
+pressed/released distinction, but for keys instead of a single button.
+Every key a program can ask about is one of `Key`'s named entries — never a
+raw, unconstrained key code — identified by where it sits on the keyboard
+rather than what it prints: `Key.KeyW` is the key in the "W" position on a
+US layout, whatever an AZERTY keyboard happens to label it. That's the
+right choice for the "WASD" kind of movement keys a game cares about, where
+the position matters more than the character; a program that wants the
+actual character typed, subject to the active layout and any modifier keys
+held, isn't what `ely:input` is for.
+
+`isKeyDown()`/`isKeyUp()` report whether a key is currently held, and
+`wasKeyPressed()`/`wasKeyReleased()` report whether it changed state this
+frame — exactly the pointer's distinction, applied per key.
+
+```ts
+import { addUpdateTicker, getDeltaTime } from "ely:lifecycle";
+import { Key, isKeyDown } from "ely:input";
+
+let x = 0;
+addUpdateTicker(() => {
+  const speed = 100; // pixels per second
+  if (isKeyDown(Key.ArrowLeft)) x -= speed * getDeltaTime();
+  if (isKeyDown(Key.ArrowRight)) x += speed * getDeltaTime();
 });
 ```
 
