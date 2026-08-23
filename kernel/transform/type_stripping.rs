@@ -8,7 +8,7 @@ use std::ops::Range;
 use swc_common::sync::Lrc;
 use swc_common::{BytePos, FileName, SourceMap, Span, Spanned};
 use swc_ecma_ast::*;
-use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
+use swc_ecma_parser::{Parser, StringInput, Syntax, TsSyntax, lexer::Lexer};
 use swc_ecma_visit::{Visit, VisitWith};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,7 +109,13 @@ impl Blank {
 /// Keywords that only matter to TypeScript and never affect JS runtime
 /// semantics. `static` is a real ES keyword and must never appear here.
 const MODIFIER_KEYWORDS: &[&str] = &[
-    "declare", "public", "private", "protected", "readonly", "override", "abstract",
+    "declare",
+    "public",
+    "private",
+    "protected",
+    "readonly",
+    "override",
+    "abstract",
 ];
 
 /// Real JS/ES keywords that can appear in the same modifier position but
@@ -459,9 +465,7 @@ impl Stripper {
             ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export_decl)) => {
                 Self::decl_has_value(&export_decl.decl)
             }
-            ModuleItem::ModuleDecl(ModuleDecl::TsImportEquals(import_eq)) => {
-                import_eq.is_export
-            }
+            ModuleItem::ModuleDecl(ModuleDecl::TsImportEquals(import_eq)) => import_eq.is_export,
             _ => true,
         }
     }
@@ -551,6 +555,15 @@ impl Visit for Stripper {
         self.blank_cast_suffix(n.expr.span(), n.span);
     }
 
+    /// `expr as const` parses to its own node distinct from `TsAsExpr`
+    /// (which only covers `expr as SomeType`), so it needs its own override
+    /// — without one, the trailing ` as const` is left as unerased TS
+    /// syntax a JS parser can't read.
+    fn visit_ts_const_assertion(&mut self, n: &TsConstAssertion) {
+        n.expr.visit_with(self);
+        self.blank_cast_suffix(n.expr.span(), n.span);
+    }
+
     fn visit_ts_satisfies_expr(&mut self, n: &TsSatisfiesExpr) {
         n.expr.visit_with(self);
         self.blank_cast_suffix(n.expr.span(), n.span);
@@ -581,9 +594,10 @@ impl Visit for Stripper {
         if Self::module_should_blank(n) {
             self.blank_statement(n.span);
         } else {
-            self.errors.push(StripError::UnsupportedInstantiatedNamespace(
-                self.range(n.span),
-            ));
+            self.errors
+                .push(StripError::UnsupportedInstantiatedNamespace(
+                    self.range(n.span),
+                ));
         }
     }
 
@@ -691,7 +705,9 @@ impl Visit for Stripper {
                 .map(|d| d.span.hi)
                 .unwrap_or(n.class.span.lo);
             let from = self.range(Span::new(scan_from, scan_from)).start;
-            let to = self.range(Span::new(n.ident.span.lo, n.ident.span.lo)).start;
+            let to = self
+                .range(Span::new(n.ident.span.lo, n.ident.span.lo))
+                .start;
             self.blank_modifiers_in_range(from, to, false);
         }
         n.visit_children_with(self);
@@ -960,7 +976,10 @@ mod tests {
 
     #[test]
     fn fixture_asi() {
-        assert_fixture(include_str!("fixtures/asi.ts"), include_str!("fixtures/asi.js"));
+        assert_fixture(
+            include_str!("fixtures/asi.ts"),
+            include_str!("fixtures/asi.js"),
+        );
     }
 
     #[test]
@@ -1036,6 +1055,18 @@ mod tests {
         let input = "const x = 1 as number;";
         let out = strip_types(input).unwrap();
         assert!(!out.contains("as number"));
+        assert_eq!(out.len(), input.len());
+    }
+
+    #[test]
+    fn const_assertion_is_blanked() {
+        // `expr as const` parses to its own `TsConstAssertion` node, distinct
+        // from `TsAsExpr` (`expr as SomeType`) — a separate node the erasure
+        // visitor must handle, or it's left as unerased TS syntax no JS
+        // parser can read.
+        let input = "const x = { a: 1 } as const;";
+        let out = strip_types(input).unwrap();
+        assert!(!out.contains("as const"));
         assert_eq!(out.len(), input.len());
     }
 
