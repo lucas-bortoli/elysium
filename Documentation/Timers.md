@@ -42,5 +42,5 @@ distinguish between them ([2]).
 
 # References
 
-[1] [Per-frame ticking](Loop.md)
+[1] [Per-frame ticking](Lifecycle.md)
 [2] [Multitasking: keeping one program from hanging Elysium](Multitasking.md)

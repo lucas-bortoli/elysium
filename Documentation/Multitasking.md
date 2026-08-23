@@ -58,6 +58,27 @@ itself has no way to know whether it's being driven by a one-shot startup
 run today or a long-lived per-frame kernel loop tomorrow — that decision is
 left to whoever owns the VM.
 
+Because module evaluation is one bounded, synchronous guarded call, a
+program's top-level code can't `await` anything whose resolution depends on
+a later guarded call — a timer, an update ticker, a draw handler — since
+none of those run until evaluation has already returned. Elysium rejects
+such top-level awaits at compile time rather than let them hang. A program
+that needs to do timer-dependent work as part of starting up registers a
+post-init handler ([1]) instead, which runs once the program has finished
+evaluating and those calls are live.
+
+This is a sharper version of an objection raised early in top-level await's
+own design, back when it could still block sibling modules in a dependency
+graph from loading at all: "you've just put your entire app... at the mercy
+of that network request" ([3]). JS engines eventually settled on a design
+where an await deep in one module doesn't stall unrelated modules loading
+alongside it — but that mitigation depends on there being a concurrent
+module graph and an event loop to keep servicing it while one module waits.
+Elysium's one-shot evaluation has neither: there's nothing else running
+during it for a stalled await to yield to, so the original objection applies
+here at full strength rather than the softened one the eventual spec shipped
+with.
+
 Recognizing a timeout took its own bookkeeping, because the engine doesn't
 distinguish an interrupt-triggered exception from an ordinary thrown one in
 any way that's reliably inspectable afterward — both surface as the same
@@ -85,5 +106,6 @@ failure mode this design targets.
 
 # References
 
-[1] [Per-frame ticking](Loop.md)
+[1] [Per-frame ticking](Lifecycle.md)
 [2] [The Framebuffer](Framebuffer.md)
+[3] Rich Harris, [Top-level `await` is a footgun](https://gist.github.com/Rich-Harris/0b6f317657f5167663b493c722647221) (2016; later edited to note TC39's revised design addressed the original concern for JS engines, which have a mitigation Elysium doesn't)

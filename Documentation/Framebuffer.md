@@ -15,12 +15,12 @@ for as long as it stays registered: `addDrawHandler` returns an id, and
 `removeDrawHandler(id)` unregisters it. Drawing calls only take effect from
 inside a currently running draw handler — calling `clearScreen` or
 `fillRectangle` from anywhere else (module top level, a timer, a ticker
-registered through `ely:loop` ([1])) throws a `DrawOutsideHandlerError`
+registered through `ely:lifecycle` ([1])) throws a `DrawOutsideHandlerError`
 rather than silently doing nothing.
 
 ```ts
 import { Color, addDrawHandler, clearScreen, fillRectangle } from "ely:framebuffer";
-import { addUpdateTicker } from "ely:loop";
+import { addUpdateTicker } from "ely:lifecycle";
 
 let x = 0;
 
@@ -41,4 +41,4 @@ ones where they overlap.
 
 # References
 
-[1] [Per-frame ticking](Loop.md)
+[1] [Per-frame ticking](Lifecycle.md)
