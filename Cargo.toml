@@ -7,6 +7,13 @@ edition = "2024"
 name = "elysium"
 path = "kernel/main.rs"
 
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
 [dependencies]
 bytemuck = { version = "1.25.2", features = ["derive"] }
 pollster = "1.0.1"
