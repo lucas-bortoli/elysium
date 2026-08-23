@@ -16,6 +16,11 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 
+/// Elysium's target frame rate. The event loop paces redraws to this,
+/// rather than running as fast as the platform will allow.
+const TARGET_FPS: u32 = 30;
+const FRAME_DURATION: Duration = Duration::from_nanos(1_000_000_000 / TARGET_FPS as u64);
+
 pub struct ElysiumWindow {
     title: String,
     width: u32,
@@ -38,7 +43,7 @@ impl ElysiumWindow {
     /// `Framebuffer` and `ElysiumRuntime` into.
     pub fn run(self, on_frame: impl FnMut(&Arc<Window>, Duration)) {
         let event_loop = EventLoop::new().expect("failed to create the OS event loop");
-        event_loop.set_control_flow(ControlFlow::Poll);
+        event_loop.set_control_flow(ControlFlow::Wait);
 
         let mut app = App {
             title: self.title,
@@ -95,9 +100,28 @@ impl<F: FnMut(&Arc<Window>, Duration)> ApplicationHandler for App<F> {
                 self.last_frame = Some(now);
 
                 (self.on_frame)(&window, dt);
-                window.request_redraw();
+                // The next redraw is scheduled from `about_to_wait`, paced to
+                // `TARGET_FPS`, rather than requested again immediately here.
             }
             _ => {}
+        }
+    }
+
+    /// Called once every event-loop iteration has finished processing,
+    /// right before it goes idle — the seam that paces redraws to
+    /// `TARGET_FPS` instead of running as fast as the platform allows.
+    /// Schedules a wake at the next frame's deadline; once reached, requests
+    /// the redraw that `window_event` uses to update `last_frame` and
+    /// schedule the frame after that.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        let next_frame = self.last_frame.unwrap_or_else(Instant::now) + FRAME_DURATION;
+        if Instant::now() >= next_frame {
+            window.request_redraw();
+        } else {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(next_frame));
         }
     }
 }
