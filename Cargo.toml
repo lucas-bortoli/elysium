@@ -8,9 +8,10 @@ name = "elysium"
 path = "kernel/main.rs"
 
 [dependencies]
+boa_engine = "0.21.1"
+boa_gc = "0.21.1"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 pollster = "1.0.1"
-rquickjs = { version = "0.12.2", features = ["loader"] }
 swc_common = "26.0.0"
 swc_ecma_ast = "29.0.0"
 swc_ecma_parser = "45.0.0"

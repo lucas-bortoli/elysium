@@ -17,7 +17,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use rquickjs::{Ctx, Function, Result};
+use boa_engine::{Context, JsNativeError, JsResult, JsValue, NativeFunction, js_string};
+use boa_gc::{Finalize, Trace, empty_trace};
 use winit::window::Window;
 
 mod colors;
@@ -48,49 +49,89 @@ pub enum DrawCommand {
 /// buffer; neither one touches any drawing state itself, so this file never
 /// needs to know anything about `wgpu`.
 pub fn bootstrap_framebuffer_bindings(
-    ctx: &Ctx<'_>,
+    context: &mut Context,
     draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
-) -> Result<()> {
-    let global = ctx.globals();
+) -> JsResult<()> {
+    let sink = DrawCommandSink(draw_commands);
 
-    {
-        let draw_commands = Rc::clone(&draw_commands);
-        global.set(
-            "__framebuffer_clear_screen",
-            Function::new(ctx.clone(), move |ctx: Ctx<'_>, color: u16| -> Result<()> {
-                let color = resolve_color(&ctx, color)?;
-                draw_commands
-                    .borrow_mut()
-                    .push(DrawCommand::ClearScreen { color });
-                Ok(())
-            })?,
-        )?;
-    }
+    let clear_screen = NativeFunction::from_copy_closure_with_captures(
+        |_this, args, sink, context| {
+            let color = resolve_color(color_arg(args, 0)?, context)?;
+            sink.0.borrow_mut().push(DrawCommand::ClearScreen { color });
+            Ok(JsValue::undefined())
+        },
+        sink.clone(),
+    );
+    context.register_global_builtin_callable(
+        js_string!("__framebuffer_clear_screen"),
+        1,
+        clear_screen,
+    )?;
 
-    global.set(
-        "__framebuffer_fill_rectangle",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, x: f32, y: f32, w: f32, h: f32, color: u16| -> Result<()> {
-                let color = resolve_color(&ctx, color)?;
-                draw_commands
-                    .borrow_mut()
-                    .push(DrawCommand::FillRectangle { x, y, w, h, color });
-                Ok(())
-            },
-        )?,
+    let fill_rectangle = NativeFunction::from_copy_closure_with_captures(
+        |_this, args, sink, context| {
+            let x = f32_arg(args, 0, context)?;
+            let y = f32_arg(args, 1, context)?;
+            let w = f32_arg(args, 2, context)?;
+            let h = f32_arg(args, 3, context)?;
+            let color = resolve_color(color_arg(args, 4)?, context)?;
+            sink.0
+                .borrow_mut()
+                .push(DrawCommand::FillRectangle { x, y, w, h, color });
+            Ok(JsValue::undefined())
+        },
+        sink,
+    );
+    context.register_global_builtin_callable(
+        js_string!("__framebuffer_fill_rectangle"),
+        5,
+        fill_rectangle,
     )?;
 
     Ok(())
+}
+
+/// Thin wrapper making the shared draw-command buffer safe to store as
+/// [`NativeFunction`] closure state: it holds no GC-managed value (a
+/// `DrawCommand` is plain color/coordinate data), so it's sound to tell
+/// Boa's collector there's nothing inside for it to trace.
+#[derive(Clone)]
+struct DrawCommandSink(Rc<RefCell<Vec<DrawCommand>>>);
+
+impl Finalize for DrawCommandSink {}
+// SAFETY: `DrawCommand` never holds a GC-managed value.
+unsafe impl Trace for DrawCommandSink {
+    empty_trace!();
+}
+
+fn color_arg(args: &[JsValue], index: usize) -> JsResult<u16> {
+    args.get(index)
+        .and_then(JsValue::as_number)
+        .map(|n| n as u16)
+        .ok_or_else(|| {
+            JsNativeError::typ()
+                .with_message("expected a color id")
+                .into()
+        })
+}
+
+fn f32_arg(args: &[JsValue], index: usize, context: &mut Context) -> JsResult<f32> {
+    let value = args
+        .get(index)
+        .ok_or_else(|| JsNativeError::typ().with_message("missing argument"))?;
+    Ok(value.to_number(context)? as f32)
 }
 
 /// Resolves a numeric color id (as sent by one of `ely:framebuffer`'s generated
 /// `RED_500`-style constants) to a [`Color`], throwing a `TypeError` if it's
 /// out of range — only reachable if a program bypasses the generated
 /// constants and passes an arbitrary number instead.
-fn resolve_color(ctx: &Ctx<'_>, id: u16) -> Result<Color> {
-    Color::from_id(id)
-        .ok_or_else(|| rquickjs::Exception::throw_type(ctx, &format!("{id} is not a valid color")))
+fn resolve_color(id: u16, _context: &mut Context) -> JsResult<Color> {
+    Color::from_id(id).ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message(format!("{id} is not a valid color"))
+            .into()
+    })
 }
 
 #[repr(C)]

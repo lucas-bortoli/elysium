@@ -1,43 +1,53 @@
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::cell::Cell;
 use std::time::{Duration, Instant};
 
-use rquickjs::function::{Opt, Rest};
-use rquickjs::{Ctx, Function, Persistent, Result, Value};
+use boa_engine::interop::JsRest;
+use boa_engine::object::builtins::JsFunction;
+use boa_engine::{Context, Finalize, IntoJsFunctionCopied, JsResult, JsValue, Trace, js_string};
+use boa_gc::{Gc, GcRefCell};
 
 /// The arguments a due timer's callback is invoked with. Most timers replay
 /// whatever a program passed after the delay (WHATWG's `setTimeout(cb, ms,
 /// ...args)`); `requestAnimationFrame` instead always calls back with a
 /// single timestamp, computed fresh when the timer fires rather than
 /// captured at scheduling time.
-#[derive(Clone)]
+#[derive(Clone, Trace, Finalize)]
 pub enum TimerArgs {
-    User(Vec<Persistent<Value<'static>>>),
+    User(Vec<JsValue>),
     AnimationFrameTimestamp,
 }
 
+#[derive(Trace, Finalize)]
 struct Timer {
     id: u32,
+    #[unsafe_ignore_trace]
     due: Instant,
     /// `Some(period)` for `setInterval` (rescheduled after every firing);
     /// `None` for everything else (`setTimeout`, `setImmediate`,
     /// `requestAnimationFrame`), which fire once and are dropped.
+    #[unsafe_ignore_trace]
     interval: Option<Duration>,
-    callback: Persistent<Function<'static>>,
+    callback: JsFunction,
     args: TimerArgs,
 }
 
 /// The VM's set of pending `setTimeout`/`setInterval`/`setImmediate`/
 /// `requestAnimationFrame` timers, checked once per frame by
 /// [`crate::runtime::ElysiumRuntime::run_due_timers`] rather than on any
-/// finer-grained clock. `Rc`/`Cell`/`RefCell`, not `Arc`/`Mutex`, for the
-/// same reason as `GuardState` in `runtime.rs`: nothing here crosses an OS
-/// thread. A plain `Vec`, scanned linearly for due timers, is deliberately
-/// simple rather than a heap — the number of timers a program keeps live at
-/// once is expected to be small.
+/// finer-grained clock. A plain `Vec`, scanned linearly for due timers, is
+/// deliberately simple rather than a heap — the number of timers a program
+/// keeps live at once is expected to be small. Stored both as a field on
+/// `ElysiumRuntime` and (via [`bootstrap_timers`]) in the `Context`'s native
+/// data map, so native bindings registered with
+/// [`boa_engine::IntoJsFunctionCopied`] — which requires `Copy`, so can't
+/// capture a `Gc` directly — can look the same instance up through
+/// `Context::get_data` instead.
+#[derive(Trace, Finalize)]
 pub struct TimerQueue {
+    #[unsafe_ignore_trace]
     next_id: Cell<u32>,
-    timers: RefCell<Vec<Timer>>,
+    timers: GcRefCell<Vec<Timer>>,
+    #[unsafe_ignore_trace]
     start: Instant,
 }
 
@@ -45,7 +55,7 @@ impl TimerQueue {
     pub fn new() -> Self {
         Self {
             next_id: Cell::new(1),
-            timers: RefCell::new(Vec::new()),
+            timers: GcRefCell::default(),
             start: Instant::now(),
         }
     }
@@ -59,47 +69,41 @@ impl TimerQueue {
     /// Backs `setTimeout`/`setInterval`/`setImmediate`. `delay_ms` is
     /// clamped to be non-negative, per spec (a missing, negative, or `NaN`
     /// delay behaves as `0`).
-    pub fn schedule<'js>(
+    pub fn schedule(
         &self,
-        ctx: &Ctx<'js>,
-        callback: Function<'js>,
+        callback: JsFunction,
         delay_ms: f64,
-        args: Vec<Value<'js>>,
+        args: Vec<JsValue>,
         interval: Option<Duration>,
-    ) -> Result<u32> {
+    ) -> u32 {
         let delay = Duration::from_secs_f64(delay_ms.max(0.0) / 1000.0);
         let id = self.allocate_id();
-        let args = args.into_iter().map(|v| Persistent::save(ctx, v)).collect();
 
         self.timers.borrow_mut().push(Timer {
             id,
             due: Instant::now() + delay,
             interval,
-            callback: Persistent::save(ctx, callback),
+            callback,
             args: TimerArgs::User(args),
         });
 
-        Ok(id)
+        id
     }
 
     /// Backs `requestAnimationFrame`: always fires on the next tick (never
     /// this one, since `run_due_timers` has already taken its snapshot of
     /// due ids by the time script code can call this), and always calls
     /// back with a timestamp rather than replaying caller-supplied args.
-    pub fn schedule_animation_frame<'js>(
-        &self,
-        ctx: &Ctx<'js>,
-        callback: Function<'js>,
-    ) -> Result<u32> {
+    pub fn schedule_animation_frame(&self, callback: JsFunction) -> u32 {
         let id = self.allocate_id();
         self.timers.borrow_mut().push(Timer {
             id,
             due: Instant::now(),
             interval: None,
-            callback: Persistent::save(ctx, callback),
+            callback,
             args: TimerArgs::AnimationFrameTimestamp,
         });
-        Ok(id)
+        id
     }
 
     /// Backs `clearTimeout`/`clearInterval`/`clearImmediate`/
@@ -125,22 +129,19 @@ impl TimerQueue {
     /// `setImmediate`, `requestAnimationFrame`) is removed outright, since
     /// nothing needs it after this firing; a `setInterval` timer is left in
     /// place (its payload cloned out) so that after the callback runs,
-    /// [`Self::is_still_scheduled`] can tell whether the callback cleared
-    /// itself. Returns `None` if `id` was already cleared by an earlier
-    /// callback in this same tick's batch. The borrow this takes is
+    /// [`Self::reschedule_if_still_active`] can tell whether the callback
+    /// cleared itself. Returns `None` if `id` was already cleared by an
+    /// earlier callback in this same tick's batch. The borrow this takes is
     /// released before the caller invokes the callback — no borrow is ever
     /// held across a call into JS, which is what makes `clearInterval`
     /// called reentrantly from within a firing callback safe.
-    pub fn prepare_run(
-        &self,
-        id: u32,
-    ) -> Option<(Persistent<Function<'static>>, TimerArgs, Option<Duration>)> {
+    pub fn prepare_run(&self, id: u32) -> Option<(JsFunction, TimerArgs, Option<Duration>)> {
         let mut timers = self.timers.borrow_mut();
         let index = timers.iter().position(|timer| timer.id == id)?;
 
         if timers[index].interval.is_none() {
             let timer = timers.remove(index);
-            Some((timer.callback, timer.args, None))
+            Some((timer.callback.clone(), timer.args.clone(), None))
         } else {
             let timer = &timers[index];
             Some((timer.callback.clone(), timer.args.clone(), timer.interval))
@@ -164,92 +165,95 @@ impl TimerQueue {
     pub fn elapsed_seconds(&self) -> f64 {
         self.start.elapsed().as_secs_f64()
     }
+}
 
-    /// Drops every pending timer, releasing the `Persistent` callbacks (and
-    /// any `Persistent` args) they hold. Used by `ElysiumRuntime`'s `Drop`
-    /// impl to release these deterministically, through an explicit call
-    /// while the VM is still fully valid, rather than leaving it to
-    /// whichever native-closure finalizer QuickJS happens to run them
-    /// through during its own teardown.
-    pub fn clear_all(&self) {
-        self.timers.borrow_mut().clear();
+/// Wraps the `queueMicrotask` queue so it has a distinct type from any other
+/// `Gc<GcRefCell<Vec<JsFunction>>>` stored in the same `Context`'s native
+/// data map (see [`TimerQueue`]'s doc comment) — `ely:lifecycle`'s
+/// `addPostInitHandler` list, bootstrapped separately in `runtime.rs`, is
+/// shaped identically but must not collide with this one.
+#[derive(Clone, Trace, Finalize, boa_engine::JsData)]
+pub struct Microtasks(pub Gc<GcRefCell<Vec<JsFunction>>>);
+
+fn timer_queue(context: &Context) -> Gc<TimerQueue> {
+    context
+        .get_data::<Gc<TimerQueue>>()
+        .expect("bootstrap_timers must run before any timer global is reachable")
+        .clone()
+}
+
+fn microtasks(context: &Context) -> Gc<GcRefCell<Vec<JsFunction>>> {
+    context
+        .get_data::<Microtasks>()
+        .expect("bootstrap_timers must run before queueMicrotask is reachable")
+        .0
+        .clone()
+}
+
+fn set_timeout(
+    callback: JsFunction,
+    delay: Option<f64>,
+    extra: JsRest<'_>,
+    context: &mut Context,
+) -> u32 {
+    timer_queue(context).schedule(callback, delay.unwrap_or(0.0), extra.0.to_vec(), None)
+}
+
+fn set_interval(
+    callback: JsFunction,
+    delay: Option<f64>,
+    extra: JsRest<'_>,
+    context: &mut Context,
+) -> u32 {
+    let delay_ms = delay.unwrap_or(0.0);
+    let period = Duration::from_secs_f64(delay_ms.max(0.0) / 1000.0);
+    timer_queue(context).schedule(callback, delay_ms, extra.0.to_vec(), Some(period))
+}
+
+fn set_immediate(callback: JsFunction, extra: JsRest<'_>, context: &mut Context) -> u32 {
+    timer_queue(context).schedule(callback, 0.0, extra.0.to_vec(), None)
+}
+
+fn request_animation_frame(callback: JsFunction, context: &mut Context) -> u32 {
+    timer_queue(context).schedule_animation_frame(callback)
+}
+
+fn clear_timer(id: Option<u32>, context: &mut Context) {
+    if let Some(id) = id {
+        timer_queue(context).clear(id);
     }
+}
+
+fn queue_microtask(callback: JsFunction, context: &mut Context) {
+    microtasks(context).borrow_mut().push(callback);
 }
 
 /// Registers `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`,
 /// `setImmediate`, `clearImmediate`, `requestAnimationFrame`,
-/// `cancelAnimationFrame`, and `queueMicrotask` as globals.
-pub fn bootstrap_timers<'js>(
-    ctx: &Ctx<'js>,
-    timers: Rc<TimerQueue>,
-    microtasks: Rc<RefCell<Vec<Persistent<Function<'static>>>>>,
-) -> Result<()> {
-    let global = ctx.globals();
+/// `cancelAnimationFrame`, and `queueMicrotask` as globals, and stores
+/// `timers`/`microtasks` in the `Context`'s native data map so those
+/// globals' native bindings — plain `fn`s registered via
+/// [`boa_engine::IntoJsFunctionCopied`], which requires `Copy` and so can't
+/// capture a `Gc` in a closure — can find them again on every call.
+pub fn bootstrap_timers(
+    context: &mut Context,
+    timers: Gc<TimerQueue>,
+    microtasks: Gc<GcRefCell<Vec<JsFunction>>>,
+) -> JsResult<()> {
+    context.insert_data(timers);
+    context.insert_data(Microtasks(microtasks));
 
-    {
-        let timers = Rc::clone(&timers);
-        global.set(
-            "setTimeout",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'js>,
-                      callback: Function<'js>,
-                      delay: Opt<f64>,
-                      extra: Rest<Value<'js>>|
-                      -> Result<u32> {
-                    timers.schedule(&ctx, callback, delay.0.unwrap_or(0.0), extra.0, None)
-                },
-            )?,
-        )?;
-    }
+    let f = set_timeout.into_js_function_copied(context);
+    context.register_global_builtin_callable(js_string!("setTimeout"), 2, f)?;
 
-    {
-        let timers = Rc::clone(&timers);
-        global.set(
-            "setInterval",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'js>,
-                      callback: Function<'js>,
-                      delay: Opt<f64>,
-                      extra: Rest<Value<'js>>|
-                      -> Result<u32> {
-                    let delay_ms = delay.0.unwrap_or(0.0);
-                    let period = Duration::from_secs_f64(delay_ms.max(0.0) / 1000.0);
-                    timers.schedule(&ctx, callback, delay_ms, extra.0, Some(period))
-                },
-            )?,
-        )?;
-    }
+    let f = set_interval.into_js_function_copied(context);
+    context.register_global_builtin_callable(js_string!("setInterval"), 2, f)?;
 
-    {
-        let timers = Rc::clone(&timers);
-        global.set(
-            "setImmediate",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'js>,
-                      callback: Function<'js>,
-                      extra: Rest<Value<'js>>|
-                      -> Result<u32> {
-                    timers.schedule(&ctx, callback, 0.0, extra.0, None)
-                },
-            )?,
-        )?;
-    }
+    let f = set_immediate.into_js_function_copied(context);
+    context.register_global_builtin_callable(js_string!("setImmediate"), 1, f)?;
 
-    {
-        let timers = Rc::clone(&timers);
-        global.set(
-            "requestAnimationFrame",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'js>, callback: Function<'js>| -> Result<u32> {
-                    timers.schedule_animation_frame(&ctx, callback)
-                },
-            )?,
-        )?;
-    }
+    let f = request_animation_frame.into_js_function_copied(context);
+    context.register_global_builtin_callable(js_string!("requestAnimationFrame"), 1, f)?;
 
     for name in [
         "clearTimeout",
@@ -257,31 +261,12 @@ pub fn bootstrap_timers<'js>(
         "clearImmediate",
         "cancelAnimationFrame",
     ] {
-        let timers = Rc::clone(&timers);
-        global.set(
-            name,
-            Function::new(ctx.clone(), move |id: Opt<u32>| {
-                if let Some(id) = id.0 {
-                    timers.clear(id);
-                }
-            })?,
-        )?;
+        let f = clear_timer.into_js_function_copied(context);
+        context.register_global_builtin_callable(js_string!(name), 1, f)?;
     }
 
-    {
-        let microtasks = Rc::clone(&microtasks);
-        global.set(
-            "queueMicrotask",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'js>, callback: Function<'js>| {
-                    microtasks
-                        .borrow_mut()
-                        .push(Persistent::save(&ctx, callback));
-                },
-            )?,
-        )?;
-    }
+    let f = queue_microtask.into_js_function_copied(context);
+    context.register_global_builtin_callable(js_string!("queueMicrotask"), 1, f)?;
 
     Ok(())
 }

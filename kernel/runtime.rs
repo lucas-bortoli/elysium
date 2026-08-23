@@ -1,34 +1,20 @@
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use rquickjs::function::Rest;
-use rquickjs::loader::FileResolver;
-use rquickjs::{
-    Context, Ctx, Error, Function, Module, Persistent, Result, Runtime as JsRuntime, Type, Value,
+use boa_engine::interop::JsRest;
+use boa_engine::object::builtins::JsFunction;
+use boa_engine::{
+    Context, Finalize, IntoJsFunctionCopied, JsError, JsNativeErrorKind, JsResult, JsValue, Module,
+    Source, Trace, js_string,
 };
+use boa_gc::{Gc, GcRefCell};
 
-use crate::esm_resolver::{CompilingLoader, EmbeddedOrFileResolver, bootstrap_jsx_runtime};
+use crate::esm_resolver::{ElysiumModuleLoader, bootstrap_jsx_runtime};
 use crate::framebuffer::{self, DrawCommand};
 use crate::timers::{TimerArgs, TimerQueue, bootstrap_timers};
 use crate::transform;
-
-/// Deadline bookkeeping shared between `ElysiumRuntime` and the interrupt
-/// handler closure installed on its `JsRuntime`. `Rc`/`Cell` (not
-/// `Arc`/`Mutex`/atomics) are enough since nothing here crosses an OS thread
-/// boundary and the crate's `"parallel"` feature isn't enabled.
-#[derive(Default)]
-struct GuardState {
-    /// `None` when no guarded call is in progress; `Some(deadline)` = the
-    /// absolute instant the current call must finish by.
-    deadline: Cell<Option<Instant>>,
-    /// Set by the interrupt handler itself, the moment *it* decides to
-    /// interrupt — the ground-truth signal `run_guarded` uses to tell "this
-    /// failure was a timeout" apart from "the program threw". Needed because
-    /// rquickjs doesn't distinguish the two at the type level: both come
-    /// back as the same `Error::Exception`.
-    fired: Cell<bool>,
-}
 
 /// The two ways a guarded call into the VM can fail. On `Timeout`, per
 /// Elysium's failure contract, the VM is destroyed but Elysium soldiers on:
@@ -36,41 +22,36 @@ struct GuardState {
 /// reused, while the caller (kernel) continues running everything else. An
 /// `Exception` is just an ordinary uncaught error and carries no such
 /// requirement.
+///
+/// `Timeout` is raised by Boa's loop-iteration limit (see
+/// [`LOOP_ITERATION_LIMIT`]), not a wall-clock deadline — the engine has no
+/// hook for the kernel to interrupt a call mid-execution by elapsed time.
+/// It catches a program stuck in an unbounded loop, but not a single very
+/// expensive (yet loop-bounded, or native-call-heavy) synchronous call.
 #[derive(Debug)]
 pub enum GuardedError {
     Timeout,
     Exception(String),
 }
 
-/// Budget for one top-level module evaluation. Generous relative to
-/// [`FRAME_BUDGET`] since program initialization can legitimately take
-/// longer than a single frame.
-const DEFAULT_EVAL_BUDGET: Duration = Duration::from_secs(5);
-
-/// Budget for one per-frame callback (`update`/`draw`) — tight, since a
-/// program's whole frame budget (kernel included) is a single-digit number
-/// of milliseconds at any reasonable frame rate.
-const FRAME_BUDGET: Duration = Duration::from_millis(16);
+/// A generous cap on loop iterations within any single call into the VM —
+/// the only execution limit Boa exposes to the host. High enough that no
+/// reasonable per-frame `update`/`draw` callback should ever brush against
+/// it, low enough to still bring down a program stuck in an infinite loop
+/// rather than let it spin forever.
+const LOOP_ITERATION_LIMIT: u64 = 10_000_000;
 
 pub struct ElysiumRuntime {
-    /// This and the field below hold [`Persistent`] JS values, which must be
-    /// dropped while `js_runtime` is still alive to free their underlying
-    /// GC-tracked values — struct fields drop in declaration order, so these
-    /// are declared, and therefore dropped, before `context`/`js_runtime`
-    /// below.
-    ///
     /// Pending `setTimeout`/`setInterval`/`setImmediate`/
     /// `requestAnimationFrame` timers, checked each frame by
     /// [`Self::run_due_timers`].
-    timers: Rc<TimerQueue>,
+    timers: Gc<TimerQueue>,
     /// Callbacks queued by `queueMicrotask`, flushed by [`Self::drain_microtasks`].
-    microtasks: Rc<RefCell<Vec<Persistent<Function<'static>>>>>,
+    microtasks: Gc<GcRefCell<Vec<JsFunction>>>,
     /// Callbacks registered by `ely:lifecycle`'s `addPostInitHandler`, run
     /// once by [`Self::run_post_init_handlers`].
-    post_init_handlers: Rc<RefCell<Vec<Persistent<Function<'static>>>>>,
-    guard: Rc<GuardState>,
+    post_init_handlers: Gc<GcRefCell<Vec<JsFunction>>>,
     context: Context,
-    js_runtime: JsRuntime,
 }
 
 impl ElysiumRuntime {
@@ -78,57 +59,36 @@ impl ElysiumRuntime {
     /// `ely:framebuffer`'s hidden globals push onto it directly rather than
     /// touching any drawing state themselves, keeping the VM's own bindings
     /// ignorant of `wgpu`.
-    pub fn new(draw_commands: Rc<RefCell<Vec<DrawCommand>>>) -> Result<Self> {
-        let js_runtime = JsRuntime::new()?;
-
-        let guard = Rc::new(GuardState::default());
-        {
-            let guard = Rc::clone(&guard);
-            js_runtime.set_interrupt_handler(Some(Box::new(move || match guard.deadline.get() {
-                Some(deadline) if Instant::now() >= deadline => {
-                    guard.fired.set(true);
-                    true
-                }
-                _ => false,
-            })));
-        }
-
+    pub fn new(draw_commands: Rc<RefCell<Vec<DrawCommand>>>) -> JsResult<Self> {
         // Programs are TS(X) files on disk; `import`/`export` resolve to
         // sibling `.ts`/`.tsx` files, each compiled (JSX -> h(), then TS
-        // erased) as it's loaded. A bare specifier matching one of
-        // EMBEDDED_RUNTIME_MODULES resolves to that embedded source instead.
-        js_runtime.set_loader(
-            EmbeddedOrFileResolver(
-                FileResolver::default()
-                    .with_pattern("{}.ts")
-                    .with_pattern("{}.tsx"),
-            ),
-            CompilingLoader,
-        );
+        // erased) as it's loaded. A bare specifier matching one of the
+        // embedded runtime modules resolves to that instead.
+        let mut context = Context::builder()
+            .module_loader(Rc::new(ElysiumModuleLoader))
+            .build()?;
 
-        let context = Context::full(&js_runtime)?;
+        context
+            .runtime_limits_mut()
+            .set_loop_iteration_limit(LOOP_ITERATION_LIMIT);
 
-        let timers = Rc::new(TimerQueue::new());
-        let microtasks = Rc::new(RefCell::new(Vec::new()));
-        let post_init_handlers = Rc::new(RefCell::new(Vec::new()));
+        let timers = Gc::new(TimerQueue::new());
+        let microtasks = Gc::new(GcRefCell::new(Vec::new()));
+        let post_init_handlers = Gc::new(GcRefCell::new(Vec::new()));
 
-        context.with(|ctx| -> Result<()> {
-            let global = ctx.globals();
-            global.set("print", Function::new(ctx.clone(), print)?)?;
-            bootstrap_jsx_runtime(&ctx)?;
-            framebuffer::bootstrap_framebuffer_bindings(&ctx, draw_commands)?;
-            bootstrap_timers(&ctx, Rc::clone(&timers), Rc::clone(&microtasks))?;
-            bootstrap_post_init_handlers(&ctx, Rc::clone(&post_init_handlers))?;
-            Ok(())
-        })?;
+        let print_fn = print.into_js_function_copied(&mut context);
+        context.register_global_builtin_callable(js_string!("print"), 0, print_fn)?;
+
+        bootstrap_jsx_runtime(&mut context)?;
+        framebuffer::bootstrap_framebuffer_bindings(&mut context, draw_commands)?;
+        bootstrap_timers(&mut context, timers.clone(), microtasks.clone())?;
+        bootstrap_post_init_handlers(&mut context, post_init_handlers.clone())?;
 
         Ok(Self {
-            js_runtime,
-            context,
-            guard,
             timers,
             microtasks,
             post_init_handlers,
+            context,
         })
     }
 
@@ -139,18 +99,16 @@ impl ElysiumRuntime {
     /// `ely:framebuffer`'s `addDrawHandler`) during evaluation, plus
     /// whatever it wants deferred to after evaluation via
     /// `addPostInitHandler` (see [`Self::run_post_init_handlers`]).
-    /// `transform::compile` already rejects top-level `await` outright, but
-    /// since evaluation still blocks on this module's own completion
-    /// promise, `finish` is remapped to a clearer message on the rare
-    /// rquickjs-level deadlock it exists to prevent.
-    pub fn eval_module(&self, name: &str, source: &str) -> std::result::Result<(), GuardedError> {
+    pub fn eval_module(&mut self, name: &str, source: &str) -> Result<(), GuardedError> {
         let compiled = transform::compile(source).map_err(GuardedError::Exception)?;
+        let path = PathBuf::from(name);
 
-        self.run_guarded(DEFAULT_EVAL_BUDGET, |ctx| {
-            let (_module, promise) = Module::declare(ctx.clone(), name, compiled)?.eval()?;
-            promise.finish::<()>()
+        self.run_guarded(|context| {
+            let src = Source::from_bytes(compiled.as_bytes()).with_path(&path);
+            let module = Module::parse(src, None, context)?;
+            module.load_link_evaluate(context).await_blocking(context)?;
+            Ok(())
         })
-        .map_err(remap_deadlock_error)
     }
 
     /// Runs every callback registered by `ely:lifecycle`'s
@@ -160,13 +118,11 @@ impl ElysiumRuntime {
     /// before the frame loop (and therefore timers) starts running, so a
     /// handler can safely do timer-dependent work a top-level `await`
     /// cannot.
-    pub fn run_post_init_handlers(&self) -> std::result::Result<(), GuardedError> {
+    pub fn run_post_init_handlers(&mut self) -> Result<(), GuardedError> {
         let handlers = self.post_init_handlers.borrow_mut().split_off(0);
         for handler in handlers {
-            let result = self.run_guarded(FRAME_BUDGET, |ctx| {
-                let handler = handler.restore(ctx)?;
-                handler.call::<_, ()>(())
-            });
+            let result =
+                self.run_guarded(move |context| handler.call(&JsValue::undefined(), &[], context));
             self.drain_microtasks();
             result?;
         }
@@ -179,27 +135,21 @@ impl ElysiumRuntime {
     /// completion" discipline every callback into the VM follows.
     /// `setInterval` timers are rescheduled for their next firing after
     /// running, unless their own callback cleared them.
-    pub fn run_due_timers(&self) -> std::result::Result<(), GuardedError> {
+    pub fn run_due_timers(&mut self) -> Result<(), GuardedError> {
         let now = Instant::now();
         for id in self.timers.due_ids(now) {
             let Some((callback, args, interval)) = self.timers.prepare_run(id) else {
                 continue;
             };
 
-            let result = self.run_guarded(FRAME_BUDGET, |ctx| {
-                let callback = callback.restore(ctx)?;
-                match args {
-                    TimerArgs::User(args) => {
-                        let args = args
-                            .into_iter()
-                            .map(|a| a.restore(ctx))
-                            .collect::<Result<Vec<Value>>>()?;
-                        callback.call::<_, ()>((Rest(args),))
-                    }
-                    TimerArgs::AnimationFrameTimestamp => {
-                        callback.call::<_, ()>((self.timers.elapsed_seconds(),))
-                    }
-                }
+            let timers = self.timers.clone();
+            let result = self.run_guarded(move |context| match &args {
+                TimerArgs::User(args) => callback.call(&JsValue::undefined(), args, context),
+                TimerArgs::AnimationFrameTimestamp => callback.call(
+                    &JsValue::undefined(),
+                    &[JsValue::from(timers.elapsed_seconds())],
+                    context,
+                ),
             });
 
             if let Some(period) = interval {
@@ -208,19 +158,17 @@ impl ElysiumRuntime {
 
             self.drain_microtasks();
 
-            if let Err(err) = result {
-                return Err(err);
-            }
+            result?;
         }
         Ok(())
     }
 
     /// Runs every callback queued by `queueMicrotask` (including any that
-    /// queue further callbacks of their own), then drains rquickjs's own
-    /// Promise job queue. Called after every timer callback so a program's
+    /// queue further callbacks of their own), then drains Boa's own
+    /// pending-job queue. Called after every timer callback so a program's
     /// `.then()` chains and `queueMicrotask` calls observe results in the
     /// same tick they should.
-    pub fn drain_microtasks(&self) {
+    pub fn drain_microtasks(&mut self) {
         loop {
             let next = {
                 let mut microtasks = self.microtasks.borrow_mut();
@@ -231,10 +179,9 @@ impl ElysiumRuntime {
                 }
             };
             let Some(callback) = next else { break };
-            if let Err(err) = self.run_guarded(FRAME_BUDGET, |ctx| {
-                let callback = callback.restore(ctx)?;
-                callback.call::<_, ()>(())
-            }) {
+            if let Err(err) =
+                self.run_guarded(move |context| callback.call(&JsValue::undefined(), &[], context))
+            {
                 match err {
                     GuardedError::Timeout => eprintln!("program timed out inside queueMicrotask()"),
                     GuardedError::Exception(err) => {
@@ -244,87 +191,68 @@ impl ElysiumRuntime {
             }
         }
 
-        loop {
-            match self.js_runtime.execute_pending_job() {
-                Ok(false) => break,
-                Ok(true) => continue,
-                Err(job_exception) => eprintln!("uncaught (in promise): {job_exception}"),
-            }
+        while let Err(err) = self.context.run_jobs() {
+            eprintln!("uncaught (in promise): {err}");
         }
     }
 
-    /// The one entry point every call into this VM goes through. Sets a
-    /// deadline before running `f`, clears it after, and — on failure —
-    /// distinguishes "the interrupt handler fired" (`Timeout`) from any
-    /// other thrown/returned error (`Exception`) via [`GuardState::fired`].
+    /// The one entry point every call into this VM goes through: runs `f`
+    /// against the VM's `Context` and, on failure, distinguishes the
+    /// loop-iteration limit firing (`Timeout`) from any other thrown or
+    /// returned error (`Exception`).
     fn run_guarded<T>(
-        &self,
-        budget: Duration,
-        f: impl FnOnce(&Ctx<'_>) -> Result<T>,
-    ) -> std::result::Result<T, GuardedError> {
-        self.guard.fired.set(false);
-        self.guard.deadline.set(Some(Instant::now() + budget));
+        &mut self,
+        f: impl FnOnce(&mut Context) -> JsResult<T>,
+    ) -> Result<T, GuardedError> {
+        f(&mut self.context).map_err(|err| self.classify_error(err))
+    }
 
-        let result = self
-            .context
-            .with(|ctx| -> std::result::Result<T, GuardedError> {
-                f(&ctx).map_err(|err| {
-                    if self.guard.fired.get() {
-                        GuardedError::Timeout
-                    } else {
-                        GuardedError::Exception(describe_exception(&ctx, err))
-                    }
-                })
-            });
-
-        self.guard.deadline.set(None);
-        result
+    fn classify_error(&mut self, err: JsError) -> GuardedError {
+        if let Ok(native) = err.try_native(&mut self.context)
+            && matches!(native.kind, JsNativeErrorKind::RuntimeLimit)
+        {
+            return GuardedError::Timeout;
+        }
+        GuardedError::Exception(err.to_string())
     }
 }
 
-impl Drop for ElysiumRuntime {
-    /// Releases every `Persistent` value this VM's timer/microtask
-    /// machinery is still holding, deterministically, before the natural
-    /// field-by-field drop starts tearing down `context`/`js_runtime`.
-    /// `timers` and `microtasks` are also captured (as `Rc` clones) inside
-    /// the `setTimeout`/`queueMicrotask`/etc. closures registered as
-    /// globals, so without this, a `Persistent` left in either one only
-    /// gets freed once those closures themselves are freed — which happens
-    /// from inside a native-closure finalizer during `JS_FreeRuntime`'s own
-    /// GC sweep, a context QuickJS's internal bookkeeping doesn't tolerate
-    /// freeing further values from. Running this through an ordinary
-    /// `context.with` first avoids that entirely.
-    fn drop(&mut self) {
-        self.context.with(|_ctx| {
-            self.timers.clear_all();
-            self.microtasks.borrow_mut().clear();
-        });
-    }
+/// Wraps `ely:lifecycle`'s `addPostInitHandler` list so it has a distinct
+/// type from `ely:framebuffer`'s `queueMicrotask` list (see
+/// [`crate::timers::Microtasks`]'s doc comment) in the `Context`'s native
+/// data map — both are a `Gc<GcRefCell<Vec<JsFunction>>>`.
+#[derive(Clone, Trace, Finalize, boa_engine::JsData)]
+struct PostInitHandlers(Gc<GcRefCell<Vec<JsFunction>>>);
+
+/// Registers `__add_post_init_handler` (wrapped by `ely:lifecycle`'s
+/// `addPostInitHandler`) as a global that appends onto `handlers`.
+fn bootstrap_post_init_handlers(
+    context: &mut Context,
+    handlers: Gc<GcRefCell<Vec<JsFunction>>>,
+) -> JsResult<()> {
+    context.insert_data(PostInitHandlers(handlers));
+    let f = add_post_init_handler.into_js_function_copied(context);
+    context.register_global_builtin_callable(js_string!("__add_post_init_handler"), 1, f)?;
+    Ok(())
+}
+
+fn add_post_init_handler(handler: JsFunction, context: &mut Context) {
+    context
+        .get_data::<PostInitHandlers>()
+        .expect("bootstrap_post_init_handlers must run first")
+        .0
+        .borrow_mut()
+        .push(handler);
 }
 
 /// Host binding for `print(...values)`: writes any number of JS values,
 /// space-separated, to stdout.
-/// Registers `__add_post_init_handler` (wrapped by `ely:lifecycle`'s
-/// `addPostInitHandler`) as a global that appends onto `handlers`, mirroring
-/// `bootstrap_timers`' `queueMicrotask` registration.
-fn bootstrap_post_init_handlers<'js>(
-    ctx: &Ctx<'js>,
-    handlers: Rc<RefCell<Vec<Persistent<Function<'static>>>>>,
-) -> Result<()> {
-    ctx.globals().set(
-        "__add_post_init_handler",
-        Function::new(ctx.clone(), move |ctx: Ctx<'js>, handler: Function<'js>| {
-            handlers.borrow_mut().push(Persistent::save(&ctx, handler));
-        })?,
-    )
-}
-
-fn print<'js>(ctx: Ctx<'js>, values: Rest<Value<'js>>) -> Result<()> {
+fn print(values: JsRest<'_>, context: &mut Context) -> JsResult<()> {
     let line = values
         .0
-        .into_iter()
-        .map(|v| describe_value(&ctx, v))
-        .collect::<Result<Vec<_>>>()?
+        .iter()
+        .map(|v| describe_value(v, context))
+        .collect::<JsResult<Vec<_>>>()?
         .join(" ");
     println!("{line}");
     Ok(())
@@ -336,52 +264,58 @@ fn print<'js>(ctx: Ctx<'js>, values: Rest<Value<'js>>) -> Result<()> {
 /// objects. Values JSON can't represent (`undefined`, functions, symbols) or
 /// that fail to stringify (circular references, bigints) fall back to a
 /// short placeholder rather than erroring the whole call.
-fn describe_value<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<String> {
+fn describe_value(value: &JsValue, context: &mut Context) -> JsResult<String> {
     Ok(match value.type_of() {
-        Type::String => value.get::<String>()?,
-        Type::Undefined | Type::Uninitialized => "undefined".to_string(),
-        Type::Function | Type::Constructor => "[Function]".to_string(),
-        Type::Symbol => "[Symbol]".to_string(),
-        _ => match ctx.json_stringify_replacer_space(value, Value::new_null(ctx.clone()), 2) {
-            Ok(Some(json)) => json.to_string()?,
+        "string" => value
+            .as_string()
+            .expect("type_of() == \"string\" implies as_string() succeeds")
+            .to_std_string_escaped(),
+        "undefined" => "undefined".to_string(),
+        "function" => "[Function]".to_string(),
+        "symbol" => "[Symbol]".to_string(),
+        _ => match json_stringify(value, context) {
+            Ok(Some(json)) => json,
             Ok(None) => "undefined".to_string(),
             Err(_) => "[unprintable value]".to_string(),
         },
     })
 }
 
-fn describe_exception(ctx: &Ctx<'_>, err: Error) -> String {
-    if let Error::Exception = err {
-        ctx.catch().as_exception().unwrap().to_string()
-    } else {
-        err.to_string()
-    }
-}
+/// Calls the global `JSON.stringify(value, null, 2)`, returning `None` for
+/// the (JSON-legal) case where stringification itself yields `undefined`
+/// (e.g. stringifying `undefined` at the top level).
+fn json_stringify(value: &JsValue, context: &mut Context) -> JsResult<Option<String>> {
+    let json = context.global_object().get(js_string!("JSON"), context)?;
+    let json = json
+        .as_object()
+        .expect("the JSON global object always exists");
+    let stringify = json.get(js_string!("stringify"), context)?;
+    let stringify = stringify
+        .as_function()
+        .expect("JSON.stringify is always a function");
 
-/// `transform::compile` already rejects top-level `await` at compile time,
-/// but as a fallback, catches rquickjs's own deadlock exception here too —
-/// the only signal available, since rquickjs doesn't distinguish this case
-/// at the type level (same reasoning as `GuardedError`'s `Timeout` vs
-/// `Exception` split above) — and remaps it to something that actually
-/// tells the program author what to do about it.
-fn remap_deadlock_error(err: GuardedError) -> GuardedError {
-    match err {
-        GuardedError::Exception(message) if message.contains("dead lock") => {
-            GuardedError::Exception(
-                "top-level await only supports work that resolves synchronously during module \
-                 evaluation (e.g. an already-resolved promise) — timers, tickers, and draw \
-                 handlers aren't running yet. Use `addPostInitHandler` from `ely:lifecycle` to \
-                 defer this to after initialization."
-                    .to_string(),
-            )
-        }
-        other => other,
-    }
+    let result = stringify.call(
+        &JsValue::undefined(),
+        &[value.clone(), JsValue::null(), JsValue::from(2)],
+        context,
+    )?;
+
+    Ok(if result.is_undefined() {
+        None
+    } else {
+        Some(
+            result
+                .as_string()
+                .expect("JSON.stringify returns a string")
+                .to_std_string_escaped(),
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use rquickjs::FromJs;
+    use boa_engine::JsString;
+    use boa_engine::value::TryFromJs;
 
     use super::*;
 
@@ -391,7 +325,7 @@ mod tests {
     /// a plain script body to leave something this helper can inspect
     /// afterward.
     fn eval(source: &str) -> ElysiumRuntime {
-        let runtime = ElysiumRuntime::new(Rc::new(RefCell::new(Vec::new())))
+        let mut runtime = ElysiumRuntime::new(Rc::new(RefCell::new(Vec::new())))
             .expect("failed to construct runtime");
         runtime
             .eval_module("test.ts", source)
@@ -399,48 +333,48 @@ mod tests {
         runtime
     }
 
-    fn global<T>(runtime: &ElysiumRuntime, name: &str) -> T
-    where
-        T: for<'js> FromJs<'js>,
-    {
-        runtime
-            .context
-            .with(|ctx| ctx.globals().get::<_, T>(name))
-            .expect("failed to read global")
+    fn global<T: TryFromJs>(runtime: &mut ElysiumRuntime, name: &str) -> T {
+        let object = runtime.context.global_object();
+        let value = object
+            .get(JsString::from(name), &mut runtime.context)
+            .expect("failed to read global");
+        value
+            .try_js_into(&mut runtime.context)
+            .expect("failed to convert global")
     }
 
     #[test]
     fn set_timeout_fires_once_due() {
-        let runtime =
+        let mut runtime =
             eval("globalThis.fired = false; setTimeout(() => { globalThis.fired = true; }, 0);");
-        assert!(!global::<bool>(&runtime, "fired"), "fired before due");
+        assert!(!global::<bool>(&mut runtime, "fired"), "fired before due");
         runtime.run_due_timers().unwrap();
-        assert!(global::<bool>(&runtime, "fired"), "fired after due");
+        assert!(global::<bool>(&mut runtime, "fired"), "fired after due");
     }
 
     #[test]
     fn set_timeout_does_not_fire_before_its_delay() {
-        let runtime = eval(
+        let mut runtime = eval(
             "globalThis.fired = false; setTimeout(() => { globalThis.fired = true; }, 60_000);",
         );
         runtime.run_due_timers().unwrap();
-        assert!(!global::<bool>(&runtime, "fired"));
+        assert!(!global::<bool>(&mut runtime, "fired"));
     }
 
     #[test]
     fn clear_timeout_prevents_firing() {
-        let runtime = eval(
+        let mut runtime = eval(
             "globalThis.fired = false; \
              const id = setTimeout(() => { globalThis.fired = true; }, 0); \
              clearTimeout(id);",
         );
         runtime.run_due_timers().unwrap();
-        assert!(!global::<bool>(&runtime, "fired"));
+        assert!(!global::<bool>(&mut runtime, "fired"));
     }
 
     #[test]
     fn set_interval_reschedules_until_cleared() {
-        let runtime = eval(
+        let mut runtime = eval(
             "globalThis.count = 0; \
              const id = setInterval(() => { \
                  globalThis.count += 1; \
@@ -450,41 +384,41 @@ mod tests {
         for _ in 0..5 {
             runtime.run_due_timers().unwrap();
         }
-        assert_eq!(global::<f64>(&runtime, "count"), 3.0);
+        assert_eq!(global::<f64>(&mut runtime, "count"), 3.0);
     }
 
     #[test]
     fn set_immediate_fires_on_next_tick() {
-        let runtime =
+        let mut runtime =
             eval("globalThis.fired = false; setImmediate(() => { globalThis.fired = true; });");
         runtime.run_due_timers().unwrap();
-        assert!(global::<bool>(&runtime, "fired"));
+        assert!(global::<bool>(&mut runtime, "fired"));
     }
 
     #[test]
     fn request_animation_frame_receives_a_timestamp() {
-        let runtime = eval(
+        let mut runtime = eval(
             "globalThis.timestamp = -1; \
              requestAnimationFrame((t) => { globalThis.timestamp = t; });",
         );
         runtime.run_due_timers().unwrap();
-        assert!(global::<f64>(&runtime, "timestamp") >= 0.0);
+        assert!(global::<f64>(&mut runtime, "timestamp") >= 0.0);
     }
 
     #[test]
     fn cancel_animation_frame_prevents_firing() {
-        let runtime = eval(
+        let mut runtime = eval(
             "globalThis.fired = false; \
              const id = requestAnimationFrame(() => { globalThis.fired = true; }); \
              cancelAnimationFrame(id);",
         );
         runtime.run_due_timers().unwrap();
-        assert!(!global::<bool>(&runtime, "fired"));
+        assert!(!global::<bool>(&mut runtime, "fired"));
     }
 
     #[test]
     fn queue_microtask_runs_in_order_including_self_queued_work() {
-        let runtime = eval(
+        let mut runtime = eval(
             "globalThis.order = ''; \
              queueMicrotask(() => { \
                  globalThis.order += '1'; \
@@ -493,34 +427,34 @@ mod tests {
              queueMicrotask(() => { globalThis.order += 'a'; });",
         );
         runtime.drain_microtasks();
-        assert_eq!(global::<String>(&runtime, "order"), "1a2");
+        assert_eq!(global::<String>(&mut runtime, "order"), "1a2");
     }
 
     #[test]
     fn promise_then_resolves_after_draining_microtasks() {
-        let runtime = eval(
+        let mut runtime = eval(
             "globalThis.resolved = false; \
              Promise.resolve().then(() => { globalThis.resolved = true; });",
         );
         runtime.drain_microtasks();
-        assert!(global::<bool>(&runtime, "resolved"));
+        assert!(global::<bool>(&mut runtime, "resolved"));
     }
 
     #[test]
     fn timer_callback_can_use_a_promise() {
-        let runtime = eval(
+        let mut runtime = eval(
             "globalThis.resolved = false; \
              setTimeout(() => { \
                  Promise.resolve().then(() => { globalThis.resolved = true; }); \
              }, 0);",
         );
         runtime.run_due_timers().unwrap();
-        assert!(global::<bool>(&runtime, "resolved"));
+        assert!(global::<bool>(&mut runtime, "resolved"));
     }
 
     #[test]
     fn async_function_resumes_after_an_awaited_timer_resolves() {
-        let runtime = eval(
+        let mut runtime = eval(
             "globalThis.done = false; \
              async function run() { \
                  await new Promise((resolve) => setTimeout(resolve, 0)); \
@@ -528,17 +462,20 @@ mod tests {
              } \
              run();",
         );
-        assert!(!global::<bool>(&runtime, "done"), "shouldn't resume yet");
+        assert!(
+            !global::<bool>(&mut runtime, "done"),
+            "shouldn't resume yet"
+        );
         runtime.run_due_timers().unwrap();
         assert!(
-            global::<bool>(&runtime, "done"),
+            global::<bool>(&mut runtime, "done"),
             "should resume once the awaited timer fires"
         );
     }
 
     #[test]
     fn async_function_return_value_is_observable_via_then() {
-        let runtime = eval(
+        let mut runtime = eval(
             "globalThis.result = ''; \
              async function greeting() { \
                  await Promise.resolve(); \
@@ -547,12 +484,12 @@ mod tests {
              greeting().then((value) => { globalThis.result = value; });",
         );
         runtime.drain_microtasks();
-        assert_eq!(global::<String>(&runtime, "result"), "hi");
+        assert_eq!(global::<String>(&mut runtime, "result"), "hi");
     }
 
     #[test]
     fn draw_calls_outside_a_handler_throw_draw_outside_handler_error() {
-        let runtime = eval(
+        let mut runtime = eval(
             "import { clearScreen, DrawOutsideHandlerError } from 'ely:framebuffer'; \
              globalThis.threw = false; \
              globalThis.correctType = false; \
@@ -563,13 +500,13 @@ mod tests {
                  globalThis.correctType = err instanceof DrawOutsideHandlerError; \
              }",
         );
-        assert!(global::<bool>(&runtime, "threw"));
-        assert!(global::<bool>(&runtime, "correctType"));
+        assert!(global::<bool>(&mut runtime, "threw"));
+        assert!(global::<bool>(&mut runtime, "correctType"));
     }
 
     #[test]
     fn draw_calls_inside_a_registered_handler_succeed() {
-        let runtime = eval(
+        let mut runtime = eval(
             "import { clearScreen, addDrawHandler, Color } from 'ely:framebuffer'; \
              globalThis.drawn = false; \
              addDrawHandler(() => { \
@@ -578,12 +515,12 @@ mod tests {
              });",
         );
         runtime.run_due_timers().unwrap();
-        assert!(global::<bool>(&runtime, "drawn"));
+        assert!(global::<bool>(&mut runtime, "drawn"));
     }
 
     #[test]
     fn update_ticker_fires_once_per_frame_with_a_delta_time() {
-        let runtime = eval(
+        let mut runtime = eval(
             "import { addUpdateTicker } from 'ely:lifecycle'; \
              globalThis.calls = 0; \
              globalThis.lastDt = -1; \
@@ -594,14 +531,14 @@ mod tests {
         );
         for expected_calls in 1..=3 {
             runtime.run_due_timers().unwrap();
-            assert_eq!(global::<f64>(&runtime, "calls"), expected_calls as f64);
-            assert!(global::<f64>(&runtime, "lastDt") >= 0.0);
+            assert_eq!(global::<f64>(&mut runtime, "calls"), expected_calls as f64);
+            assert!(global::<f64>(&mut runtime, "lastDt") >= 0.0);
         }
     }
 
     #[test]
     fn remove_update_ticker_stops_further_calls() {
-        let runtime = eval(
+        let mut runtime = eval(
             "import { addUpdateTicker, removeUpdateTicker } from 'ely:lifecycle'; \
              globalThis.calls = 0; \
              const id = addUpdateTicker(() => { \
@@ -612,12 +549,12 @@ mod tests {
         for _ in 0..3 {
             runtime.run_due_timers().unwrap();
         }
-        assert_eq!(global::<f64>(&runtime, "calls"), 1.0);
+        assert_eq!(global::<f64>(&mut runtime, "calls"), 1.0);
     }
 
     #[test]
     fn post_init_handler_runs_once_after_eval_and_sees_working_timers() {
-        let runtime = eval(
+        let mut runtime = eval(
             "import { addPostInitHandler, delay } from 'ely:lifecycle'; \
              globalThis.ran = false; \
              globalThis.timerFired = false; \
@@ -628,45 +565,22 @@ mod tests {
              });",
         );
         assert!(
-            !global::<bool>(&runtime, "ran"),
+            !global::<bool>(&mut runtime, "ran"),
             "must not run during eval_module itself"
         );
 
         runtime.run_post_init_handlers().unwrap();
-        assert!(global::<bool>(&runtime, "ran"));
+        assert!(global::<bool>(&mut runtime, "ran"));
         assert!(
-            !global::<bool>(&runtime, "timerFired"),
+            !global::<bool>(&mut runtime, "timerFired"),
             "the delay(0) timer hasn't been serviced yet"
         );
 
         runtime.run_due_timers().unwrap();
-        assert!(global::<bool>(&runtime, "timerFired"));
+        assert!(global::<bool>(&mut runtime, "timerFired"));
 
         // A second call must not re-run anything: the handler list was
         // drained, not just iterated.
         runtime.run_post_init_handlers().unwrap();
-    }
-
-    #[test]
-    fn deadlock_exception_is_remapped_to_a_clear_message() {
-        let remapped = remap_deadlock_error(GuardedError::Exception(
-            "Error blocking on a promise resulted in a dead lock".to_string(),
-        ));
-        match remapped {
-            GuardedError::Exception(message) => {
-                assert!(message.contains("addPostInitHandler"));
-                assert!(message.contains("ely:lifecycle"));
-            }
-            GuardedError::Timeout => panic!("expected an Exception"),
-        }
-    }
-
-    #[test]
-    fn unrelated_exceptions_are_not_remapped() {
-        let remapped = remap_deadlock_error(GuardedError::Exception("boom".to_string()));
-        match remapped {
-            GuardedError::Exception(message) => assert_eq!(message, "boom"),
-            GuardedError::Timeout => panic!("expected an Exception"),
-        }
     }
 }

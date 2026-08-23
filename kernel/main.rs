@@ -25,7 +25,7 @@ fn main() {
     let path = path.to_str().expect("binary path is not valid UTF-8");
 
     let draw_commands = Rc::new(RefCell::new(Vec::new()));
-    let runtime = ElysiumRuntime::new(Rc::clone(&draw_commands))
+    let mut runtime = ElysiumRuntime::new(Rc::clone(&draw_commands))
         .expect("failed to initialize Elysium runtime");
 
     if let Err(err) = runtime.eval_module(path, &program) {

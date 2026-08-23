@@ -1,5 +1,10 @@
-use rquickjs::loader::{FileResolver, ImportAttributes, Loader, Resolver};
-use rquickjs::{Ctx, Error, Module, Result, Value};
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
+use boa_engine::module::{Module, ModuleLoader, Referrer};
+use boa_engine::property::Attribute;
+use boa_engine::{Context, JsNativeError, JsResult, JsString, Source, js_string};
 
 use crate::transform;
 
@@ -25,7 +30,7 @@ const EMBEDDED_RUNTIME_MODULES: &[(&str, &str)] = &[
 /// The namespace every VM-owned module lives under, whether a program
 /// reaches it via an explicit `"ely:<name>"` import or (for `jsx`) an
 /// internal bare-specifier rewrite — chosen so it can never collide with
-/// anything [`FileResolver`] would resolve a real on-disk import to.
+/// anything on-disk module resolution would resolve a real import to.
 const EMBEDDED_MODULE_SCHEME: &str = "ely:";
 
 fn embedded_module_source(name: &str) -> Option<&'static str> {
@@ -38,76 +43,101 @@ fn embedded_module_source(name: &str) -> Option<&'static str> {
 /// Evaluates the embedded `"jsx"` runtime module and copies its exports
 /// (`h`, `Fragment`) onto the global object, so every program gets them for
 /// free instead of needing an explicit import.
-pub fn bootstrap_jsx_runtime(ctx: &Ctx<'_>) -> Result<()> {
-    let (module, promise) = declare_embedded_module(ctx, "jsx")?.eval()?;
-    promise.finish::<()>()?;
+pub fn bootstrap_jsx_runtime(context: &mut Context) -> JsResult<()> {
+    let module = declare_embedded_module("jsx", context)?;
+    module.load_link_evaluate(context).await_blocking(context)?;
 
-    let namespace = module.namespace()?;
-    let global = ctx.globals();
-    global.set("h", namespace.get::<_, Value>("h")?)?;
-    global.set("Fragment", namespace.get::<_, Value>("Fragment")?)?;
+    let h = module.get_value(js_string!("h"), context)?;
+    let fragment = module.get_value(js_string!("Fragment"), context)?;
+
+    let attribute = Attribute::WRITABLE | Attribute::ENUMERABLE | Attribute::CONFIGURABLE;
+    context.register_global_property(js_string!("h"), h, attribute)?;
+    context.register_global_property(js_string!("Fragment"), fragment, attribute)?;
     Ok(())
 }
 
-/// Compiles and declares (but doesn't evaluate) the embedded runtime module
+/// Compiles and parses (but doesn't evaluate) the embedded runtime module
 /// registered under `name` in [`EMBEDDED_RUNTIME_MODULES`].
-fn declare_embedded_module<'js>(ctx: &Ctx<'js>, name: &str) -> Result<Module<'js>> {
+fn declare_embedded_module(name: &str, context: &mut Context) -> JsResult<Module> {
     let module_name = format!("{EMBEDDED_MODULE_SCHEME}{name}");
-    let source = embedded_module_source(name).ok_or_else(|| Error::new_loading(&module_name))?;
+    let source = embedded_module_source(name).ok_or_else(|| {
+        JsNativeError::typ().with_message(format!("unknown embedded module `{module_name}`"))
+    })?;
     let compiled =
-        transform::compile(source).map_err(|err| Error::new_loading_message(&module_name, err))?;
-    Module::declare(ctx.clone(), module_name, compiled)
+        transform::compile(source).map_err(|err| JsNativeError::syntax().with_message(err))?;
+    let path = PathBuf::from(&module_name);
+    let src = Source::from_bytes(compiled.as_bytes()).with_path(&path);
+    Module::parse(src, None, context)
 }
 
-/// Resolves specifiers naming a [`EMBEDDED_RUNTIME_MODULES`] entry to its
-/// canonical `ely:`-prefixed form — either because a program already wrote
-/// it out explicitly (`"ely:framebuffer"`, passed through unchanged) or because
-/// it's a bare specifier this rewrites internally (`"jsx"` -> `"ely:jsx"`,
-/// today used only by `jsx`'s global bootstrap, not written by programs).
-/// Everything else (relative imports, unrecognized bare specifiers) falls
-/// through to the wrapped [`FileResolver`].
-pub struct EmbeddedOrFileResolver(pub FileResolver);
-
-impl Resolver for EmbeddedOrFileResolver {
-    fn resolve<'js>(
-        &mut self,
-        ctx: &Ctx<'js>,
-        base: &str,
-        name: &str,
-        attributes: Option<ImportAttributes<'js>>,
-    ) -> Result<String> {
-        if let Some(embedded_name) = name.strip_prefix(EMBEDDED_MODULE_SCHEME) {
-            if embedded_module_source(embedded_name).is_some() {
-                return Ok(name.to_string());
-            }
-        } else if !name.starts_with('.') && embedded_module_source(name).is_some() {
-            return Ok(format!("{EMBEDDED_MODULE_SCHEME}{name}"));
-        }
-        self.0.resolve(ctx, base, name, attributes)
-    }
-}
-
-/// Loads a module by name: an `ely:`-prefixed name comes from
-/// Either way the source is compiled (JSX -> `h()`, then TypeScript erased)
-/// before being handed to QuickJS; `import`/`export` are left alone by
+/// Resolves and loads a program's modules: an `ely:`-prefixed or bare
+/// embedded-module-name specifier resolves to the matching
+/// [`EMBEDDED_RUNTIME_MODULES`] entry; everything else is read from disk,
+/// resolved relative to the referrer, trying the specifier as written, then
+/// with a `.ts` suffix, then `.tsx` (programs import sibling TS(X) files by
+/// bare name, e.g. `import x from "./foo"` resolving to `./foo.ts`). Either
+/// way the source is compiled (JSX -> `h()`, then TypeScript erased) before
+/// being handed to Boa; `import`/`export` are left alone by
 /// `transform::compile`, so the compiled text is still valid module source.
-pub struct CompilingLoader;
+pub struct ElysiumModuleLoader;
 
-impl Loader for CompilingLoader {
-    fn load<'js>(
-        &mut self,
-        ctx: &Ctx<'js>,
-        path: &str,
-        _attributes: Option<ImportAttributes<'js>>,
-    ) -> Result<Module<'js>> {
-        if let Some(name) = path.strip_prefix(EMBEDDED_MODULE_SCHEME) {
-            return declare_embedded_module(ctx, name);
-        }
+impl ModuleLoader for ElysiumModuleLoader {
+    fn load_imported_module(
+        self: Rc<Self>,
+        referrer: Referrer,
+        specifier: JsString,
+        context: &RefCell<&mut Context>,
+    ) -> impl Future<Output = JsResult<Module>> {
+        let result = (|| -> JsResult<Module> {
+            let specifier = specifier.to_std_string_escaped();
 
-        let source = std::fs::read_to_string(path)
-            .map_err(|err| Error::new_loading_message(path, err.to_string()))?;
-        let compiled =
-            transform::compile(&source).map_err(|err| Error::new_loading_message(path, err))?;
-        Module::declare(ctx.clone(), path, compiled)
+            if let Some(embedded_name) = specifier.strip_prefix(EMBEDDED_MODULE_SCHEME) {
+                return declare_embedded_module(embedded_name, &mut context.borrow_mut());
+            }
+            if !specifier.starts_with('.') && embedded_module_source(&specifier).is_some() {
+                return declare_embedded_module(&specifier, &mut context.borrow_mut());
+            }
+
+            let path = resolve_file_path(referrer.path(), &specifier)?;
+            let source = std::fs::read_to_string(&path).map_err(|err| {
+                JsNativeError::typ()
+                    .with_message(format!("could not read `{}`: {err}", path.display()))
+            })?;
+            let compiled = transform::compile(&source)
+                .map_err(|err| JsNativeError::syntax().with_message(err))?;
+            let src = Source::from_bytes(compiled.as_bytes()).with_path(&path);
+            Module::parse(src, None, &mut context.borrow_mut())
+        })();
+
+        async { result }
     }
+}
+
+/// Resolves `specifier` relative to `referrer_path`'s directory, trying it
+/// as written first, then with a `.ts` suffix, then `.tsx`.
+fn resolve_file_path(referrer_path: Option<&Path>, specifier: &str) -> JsResult<PathBuf> {
+    let referrer_dir = referrer_path
+        .and_then(Path::parent)
+        .unwrap_or(Path::new(""));
+    let joined = referrer_dir.join(specifier);
+
+    for candidate in [
+        joined.clone(),
+        joined.with_file_name(format!(
+            "{}.ts",
+            joined.file_name().unwrap_or_default().to_string_lossy()
+        )),
+        joined.with_file_name(format!(
+            "{}.tsx",
+            joined.file_name().unwrap_or_default().to_string_lossy()
+        )),
+    ] {
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(JsNativeError::typ()
+        .with_message(format!("could not resolve module `{specifier}`"))
+        .into())
 }
