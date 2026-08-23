@@ -11,6 +11,7 @@ use rquickjs::{
 };
 
 use crate::framebuffer::DrawCommand;
+use crate::timers::{TimerArgs, TimerQueue, bootstrap_timers};
 use crate::transform;
 
 /// TS(X) modules that belong to the VM itself rather than a user program, so
@@ -67,6 +68,7 @@ struct GuardState {
 /// reused, while the caller (kernel) continues running everything else. An
 /// `Exception` is just an ordinary uncaught error and carries no such
 /// requirement.
+#[derive(Debug)]
 pub enum GuardedError {
     Timeout,
     Exception(String),
@@ -83,13 +85,25 @@ const DEFAULT_EVAL_BUDGET: Duration = Duration::from_secs(5);
 const FRAME_BUDGET: Duration = Duration::from_millis(16);
 
 pub struct ElysiumRuntime {
-    _js_runtime: JsRuntime,
-    context: Context,
-    guard: Rc<GuardState>,
     /// The entry module's namespace object, retained across calls so
     /// `call_function` can look up `update`/`draw` on it after `eval_module`
     /// returns. `None` until `eval_module` succeeds.
+    ///
+    /// This and the two fields below hold [`Persistent`] JS values, which
+    /// must be dropped while `js_runtime` is still alive to free their
+    /// underlying GC-tracked values — struct fields drop in declaration
+    /// order, so these are declared, and therefore dropped, before
+    /// `context`/`js_runtime` below.
     module_namespace: RefCell<Option<Persistent<Object<'static>>>>,
+    /// Pending `setTimeout`/`setInterval`/`setImmediate`/
+    /// `requestAnimationFrame` timers, checked each frame by
+    /// [`Self::run_due_timers`].
+    timers: Rc<TimerQueue>,
+    /// Callbacks queued by `queueMicrotask`, flushed by [`Self::drain_microtasks`].
+    microtasks: Rc<RefCell<Vec<Persistent<Function<'static>>>>>,
+    guard: Rc<GuardState>,
+    context: Context,
+    js_runtime: JsRuntime,
 }
 
 impl ElysiumRuntime {
@@ -127,19 +141,25 @@ impl ElysiumRuntime {
 
         let context = Context::full(&js_runtime)?;
 
+        let timers = Rc::new(TimerQueue::new());
+        let microtasks = Rc::new(RefCell::new(Vec::new()));
+
         context.with(|ctx| -> Result<()> {
             let global = ctx.globals();
             global.set("print", Function::new(ctx.clone(), print)?)?;
             bootstrap_jsx_runtime(&ctx)?;
             bootstrap_framebuffer_bindings(&ctx, draw_commands)?;
+            bootstrap_timers(&ctx, Rc::clone(&timers), Rc::clone(&microtasks))?;
             Ok(())
         })?;
 
         Ok(Self {
-            _js_runtime: js_runtime,
+            js_runtime,
             context,
             guard,
             module_namespace: RefCell::new(None),
+            timers,
+            microtasks,
         })
     }
 
@@ -185,6 +205,86 @@ impl ElysiumRuntime {
         })
     }
 
+    /// Runs every timer (`setTimeout`/`setInterval`/`setImmediate`/
+    /// `requestAnimationFrame`) due as of now, draining pending microtasks
+    /// after each one — the same "run a task, then drain microtasks to
+    /// completion" discipline the per-frame `update`/`draw` calls follow.
+    /// `setInterval` timers are rescheduled for their next firing after
+    /// running, unless their own callback cleared them.
+    pub fn run_due_timers(&self) -> std::result::Result<(), GuardedError> {
+        let now = Instant::now();
+        for id in self.timers.due_ids(now) {
+            let Some((callback, args, interval)) = self.timers.prepare_run(id) else {
+                continue;
+            };
+
+            let result = self.run_guarded(FRAME_BUDGET, |ctx| {
+                let callback = callback.restore(ctx)?;
+                match args {
+                    TimerArgs::User(args) => {
+                        let args = args
+                            .into_iter()
+                            .map(|a| a.restore(ctx))
+                            .collect::<Result<Vec<Value>>>()?;
+                        callback.call::<_, ()>((Rest(args),))
+                    }
+                    TimerArgs::AnimationFrameTimestamp => {
+                        callback.call::<_, ()>((self.timers.elapsed_seconds(),))
+                    }
+                }
+            });
+
+            if let Some(period) = interval {
+                self.timers.reschedule_if_still_active(id, now + period);
+            }
+
+            self.drain_microtasks();
+
+            if let Err(err) = result {
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs every callback queued by `queueMicrotask` (including any that
+    /// queue further callbacks of their own), then drains rquickjs's own
+    /// Promise job queue. Called after every per-frame callback into the VM
+    /// (timers, `update`, `draw`) so a program's `.then()` chains and
+    /// `queueMicrotask` calls observe results in the same tick they should.
+    pub fn drain_microtasks(&self) {
+        loop {
+            let next = {
+                let mut microtasks = self.microtasks.borrow_mut();
+                if microtasks.is_empty() {
+                    None
+                } else {
+                    Some(microtasks.remove(0))
+                }
+            };
+            let Some(callback) = next else { break };
+            if let Err(err) = self.run_guarded(FRAME_BUDGET, |ctx| {
+                let callback = callback.restore(ctx)?;
+                callback.call::<_, ()>(())
+            }) {
+                match err {
+                    GuardedError::Timeout => eprintln!("program timed out inside queueMicrotask()"),
+                    GuardedError::Exception(err) => {
+                        eprintln!("uncaught exception in queueMicrotask(): {err}")
+                    }
+                }
+            }
+        }
+
+        loop {
+            match self.js_runtime.execute_pending_job() {
+                Ok(false) => break,
+                Ok(true) => continue,
+                Err(job_exception) => eprintln!("uncaught (in promise): {job_exception}"),
+            }
+        }
+    }
+
     /// The one entry point every call into this VM goes through. Sets a
     /// deadline before running `f`, clears it after, and — on failure —
     /// distinguishes "the interrupt handler fired" (`Timeout`) from any
@@ -211,6 +311,27 @@ impl ElysiumRuntime {
 
         self.guard.deadline.set(None);
         result
+    }
+}
+
+impl Drop for ElysiumRuntime {
+    /// Releases every `Persistent` value this VM's timer/microtask/module
+    /// machinery is still holding, deterministically, before the natural
+    /// field-by-field drop starts tearing down `context`/`js_runtime`.
+    /// `timers` and `microtasks` are also captured (as `Rc` clones) inside
+    /// the `setTimeout`/`queueMicrotask`/etc. closures registered as
+    /// globals, so without this, a `Persistent` left in either one only
+    /// gets freed once those closures themselves are freed — which happens
+    /// from inside a native-closure finalizer during `JS_FreeRuntime`'s own
+    /// GC sweep, a context QuickJS's internal bookkeeping doesn't tolerate
+    /// freeing further values from. Running this through an ordinary
+    /// `context.with` first avoids that entirely.
+    fn drop(&mut self) {
+        self.context.with(|_ctx| {
+            self.timers.clear_all();
+            self.microtasks.borrow_mut().clear();
+            *self.module_namespace.borrow_mut() = None;
+        });
     }
 }
 
