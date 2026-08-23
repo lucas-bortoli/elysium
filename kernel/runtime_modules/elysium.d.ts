@@ -2,13 +2,14 @@
 // host API, in one place: ambient globals (print, timers, the JSX factory),
 // the ambient `JSX` namespace, and virtual `"ely:*"` module specifiers.
 // TypeScript has no file on disk to resolve a bare `"ely:framebuffer"`/
-// `"ely:lifecycle"`/`"ely:math"` import against (they're schemes the
-// kernel's module loader recognizes, backed at runtime by the matching .ts
-// file under this directory), so the `declare module` blocks below are what
-// let programs importing them typecheck at all. Keep in sync with the
-// bindings registered in kernel/runtime.rs and kernel/timers.rs, and with
-// kernel/runtime_modules/jsx-runtime.ts, framebuffer.ts, lifecycle.ts,
-// math.ts, and kernel/framebuffer/colors.rs's `Color` enum.
+// `"ely:lifecycle"`/`"ely:math"`/`"ely:input"` import against (they're
+// schemes the kernel's module loader recognizes, backed at runtime by the
+// matching .ts file under this directory), so the `declare module` blocks
+// below are what let programs importing them typecheck at all. Keep in
+// sync with the bindings registered in kernel/runtime.rs, kernel/timers.rs,
+// and kernel/input.rs, and with kernel/runtime_modules/jsx-runtime.ts,
+// framebuffer.ts, lifecycle.ts, math.ts, input.ts, and
+// kernel/framebuffer/colors.rs's `Color` enum.
 
 /** Writes a line to the host's stdout. */
 declare function print(...message: any): void;
@@ -512,4 +513,33 @@ declare module "ely:lifecycle" {
 
   /** The time, in seconds, since the previous frame. */
   export function getDeltaTime(): number;
+}
+
+declare module "ely:input" {
+  /** The pointer's current x position. */
+  export function getPointerX(): number;
+
+  /** The pointer's current y position. */
+  export function getPointerY(): number;
+
+  /** The pointer's current position. */
+  export function getPointerPosition(): import("./math").Vector2d;
+
+  /** Whether the pointer's button is currently held down. */
+  export function isPointerDown(): boolean;
+
+  /** Whether the pointer's button is currently not held down. */
+  export function isPointerUp(): boolean;
+
+  /** Whether the pointer's button was pressed this frame. */
+  export function wasPointerPressed(): boolean;
+
+  /** Whether the pointer's button was released this frame. */
+  export function wasPointerReleased(): boolean;
+
+  /** How far the pointer moved since last frame. */
+  export function getPointerDelta(): import("./math").Vector2d;
+
+  /** How far the scroll wheel moved since last frame. */
+  export function getScrollDelta(): number;
 }

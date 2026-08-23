@@ -36,12 +36,19 @@ impl ElysiumWindow {
         }
     }
 
-    /// Runs the OS event loop until the window is closed, calling
-    /// `on_frame` once per tick with the window and the time elapsed since
-    /// the previous tick. Nothing about `on_frame`'s signature is
-    /// Framebuffer-specific — it's the generic per-tick seam `main.rs` wires
-    /// `Framebuffer` and `ElysiumRuntime` into.
-    pub fn run(self, on_frame: impl FnMut(&Arc<Window>, Duration)) {
+    /// Runs the OS event loop until the window is closed. `on_window_event`
+    /// is called for every raw `WindowEvent` before this loop's own
+    /// handling of it — the generic seam an Input device attaches to,
+    /// without this module ever needing to know it exists. `on_frame` is
+    /// called once per tick with the window and the time elapsed since the
+    /// previous tick; nothing about its signature is Framebuffer-specific —
+    /// it's the generic per-tick seam `main.rs` wires `Framebuffer` and
+    /// `ElysiumRuntime` into.
+    pub fn run(
+        self,
+        on_window_event: impl FnMut(&WindowEvent),
+        on_frame: impl FnMut(&Arc<Window>, Duration),
+    ) {
         let event_loop = EventLoop::new().expect("failed to create the OS event loop");
         event_loop.set_control_flow(ControlFlow::Wait);
 
@@ -51,6 +58,7 @@ impl ElysiumWindow {
             height: self.height,
             window: None,
             last_frame: None,
+            on_window_event,
             on_frame,
         };
         event_loop
@@ -59,16 +67,17 @@ impl ElysiumWindow {
     }
 }
 
-struct App<F> {
+struct App<E, F> {
     title: String,
     width: u32,
     height: u32,
     window: Option<Arc<Window>>,
     last_frame: Option<Instant>,
+    on_window_event: E,
     on_frame: F,
 }
 
-impl<F: FnMut(&Arc<Window>, Duration)> ApplicationHandler for App<F> {
+impl<E: FnMut(&WindowEvent), F: FnMut(&Arc<Window>, Duration)> ApplicationHandler for App<E, F> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         // Window creation can only happen once the platform has signaled
         // it's ready (see `ApplicationHandler::resumed`'s docs) — it can't
@@ -90,6 +99,8 @@ impl<F: FnMut(&Arc<Window>, Duration)> ApplicationHandler for App<F> {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        (self.on_window_event)(&event);
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {

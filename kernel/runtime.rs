@@ -10,6 +10,7 @@ use rquickjs::{
 
 use crate::esm_resolver::{CompilingLoader, EmbeddedOrFileResolver, bootstrap_jsx_runtime};
 use crate::framebuffer::{self, DrawCommand};
+use crate::input::{self, Input};
 use crate::timers::{TimerArgs, TimerQueue, bootstrap_timers};
 use crate::transform;
 
@@ -77,8 +78,10 @@ impl ElysiumRuntime {
     /// `draw_commands` is the Framebuffer device's shared draw-command buffer:
     /// `ely:framebuffer`'s hidden globals push onto it directly rather than
     /// touching any drawing state themselves, keeping the VM's own bindings
-    /// ignorant of `wgpu`.
-    pub fn new(draw_commands: Rc<RefCell<Vec<DrawCommand>>>) -> Result<Self> {
+    /// ignorant of `wgpu`. `input` is the Input device's shared pointer
+    /// state, updated from raw window events and read by `ely:input`'s
+    /// hidden globals.
+    pub fn new(draw_commands: Rc<RefCell<Vec<DrawCommand>>>, input: Rc<Input>) -> Result<Self> {
         let js_runtime = JsRuntime::new()?;
 
         let guard = Rc::new(GuardState::default());
@@ -117,6 +120,7 @@ impl ElysiumRuntime {
             global.set("print", Function::new(ctx.clone(), print)?)?;
             bootstrap_jsx_runtime(&ctx)?;
             framebuffer::bootstrap_framebuffer_bindings(&ctx, draw_commands)?;
+            input::bootstrap_input_bindings(&ctx, input)?;
             bootstrap_timers(&ctx, Rc::clone(&timers), Rc::clone(&microtasks))?;
             bootstrap_post_init_handlers(&ctx, Rc::clone(&post_init_handlers))?;
             Ok(())
@@ -391,12 +395,19 @@ mod tests {
     /// a plain script body to leave something this helper can inspect
     /// afterward.
     fn eval(source: &str) -> ElysiumRuntime {
-        let runtime = ElysiumRuntime::new(Rc::new(RefCell::new(Vec::new())))
+        eval_with_input(source).0
+    }
+
+    /// Like [`eval`], but also hands back the `Input` device backing the
+    /// VM, so a test can feed it window events before/after evaluating.
+    fn eval_with_input(source: &str) -> (ElysiumRuntime, Rc<Input>) {
+        let input = Rc::new(Input::new());
+        let runtime = ElysiumRuntime::new(Rc::new(RefCell::new(Vec::new())), Rc::clone(&input))
             .expect("failed to construct runtime");
         runtime
             .eval_module("test.ts", source)
             .expect("module failed to evaluate");
-        runtime
+        (runtime, input)
     }
 
     fn global<T>(runtime: &ElysiumRuntime, name: &str) -> T
@@ -645,6 +656,85 @@ mod tests {
         // A second call must not re-run anything: the handler list was
         // drained, not just iterated.
         runtime.run_post_init_handlers().unwrap();
+    }
+
+    #[test]
+    fn pointer_position_reflects_injected_cursor_moved_events() {
+        use winit::dpi::PhysicalPosition;
+        use winit::event::{DeviceId, WindowEvent};
+
+        let (runtime, input) = eval_with_input(
+            "import { getPointerX, getPointerY } from 'ely:input'; \
+             globalThis.x = getPointerX(); \
+             globalThis.y = getPointerY();",
+        );
+        assert_eq!(global::<f64>(&runtime, "x"), 0.0);
+        assert_eq!(global::<f64>(&runtime, "y"), 0.0);
+
+        input.handle_window_event(&WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: PhysicalPosition::new(144.0, 72.0),
+        });
+        runtime
+            .eval_module(
+                "test2.ts",
+                "import { getPointerX, getPointerY } from 'ely:input'; \
+                 globalThis.x = getPointerX(); \
+                 globalThis.y = getPointerY();",
+            )
+            .unwrap();
+        assert_eq!(global::<f64>(&runtime, "x"), 72.0);
+        assert_eq!(global::<f64>(&runtime, "y"), 36.0);
+    }
+
+    #[test]
+    fn pointer_down_and_pressed_reflect_injected_mouse_input_events() {
+        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+
+        let (runtime, input) = eval_with_input(
+            "import { isPointerDown, isPointerUp, wasPointerPressed, wasPointerReleased } from 'ely:input'; \
+             globalThis.readState = () => ({ \
+                 down: isPointerDown(), \
+                 up: isPointerUp(), \
+                 pressed: wasPointerPressed(), \
+                 released: wasPointerReleased(), \
+             });",
+        );
+
+        input.handle_window_event(&WindowEvent::MouseInput {
+            device_id: DeviceId::dummy(),
+            state: ElementState::Pressed,
+            button: MouseButton::Left,
+        });
+        runtime
+            .eval_module(
+                "check1.ts",
+                "const s = globalThis.readState(); \
+                 globalThis.down1 = s.down; \
+                 globalThis.up1 = s.up; \
+                 globalThis.pressed1 = s.pressed;",
+            )
+            .unwrap();
+        assert!(global::<bool>(&runtime, "down1"));
+        assert!(!global::<bool>(&runtime, "up1"));
+        assert!(global::<bool>(&runtime, "pressed1"));
+
+        input.end_frame();
+        input.handle_window_event(&WindowEvent::MouseInput {
+            device_id: DeviceId::dummy(),
+            state: ElementState::Released,
+            button: MouseButton::Left,
+        });
+        runtime
+            .eval_module(
+                "check2.ts",
+                "const s = globalThis.readState(); \
+                 globalThis.down2 = s.down; \
+                 globalThis.released2 = s.released;",
+            )
+            .unwrap();
+        assert!(!global::<bool>(&runtime, "down2"));
+        assert!(global::<bool>(&runtime, "released2"));
     }
 
     #[test]

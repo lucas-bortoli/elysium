@@ -1,5 +1,6 @@
 mod esm_resolver;
 mod framebuffer;
+mod input;
 mod runtime;
 mod timers;
 mod window;
@@ -8,6 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use framebuffer::Framebuffer;
+use input::Input;
 use runtime::{ElysiumRuntime, GuardedError};
 use window::ElysiumWindow;
 
@@ -25,7 +27,8 @@ fn main() {
     let path = path.to_str().expect("binary path is not valid UTF-8");
 
     let draw_commands = Rc::new(RefCell::new(Vec::new()));
-    let runtime = ElysiumRuntime::new(Rc::clone(&draw_commands))
+    let input = Rc::new(Input::new());
+    let runtime = ElysiumRuntime::new(Rc::clone(&draw_commands), Rc::clone(&input))
         .expect("failed to initialize Elysium runtime");
 
     if let Err(err) = runtime.eval_module(path, &program) {
@@ -42,16 +45,23 @@ fn main() {
         framebuffer::FRAMEBUFFER_WIDTH * framebuffer::SCALE,
         framebuffer::FRAMEBUFFER_HEIGHT * framebuffer::SCALE,
     )
-    .run(|window, _dt| {
-        let framebuffer = framebuffer.get_or_insert_with(|| Framebuffer::new(window.clone()));
+    .run(
+        {
+            let input = Rc::clone(&input);
+            move |event| input.handle_window_event(event)
+        },
+        |window, _dt| {
+            let framebuffer = framebuffer.get_or_insert_with(|| Framebuffer::new(window.clone()));
 
-        if let Err(err) = runtime.run_due_timers() {
-            report_frame_error("timer", err);
-        }
+            if let Err(err) = runtime.run_due_timers() {
+                report_frame_error("timer", err);
+            }
 
-        framebuffer.render(&draw_commands.borrow());
-        draw_commands.borrow_mut().clear();
-    });
+            framebuffer.render(&draw_commands.borrow());
+            draw_commands.borrow_mut().clear();
+            input.end_frame();
+        },
+    );
 }
 
 /// A call into the VM timing out or throwing doesn't have a second program

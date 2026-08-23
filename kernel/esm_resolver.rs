@@ -21,6 +21,7 @@ const EMBEDDED_RUNTIME_MODULES: &[(&str, &str)] = &[
     ),
     ("lifecycle", include_str!("runtime_modules/lifecycle.ts")),
     ("math", include_str!("runtime_modules/math.ts")),
+    ("input", include_str!("runtime_modules/input.ts")),
 ];
 
 /// The namespace every VM-owned module lives under, whether a program
