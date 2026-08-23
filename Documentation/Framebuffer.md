@@ -49,3 +49,5 @@ ones where they overlap.
 # References
 
 [1] [Per-frame ticking](Lifecycle.md)
+
+[2] [Input](Input.md)
