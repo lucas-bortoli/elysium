@@ -3,6 +3,8 @@
 //! than `Arc`/`Mutex`, same reasoning as `TimerQueue`/`GuardState` in
 //! `runtime.rs`/`timers.rs` — nothing here crosses an OS thread.
 
+mod keys;
+
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -10,6 +12,7 @@ use rquickjs::{Ctx, Function, Result};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 
 use crate::framebuffer;
+use keys::Key;
 
 pub struct Input {
     /// The pointer's position in the framebuffer's logical 720x360 space —
@@ -25,6 +28,13 @@ pub struct Input {
     delta: Cell<(f32, f32)>,
     /// Scroll accumulated since the last `end_frame`.
     scroll_delta: Cell<f32>,
+    /// Whether each `Key` is currently held, indexed by its discriminant.
+    key_down: [Cell<bool>; Key::COUNT],
+    /// Whether each `Key` was pressed or released this frame — edge-
+    /// triggered, reset in `end_frame` the same way `was_pressed`/
+    /// `was_released` are for the pointer's button.
+    key_pressed: [Cell<bool>; Key::COUNT],
+    key_released: [Cell<bool>; Key::COUNT],
 }
 
 impl Input {
@@ -36,6 +46,9 @@ impl Input {
             was_released: Cell::new(false),
             delta: Cell::new((0.0, 0.0)),
             scroll_delta: Cell::new(0.0),
+            key_down: std::array::from_fn(|_| Cell::new(false)),
+            key_pressed: std::array::from_fn(|_| Cell::new(false)),
+            key_released: std::array::from_fn(|_| Cell::new(false)),
         }
     }
 
@@ -73,7 +86,40 @@ impl Input {
                 };
                 self.scroll_delta.set(self.scroll_delta.get() + amount);
             }
+            WindowEvent::KeyboardInput { event, .. } => {
+                let winit::keyboard::PhysicalKey::Code(code) = event.physical_key else {
+                    return;
+                };
+                self.handle_key_code(code, event.state == ElementState::Pressed, event.repeat);
+            }
             _ => {}
+        }
+    }
+
+    /// The `KeyboardInput` half of `handle_window_event`, taking the fields
+    /// it needs directly rather than a `winit::event::KeyEvent` — that type
+    /// has a private field, so tests (including `runtime.rs`'s end-to-end
+    /// ones) can't construct one to drive this through `handle_window_event`.
+    pub(crate) fn handle_key_code(
+        &self,
+        code: winit::keyboard::KeyCode,
+        pressed: bool,
+        repeat: bool,
+    ) {
+        let Some(key) = Key::from_key_code(code) else {
+            return;
+        };
+        let index = key as usize;
+        self.key_down[index].set(pressed);
+        if pressed {
+            // Auto-repeat re-fires `Pressed` while a key is held;
+            // `key_pressed` should only flip on the initial press, same as
+            // the pointer's `was_pressed`.
+            if !repeat {
+                self.key_pressed[index].set(true);
+            }
+        } else {
+            self.key_released[index].set(true);
         }
     }
 
@@ -86,6 +132,12 @@ impl Input {
         self.was_released.set(false);
         self.delta.set((0.0, 0.0));
         self.scroll_delta.set(0.0);
+        for cell in &self.key_pressed {
+            cell.set(false);
+        }
+        for cell in &self.key_released {
+            cell.set(false);
+        }
     }
 }
 
@@ -149,6 +201,33 @@ pub fn bootstrap_input_bindings(ctx: &Ctx<'_>, input: Rc<Input>) -> Result<()> {
         global.set(
             "__input_get_scroll_delta",
             Function::new(ctx.clone(), move || input.scroll_delta.get())?,
+        )?;
+    }
+    {
+        let input = Rc::clone(&input);
+        global.set(
+            "__input_is_key_down",
+            Function::new(ctx.clone(), move |id: u16| {
+                Key::from_id(id).is_some_and(|key| input.key_down[key as usize].get())
+            })?,
+        )?;
+    }
+    {
+        let input = Rc::clone(&input);
+        global.set(
+            "__input_was_key_pressed",
+            Function::new(ctx.clone(), move |id: u16| {
+                Key::from_id(id).is_some_and(|key| input.key_pressed[key as usize].get())
+            })?,
+        )?;
+    }
+    {
+        let input = Rc::clone(&input);
+        global.set(
+            "__input_was_key_released",
+            Function::new(ctx.clone(), move |id: u16| {
+                Key::from_id(id).is_some_and(|key| input.key_released[key as usize].get())
+            })?,
         )?;
     }
 
@@ -275,5 +354,55 @@ mod tests {
         input.handle_window_event(&WindowEvent::Resized(PhysicalSize::new(1440, 720)));
         assert_eq!(input.position.get(), (0, 0));
         assert!(!input.is_down.get());
+    }
+
+    #[test]
+    fn key_press_sets_down_and_pressed() {
+        let input = Input::new();
+        input.handle_key_code(winit::keyboard::KeyCode::KeyW, true, false);
+        let index = Key::KeyW as usize;
+        assert!(input.key_down[index].get());
+        assert!(input.key_pressed[index].get());
+        assert!(!input.key_released[index].get());
+    }
+
+    #[test]
+    fn key_release_clears_down_and_sets_released() {
+        let input = Input::new();
+        input.handle_key_code(winit::keyboard::KeyCode::KeyW, true, false);
+        input.handle_key_code(winit::keyboard::KeyCode::KeyW, false, false);
+        let index = Key::KeyW as usize;
+        assert!(!input.key_down[index].get());
+        assert!(input.key_released[index].get());
+    }
+
+    #[test]
+    fn key_repeat_does_not_resend_pressed() {
+        let input = Input::new();
+        input.handle_key_code(winit::keyboard::KeyCode::KeyW, true, false);
+        input.key_pressed[Key::KeyW as usize].set(false); // isolate the repeat
+        input.handle_key_code(winit::keyboard::KeyCode::KeyW, true, true);
+        assert!(!input.key_pressed[Key::KeyW as usize].get());
+        assert!(input.key_down[Key::KeyW as usize].get());
+    }
+
+    #[test]
+    fn other_keys_are_unaffected() {
+        let input = Input::new();
+        input.handle_key_code(winit::keyboard::KeyCode::KeyW, true, false);
+        assert!(!input.key_down[Key::KeyA as usize].get());
+    }
+
+    #[test]
+    fn end_frame_clears_key_edges_but_not_key_down() {
+        let input = Input::new();
+        input.handle_key_code(winit::keyboard::KeyCode::KeyW, true, false);
+
+        input.end_frame();
+
+        let index = Key::KeyW as usize;
+        assert!(!input.key_pressed[index].get());
+        assert!(!input.key_released[index].get());
+        assert!(input.key_down[index].get(), "key_down survives end_frame");
     }
 }

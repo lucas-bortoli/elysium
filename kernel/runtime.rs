@@ -738,6 +738,46 @@ mod tests {
     }
 
     #[test]
+    fn key_down_and_pressed_reflect_injected_keyboard_events() {
+        let (runtime, input) = eval_with_input(
+            "import { Key, isKeyDown, isKeyUp, wasKeyPressed, wasKeyReleased } from 'ely:input'; \
+             globalThis.readState = () => ({ \
+                 down: isKeyDown(Key.KeyW), \
+                 up: isKeyUp(Key.KeyW), \
+                 pressed: wasKeyPressed(Key.KeyW), \
+                 released: wasKeyReleased(Key.KeyW), \
+             });",
+        );
+
+        input.handle_key_code(winit::keyboard::KeyCode::KeyW, true, false);
+        runtime
+            .eval_module(
+                "check1.ts",
+                "const s = globalThis.readState(); \
+                 globalThis.down1 = s.down; \
+                 globalThis.up1 = s.up; \
+                 globalThis.pressed1 = s.pressed;",
+            )
+            .unwrap();
+        assert!(global::<bool>(&runtime, "down1"));
+        assert!(!global::<bool>(&runtime, "up1"));
+        assert!(global::<bool>(&runtime, "pressed1"));
+
+        input.end_frame();
+        input.handle_key_code(winit::keyboard::KeyCode::KeyW, false, false);
+        runtime
+            .eval_module(
+                "check2.ts",
+                "const s = globalThis.readState(); \
+                 globalThis.down2 = s.down; \
+                 globalThis.released2 = s.released;",
+            )
+            .unwrap();
+        assert!(!global::<bool>(&runtime, "down2"));
+        assert!(global::<bool>(&runtime, "released2"));
+    }
+
+    #[test]
     fn deadlock_exception_is_remapped_to_a_clear_message() {
         let remapped = remap_deadlock_error(GuardedError::Exception(
             "Error blocking on a promise resulted in a dead lock".to_string(),

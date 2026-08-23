@@ -1,10 +1,16 @@
 import {
   Color,
   addDrawHandler,
-  clearScreen,
   fillRectangle,
   getWidth,
 } from "ely:framebuffer";
+import {
+  Key,
+  isPointerDown,
+  wasKeyPressed,
+  wasPointerPressed,
+  wasPointerReleased,
+} from "ely:input";
 import { addPostInitHandler, addUpdateTicker, delay } from "ely:lifecycle";
 
 let x = 0;
@@ -16,7 +22,21 @@ addUpdateTicker((dt) => {
 });
 
 addDrawHandler(() => {
-  fillRectangle(x, 130, 100, 100, Color.Amber400);
+  let color: Color = Color.White;
+
+  if (wasPointerPressed()) {
+    color = Color.Green400;
+  } else if (wasPointerReleased()) {
+    color = Color.Blue400;
+  } else if (isPointerDown()) {
+    color = Color.Red400;
+  }
+
+  if (wasKeyPressed(Key.KeyA)) {
+    print("A");
+  }
+
+  fillRectangle(x, 100, 100, 100, color);
 });
 
 addPostInitHandler(async () => {
