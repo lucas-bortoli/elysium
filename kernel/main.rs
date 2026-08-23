@@ -37,7 +37,12 @@ fn main() {
 
     let mut framebuffer: Option<Framebuffer> = None;
 
-    ElysiumWindow::new("Elysium", 1280, 720).run(|window, _dt| {
+    ElysiumWindow::new(
+        "Elysium",
+        framebuffer::FRAMEBUFFER_WIDTH * framebuffer::SCALE,
+        framebuffer::FRAMEBUFFER_HEIGHT * framebuffer::SCALE,
+    )
+    .run(|window, _dt| {
         let framebuffer = framebuffer.get_or_insert_with(|| Framebuffer::new(window.clone()));
 
         if let Err(err) = runtime.run_due_timers() {

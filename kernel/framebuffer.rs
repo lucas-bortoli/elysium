@@ -129,6 +129,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 /// [`Framebuffer::render`]'s `FillRectangle` commands; it grows on demand.
 const INITIAL_VERTEX_CAPACITY: usize = 1024;
 
+/// The logical resolution programs draw in — independent of the window's
+/// physical pixel size, which is always [`SCALE`] times this. Mirrored by
+/// hand in `kernel/runtime_modules/framebuffer.ts`'s `getWidth`/`getHeight`,
+/// the same way `kernel/framebuffer/colors.rs`'s `Color` enum is kept in
+/// sync with that file's `Color` constant.
+pub const FRAMEBUFFER_WIDTH: u32 = 720;
+pub const FRAMEBUFFER_HEIGHT: u32 = 360;
+pub const SCALE: u32 = 2;
+
 pub struct Framebuffer {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
@@ -276,8 +285,8 @@ impl Framebuffer {
                         w,
                         h,
                         color,
-                        self.config.width as f32,
-                        self.config.height as f32,
+                        FRAMEBUFFER_WIDTH as f32,
+                        FRAMEBUFFER_HEIGHT as f32,
                     );
                 }
             }

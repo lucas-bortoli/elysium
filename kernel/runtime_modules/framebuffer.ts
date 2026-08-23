@@ -2,6 +2,8 @@
 // Colors are always one of `Color`'s named entries (the kernel's fixed
 // palette), never raw RGBA channels a program could get wrong.
 
+import type { Size2d } from "ely:math";
+
 declare function __framebuffer_clear_screen(color: Color): void;
 declare function __framebuffer_fill_rectangle(
   x: number,
@@ -322,6 +324,27 @@ export class DrawOutsideHandlerError extends Error {
 }
 
 export type DrawTickerId = number;
+
+// The framebuffer's logical resolution — kept in sync by hand with
+// kernel/framebuffer.rs's `FRAMEBUFFER_WIDTH`/`FRAMEBUFFER_HEIGHT`, the same
+// way `Color` above is kept in sync with colors.rs's `Color` enum.
+const FRAMEBUFFER_WIDTH = 720;
+const FRAMEBUFFER_HEIGHT = 360;
+
+/** The framebuffer's logical width, in pixels. */
+export function getWidth(): number {
+  return FRAMEBUFFER_WIDTH;
+}
+
+/** The framebuffer's logical height, in pixels. */
+export function getHeight(): number {
+  return FRAMEBUFFER_HEIGHT;
+}
+
+/** The framebuffer's logical size, in pixels. */
+export function getSize2d(): Size2d {
+  return { width: FRAMEBUFFER_WIDTH, height: FRAMEBUFFER_HEIGHT };
+}
 
 let nextHandlerId = 1;
 const drawHandlers = new Map<DrawTickerId, () => void>();

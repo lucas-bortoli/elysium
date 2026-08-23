@@ -3,6 +3,7 @@ import {
   addDrawHandler,
   clearScreen,
   fillRectangle,
+  getWidth,
 } from "ely:framebuffer";
 import { addPostInitHandler, addUpdateTicker, delay } from "ely:lifecycle";
 
@@ -11,11 +12,11 @@ const speed = 1000; // pixels per second
 
 addUpdateTicker((dt) => {
   x += speed * dt;
-  if (x > 1280) x = -100;
+  if (x > getWidth()) x = -100;
 });
 
 addDrawHandler(() => {
-  fillRectangle(x, 300, 100, 100, Color.Amber400);
+  fillRectangle(x, 130, 100, 100, Color.Amber400);
 });
 
 addPostInitHandler(async () => {

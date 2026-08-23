@@ -2,13 +2,13 @@
 // host API, in one place: ambient globals (print, timers, the JSX factory),
 // the ambient `JSX` namespace, and virtual `"ely:*"` module specifiers.
 // TypeScript has no file on disk to resolve a bare `"ely:framebuffer"`/
-// `"ely:lifecycle"` import against (they're schemes the kernel's module loader
-// recognizes, backed at runtime by the matching .ts file under this
-// directory), so the `declare module` blocks below are what let programs
-// importing them typecheck at all. Keep in sync with the bindings
-// registered in kernel/runtime.rs and kernel/timers.rs, and with
-// kernel/runtime_modules/jsx-runtime.ts, framebuffer.ts, lifecycle.ts, and
-// kernel/framebuffer/colors.rs's `Color` enum.
+// `"ely:lifecycle"`/`"ely:math"` import against (they're schemes the
+// kernel's module loader recognizes, backed at runtime by the matching .ts
+// file under this directory), so the `declare module` blocks below are what
+// let programs importing them typecheck at all. Keep in sync with the
+// bindings registered in kernel/runtime.rs and kernel/timers.rs, and with
+// kernel/runtime_modules/jsx-runtime.ts, framebuffer.ts, lifecycle.ts,
+// math.ts, and kernel/framebuffer/colors.rs's `Color` enum.
 
 /** Writes a line to the host's stdout. */
 declare function print(...message: any): void;
@@ -393,6 +393,15 @@ declare module "ely:framebuffer" {
 
   export type DrawTickerId = number;
 
+  /** The framebuffer's logical width, in pixels. */
+  export function getWidth(): number;
+
+  /** The framebuffer's logical height, in pixels. */
+  export function getHeight(): number;
+
+  /** The framebuffer's logical size, in pixels. */
+  export function getSize2d(): import("./math").Size2d;
+
   /** Registers `handler` to run once per frame; `clearScreen`/`fillRectangle`
    * only take effect when called from inside a running handler. Returns an
    * id for `removeDrawHandler`. */
@@ -412,6 +421,28 @@ declare module "ely:framebuffer" {
     h: number,
     color: Color,
   ): void;
+}
+
+declare module "ely:math" {
+  /** A 2D point or offset. */
+  export interface Vector2d {
+    x: number;
+    y: number;
+  }
+
+  /** A 2D size. */
+  export interface Size2d {
+    width: number;
+    height: number;
+  }
+
+  /** An axis-aligned rectangle. */
+  export interface Rectangle {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }
 }
 
 declare module "ely:lifecycle" {

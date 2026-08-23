@@ -75,7 +75,8 @@ impl<F: FnMut(&Arc<Window>, Duration)> ApplicationHandler for App<F> {
         // happen eagerly in `ElysiumWindow::run`.
         let attributes = WindowAttributes::default()
             .with_title(self.title.clone())
-            .with_inner_size(LogicalSize::new(self.width, self.height));
+            .with_inner_size(LogicalSize::new(self.width, self.height))
+            .with_resizable(false);
         let window = event_loop
             .create_window(attributes)
             .expect("failed to create the window");
