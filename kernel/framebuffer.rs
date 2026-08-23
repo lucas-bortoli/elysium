@@ -7,14 +7,17 @@
 //! window's keyboard/mouse events, and shouldn't have to reach through
 //! Framebuffer to get them.
 //!
-//! Draw calls from JS never reach here directly either. `kernel/runtime.rs`
+//! Draw calls from JS never reach here directly either. [`bootstrap_framebuffer_bindings`]
 //! binds `ely:framebuffer`'s hidden globals to push [`DrawCommand`]s onto a
 //! plain `Vec` shared with the kernel's frame loop; only once a guarded
 //! `draw()` call returns does that Vec get handed to [`Framebuffer::render`],
 //! which is the only place in the kernel that speaks `wgpu`.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
+use rquickjs::{Ctx, Function, Result};
 use winit::window::Window;
 
 mod colors;
@@ -25,8 +28,69 @@ pub use colors::Color;
 /// program-supplied RGBA channels.
 #[derive(Debug, Clone, Copy)]
 pub enum DrawCommand {
-    ClearScreen { color: Color },
-    FillRectangle { x: f32, y: f32, w: f32, h: f32, color: Color },
+    ClearScreen {
+        color: Color,
+    },
+    FillRectangle {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: Color,
+    },
+}
+
+/// Binds the *hidden* globals `ely:framebuffer`'s embedded module wraps
+/// (`__framebuffer_clear_screen`, `__framebuffer_fill_rectangle`) — never called by
+/// a program directly, only through `ely:framebuffer`'s exported
+/// `clearScreen`/`fillRectangle`. Each closure just resolves its numeric
+/// color id to a [`Color`] and pushes a [`DrawCommand`] onto the shared
+/// buffer; neither one touches any drawing state itself, so this file never
+/// needs to know anything about `wgpu`.
+pub fn bootstrap_framebuffer_bindings(
+    ctx: &Ctx<'_>,
+    draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
+) -> Result<()> {
+    let global = ctx.globals();
+
+    {
+        let draw_commands = Rc::clone(&draw_commands);
+        global.set(
+            "__framebuffer_clear_screen",
+            Function::new(ctx.clone(), move |ctx: Ctx<'_>, color: u16| -> Result<()> {
+                let color = resolve_color(&ctx, color)?;
+                draw_commands
+                    .borrow_mut()
+                    .push(DrawCommand::ClearScreen { color });
+                Ok(())
+            })?,
+        )?;
+    }
+
+    global.set(
+        "__framebuffer_fill_rectangle",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'_>, x: f32, y: f32, w: f32, h: f32, color: u16| -> Result<()> {
+                let color = resolve_color(&ctx, color)?;
+                draw_commands
+                    .borrow_mut()
+                    .push(DrawCommand::FillRectangle { x, y, w, h, color });
+                Ok(())
+            },
+        )?,
+    )?;
+
+    Ok(())
+}
+
+/// Resolves a numeric color id (as sent by one of `ely:framebuffer`'s generated
+/// `RED_500`-style constants) to a [`Color`], throwing a `TypeError` if it's
+/// out of range — only reachable if a program bypasses the generated
+/// constants and passes an arbitrary number instead.
+fn resolve_color(ctx: &Ctx<'_>, id: u16) -> Result<Color> {
+    Color::from_id(id)
+        .ok_or_else(|| rquickjs::Exception::throw_type(ctx, &format!("{id} is not a valid color")))
 }
 
 #[repr(C)]
@@ -316,7 +380,10 @@ fn push_rectangle(
 ) {
     let to_clip = |px: f32, py: f32| [(px / screen_w) * 2.0 - 1.0, 1.0 - (py / screen_h) * 2.0];
     let rgba = color.rgba();
-    let vertex = |position: [f32; 2]| Vertex { position, color: rgba };
+    let vertex = |position: [f32; 2]| Vertex {
+        position,
+        color: rgba,
+    };
 
     let top_left = to_clip(x, y);
     let top_right = to_clip(x + w, y);

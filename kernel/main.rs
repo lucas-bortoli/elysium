@@ -1,3 +1,4 @@
+mod esm_resolver;
 mod framebuffer;
 mod runtime;
 mod timers;
