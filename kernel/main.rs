@@ -22,16 +22,11 @@ fn main() {
     let runtime = ElysiumRuntime::new(Rc::clone(&draw_commands))
         .expect("failed to initialize Elysium runtime");
 
-    match runtime.eval_module(path, &program) {
-        Ok(()) => {}
-        Err(GuardedError::Timeout) => {
-            eprintln!("program timed out during initialization");
-            std::process::exit(1);
-        }
-        Err(GuardedError::Exception(err)) => {
-            eprintln!("uncaught exception: {err}");
-            std::process::exit(1);
-        }
+    if let Err(err) = runtime.eval_module(path, &program) {
+        report_frame_error("module evaluation", err);
+    }
+    if let Err(err) = runtime.run_post_init_handlers() {
+        report_frame_error("addPostInitHandler callback", err);
     }
 
     let mut framebuffer: Option<Framebuffer> = None;
@@ -48,11 +43,11 @@ fn main() {
     });
 }
 
-/// A callback timing out or throwing doesn't have a second program to fall
-/// back to yet (Elysium runs one program per kernel today), so — per the
-/// "VM is destroyed, but Elysium soldiers on" contract — this reports the
-/// failure and exits, the same as a failed `eval_module` does, rather than
-/// silently continuing to call into a VM the timeout has already poisoned.
+/// A call into the VM timing out or throwing doesn't have a second program
+/// to fall back to yet (Elysium runs one program per kernel today), so —
+/// per the "VM is destroyed, but Elysium soldiers on" contract — this
+/// reports the failure and exits, rather than silently continuing to call
+/// into a VM a timeout may have already poisoned.
 fn report_frame_error(callback: &str, err: GuardedError) {
     match err {
         GuardedError::Timeout => {

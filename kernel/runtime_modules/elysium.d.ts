@@ -2,12 +2,12 @@
 // host API, in one place: ambient globals (print, timers, the JSX factory),
 // the ambient `JSX` namespace, and virtual `"ely:*"` module specifiers.
 // TypeScript has no file on disk to resolve a bare `"ely:framebuffer"`/
-// `"ely:loop"` import against (they're schemes the kernel's module loader
+// `"ely:lifecycle"` import against (they're schemes the kernel's module loader
 // recognizes, backed at runtime by the matching .ts file under this
 // directory), so the `declare module` blocks below are what let programs
 // importing them typecheck at all. Keep in sync with the bindings
 // registered in kernel/runtime.rs and kernel/timers.rs, and with
-// kernel/runtime_modules/jsx-runtime.ts, framebuffer.ts, loop.ts, and
+// kernel/runtime_modules/jsx-runtime.ts, framebuffer.ts, lifecycle.ts, and
 // kernel/framebuffer/colors.rs's `Color` enum.
 
 /** Writes a line to the host's stdout. */
@@ -414,7 +414,17 @@ declare module "ely:framebuffer" {
   ): void;
 }
 
-declare module "ely:loop" {
+declare module "ely:lifecycle" {
+  /** Registers `handler` to run once, right after the program's top-level
+   * code finishes evaluating, once timers, tickers, and draw handlers are
+   * live. */
+  export function addPostInitHandler(handler: () => void): void;
+
+  /** Resolves after `ms` milliseconds — `setTimeout` as an awaitable.
+   * @warn Awaiting this from module top level deadlocks. See
+   * Documentation/Multitasking.md. */
+  export function delay(ms: number): Promise<void>;
+
   export type TickerId = number;
 
   /** Registers `handler` to run once per frame with the time (in seconds)

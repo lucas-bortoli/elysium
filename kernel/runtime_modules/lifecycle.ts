@@ -1,3 +1,19 @@
+declare function __add_post_init_handler(handler: () => void): void;
+
+/** Registers `handler` to run once, right after the program's top-level
+ * code finishes evaluating, once timers, tickers, and draw handlers are
+ * live. */
+export function addPostInitHandler(handler: () => void): void {
+  __add_post_init_handler(handler);
+}
+
+/** Resolves after `ms` milliseconds — `setTimeout` as an awaitable.
+ * @warn Awaiting this from module top level deadlocks. See
+ * Documentation/Multitasking.md. */
+export function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export type TickerId = number;
 
 let nextTickerId = 1;

@@ -19,7 +19,7 @@ const EMBEDDED_RUNTIME_MODULES: &[(&str, &str)] = &[
         "framebuffer",
         include_str!("runtime_modules/framebuffer.ts"),
     ),
-    ("loop", include_str!("runtime_modules/loop.ts")),
+    ("lifecycle", include_str!("runtime_modules/lifecycle.ts")),
 ];
 
 /// The namespace every VM-owned module lives under, whether a program

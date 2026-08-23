@@ -65,6 +65,9 @@ pub struct ElysiumRuntime {
     timers: Rc<TimerQueue>,
     /// Callbacks queued by `queueMicrotask`, flushed by [`Self::drain_microtasks`].
     microtasks: Rc<RefCell<Vec<Persistent<Function<'static>>>>>,
+    /// Callbacks registered by `ely:lifecycle`'s `addPostInitHandler`, run
+    /// once by [`Self::run_post_init_handlers`].
+    post_init_handlers: Rc<RefCell<Vec<Persistent<Function<'static>>>>>,
     guard: Rc<GuardState>,
     context: Context,
     js_runtime: JsRuntime,
@@ -107,6 +110,7 @@ impl ElysiumRuntime {
 
         let timers = Rc::new(TimerQueue::new());
         let microtasks = Rc::new(RefCell::new(Vec::new()));
+        let post_init_handlers = Rc::new(RefCell::new(Vec::new()));
 
         context.with(|ctx| -> Result<()> {
             let global = ctx.globals();
@@ -114,6 +118,7 @@ impl ElysiumRuntime {
             bootstrap_jsx_runtime(&ctx)?;
             framebuffer::bootstrap_framebuffer_bindings(&ctx, draw_commands)?;
             bootstrap_timers(&ctx, Rc::clone(&timers), Rc::clone(&microtasks))?;
+            bootstrap_post_init_handlers(&ctx, Rc::clone(&post_init_handlers))?;
             Ok(())
         })?;
 
@@ -123,14 +128,21 @@ impl ElysiumRuntime {
             guard,
             timers,
             microtasks,
+            post_init_handlers,
         })
     }
 
     /// Compiles and evaluates `source` as an ES module named `name` (its
     /// path, used as the base for resolving any relative imports it has).
     /// Runs purely for its side effects — a program registers whatever
-    /// per-frame work it wants (`ely:loop`'s `addUpdateTicker`,
-    /// `ely:framebuffer`'s `addDrawHandler`) during evaluation.
+    /// per-frame work it wants (`ely:lifecycle`'s `addUpdateTicker`,
+    /// `ely:framebuffer`'s `addDrawHandler`) during evaluation, plus
+    /// whatever it wants deferred to after evaluation via
+    /// `addPostInitHandler` (see [`Self::run_post_init_handlers`]).
+    /// `transform::compile` already rejects top-level `await` outright, but
+    /// since evaluation still blocks on this module's own completion
+    /// promise, `finish` is remapped to a clearer message on the rare
+    /// rquickjs-level deadlock it exists to prevent.
     pub fn eval_module(&self, name: &str, source: &str) -> std::result::Result<(), GuardedError> {
         let compiled = transform::compile(source).map_err(GuardedError::Exception)?;
 
@@ -138,6 +150,27 @@ impl ElysiumRuntime {
             let (_module, promise) = Module::declare(ctx.clone(), name, compiled)?.eval()?;
             promise.finish::<()>()
         })
+        .map_err(remap_deadlock_error)
+    }
+
+    /// Runs every callback registered by `ely:lifecycle`'s
+    /// `addPostInitHandler` exactly once, in registration order, draining
+    /// microtasks after each — the same discipline [`Self::run_due_timers`]
+    /// follows. Called once, right after [`Self::eval_module`] succeeds and
+    /// before the frame loop (and therefore timers) starts running, so a
+    /// handler can safely do timer-dependent work a top-level `await`
+    /// cannot.
+    pub fn run_post_init_handlers(&self) -> std::result::Result<(), GuardedError> {
+        let handlers = self.post_init_handlers.borrow_mut().split_off(0);
+        for handler in handlers {
+            let result = self.run_guarded(FRAME_BUDGET, |ctx| {
+                let handler = handler.restore(ctx)?;
+                handler.call::<_, ()>(())
+            });
+            self.drain_microtasks();
+            result?;
+        }
+        Ok(())
     }
 
     /// Runs every timer (`setTimeout`/`setInterval`/`setImmediate`/
@@ -271,6 +304,21 @@ impl Drop for ElysiumRuntime {
 
 /// Host binding for `print(...values)`: writes any number of JS values,
 /// space-separated, to stdout.
+/// Registers `__add_post_init_handler` (wrapped by `ely:lifecycle`'s
+/// `addPostInitHandler`) as a global that appends onto `handlers`, mirroring
+/// `bootstrap_timers`' `queueMicrotask` registration.
+fn bootstrap_post_init_handlers<'js>(
+    ctx: &Ctx<'js>,
+    handlers: Rc<RefCell<Vec<Persistent<Function<'static>>>>>,
+) -> Result<()> {
+    ctx.globals().set(
+        "__add_post_init_handler",
+        Function::new(ctx.clone(), move |ctx: Ctx<'js>, handler: Function<'js>| {
+            handlers.borrow_mut().push(Persistent::save(&ctx, handler));
+        })?,
+    )
+}
+
 fn print<'js>(ctx: Ctx<'js>, values: Rest<Value<'js>>) -> Result<()> {
     let line = values
         .0
@@ -307,6 +355,27 @@ fn describe_exception(ctx: &Ctx<'_>, err: Error) -> String {
         ctx.catch().as_exception().unwrap().to_string()
     } else {
         err.to_string()
+    }
+}
+
+/// `transform::compile` already rejects top-level `await` at compile time,
+/// but as a fallback, catches rquickjs's own deadlock exception here too —
+/// the only signal available, since rquickjs doesn't distinguish this case
+/// at the type level (same reasoning as `GuardedError`'s `Timeout` vs
+/// `Exception` split above) — and remaps it to something that actually
+/// tells the program author what to do about it.
+fn remap_deadlock_error(err: GuardedError) -> GuardedError {
+    match err {
+        GuardedError::Exception(message) if message.contains("dead lock") => {
+            GuardedError::Exception(
+                "top-level await only supports work that resolves synchronously during module \
+                 evaluation (e.g. an already-resolved promise) — timers, tickers, and draw \
+                 handlers aren't running yet. Use `addPostInitHandler` from `ely:lifecycle` to \
+                 defer this to after initialization."
+                    .to_string(),
+            )
+        }
+        other => other,
     }
 }
 
@@ -515,7 +584,7 @@ mod tests {
     #[test]
     fn update_ticker_fires_once_per_frame_with_a_delta_time() {
         let runtime = eval(
-            "import { addUpdateTicker } from 'ely:loop'; \
+            "import { addUpdateTicker } from 'ely:lifecycle'; \
              globalThis.calls = 0; \
              globalThis.lastDt = -1; \
              addUpdateTicker((dt) => { \
@@ -533,7 +602,7 @@ mod tests {
     #[test]
     fn remove_update_ticker_stops_further_calls() {
         let runtime = eval(
-            "import { addUpdateTicker, removeUpdateTicker } from 'ely:loop'; \
+            "import { addUpdateTicker, removeUpdateTicker } from 'ely:lifecycle'; \
              globalThis.calls = 0; \
              const id = addUpdateTicker(() => { \
                  globalThis.calls += 1; \
@@ -544,5 +613,60 @@ mod tests {
             runtime.run_due_timers().unwrap();
         }
         assert_eq!(global::<f64>(&runtime, "calls"), 1.0);
+    }
+
+    #[test]
+    fn post_init_handler_runs_once_after_eval_and_sees_working_timers() {
+        let runtime = eval(
+            "import { addPostInitHandler, delay } from 'ely:lifecycle'; \
+             globalThis.ran = false; \
+             globalThis.timerFired = false; \
+             addPostInitHandler(async () => { \
+                 globalThis.ran = true; \
+                 await delay(0); \
+                 globalThis.timerFired = true; \
+             });",
+        );
+        assert!(
+            !global::<bool>(&runtime, "ran"),
+            "must not run during eval_module itself"
+        );
+
+        runtime.run_post_init_handlers().unwrap();
+        assert!(global::<bool>(&runtime, "ran"));
+        assert!(
+            !global::<bool>(&runtime, "timerFired"),
+            "the delay(0) timer hasn't been serviced yet"
+        );
+
+        runtime.run_due_timers().unwrap();
+        assert!(global::<bool>(&runtime, "timerFired"));
+
+        // A second call must not re-run anything: the handler list was
+        // drained, not just iterated.
+        runtime.run_post_init_handlers().unwrap();
+    }
+
+    #[test]
+    fn deadlock_exception_is_remapped_to_a_clear_message() {
+        let remapped = remap_deadlock_error(GuardedError::Exception(
+            "Error blocking on a promise resulted in a dead lock".to_string(),
+        ));
+        match remapped {
+            GuardedError::Exception(message) => {
+                assert!(message.contains("addPostInitHandler"));
+                assert!(message.contains("ely:lifecycle"));
+            }
+            GuardedError::Timeout => panic!("expected an Exception"),
+        }
+    }
+
+    #[test]
+    fn unrelated_exceptions_are_not_remapped() {
+        let remapped = remap_deadlock_error(GuardedError::Exception("boom".to_string()));
+        match remapped {
+            GuardedError::Exception(message) => assert_eq!(message, "boom"),
+            GuardedError::Timeout => panic!("expected an Exception"),
+        }
     }
 }
