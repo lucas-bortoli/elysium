@@ -1,8 +1,13 @@
-import { Color, addDrawHandler, clearScreen, fillRectangle } from "ely:framebuffer";
-import { addUpdateTicker } from "ely:loop";
+import {
+  Color,
+  addDrawHandler,
+  clearScreen,
+  fillRectangle,
+} from "ely:framebuffer";
+import { addPostInitHandler, addUpdateTicker, delay } from "ely:lifecycle";
 
 let x = 0;
-const speed = 1; // pixels per second
+const speed = 1000; // pixels per second
 
 addUpdateTicker((dt) => {
   x += speed * dt;
@@ -10,6 +15,10 @@ addUpdateTicker((dt) => {
 });
 
 addDrawHandler(() => {
-  clearScreen(Color.Slate900);
   fillRectangle(x, 300, 100, 100, Color.Amber400);
+});
+
+addPostInitHandler(async () => {
+  print("Welcome to Elysium!");
+  await delay(100);
 });
