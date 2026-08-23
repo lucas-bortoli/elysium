@@ -10,9 +10,12 @@ use std::sync::LazyLock;
 
 /// One shade from the palette. `#[repr(u16)]` and explicit discriminants
 /// because the numeric value *is* the wire format `ely:framebuffer`'s functions
-/// receive from JS.
+/// receive from JS. Most variants are only ever constructed from that numeric
+/// id via `Color::from_id`, not named directly in Rust, so dead-code analysis
+/// can't see them as used — hence `#[allow(dead_code)]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
+#[allow(dead_code)]
 pub enum Color {
     Red50 = 0,
     Red100 = 1,
