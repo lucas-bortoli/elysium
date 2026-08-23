@@ -2,12 +2,10 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use rquickjs::function::IntoArgs;
 use rquickjs::function::Rest;
 use rquickjs::loader::{FileResolver, ImportAttributes, Loader, Resolver};
 use rquickjs::{
-    Context, Ctx, Error, Function, Module, Object, Persistent, Result, Runtime as JsRuntime, Type,
-    Value,
+    Context, Ctx, Error, Function, Module, Persistent, Result, Runtime as JsRuntime, Type, Value,
 };
 
 use crate::framebuffer::DrawCommand;
@@ -30,6 +28,7 @@ const EMBEDDED_RUNTIME_MODULES: &[(&str, &str)] = &[
         "framebuffer",
         include_str!("runtime_modules/framebuffer.ts"),
     ),
+    ("loop", include_str!("runtime_modules/loop.ts")),
 ];
 
 /// The namespace every VM-owned module lives under, whether a program
@@ -85,16 +84,12 @@ const DEFAULT_EVAL_BUDGET: Duration = Duration::from_secs(5);
 const FRAME_BUDGET: Duration = Duration::from_millis(16);
 
 pub struct ElysiumRuntime {
-    /// The entry module's namespace object, retained across calls so
-    /// `call_function` can look up `update`/`draw` on it after `eval_module`
-    /// returns. `None` until `eval_module` succeeds.
+    /// This and the field below hold [`Persistent`] JS values, which must be
+    /// dropped while `js_runtime` is still alive to free their underlying
+    /// GC-tracked values — struct fields drop in declaration order, so these
+    /// are declared, and therefore dropped, before `context`/`js_runtime`
+    /// below.
     ///
-    /// This and the two fields below hold [`Persistent`] JS values, which
-    /// must be dropped while `js_runtime` is still alive to free their
-    /// underlying GC-tracked values — struct fields drop in declaration
-    /// order, so these are declared, and therefore dropped, before
-    /// `context`/`js_runtime` below.
-    module_namespace: RefCell<Option<Persistent<Object<'static>>>>,
     /// Pending `setTimeout`/`setInterval`/`setImmediate`/
     /// `requestAnimationFrame` timers, checked each frame by
     /// [`Self::run_due_timers`].
@@ -157,7 +152,6 @@ impl ElysiumRuntime {
             js_runtime,
             context,
             guard,
-            module_namespace: RefCell::new(None),
             timers,
             microtasks,
         })
@@ -165,50 +159,23 @@ impl ElysiumRuntime {
 
     /// Compiles and evaluates `source` as an ES module named `name` (its
     /// path, used as the base for resolving any relative imports it has).
-    /// Retains the module's namespace object so a later [`Self::call_function`]
-    /// can look up exported callbacks (`update`, `draw`) on it.
+    /// Runs purely for its side effects — a program registers whatever
+    /// per-frame work it wants (`ely:loop`'s `registerUpdateTicker`,
+    /// `ely:framebuffer`'s `addDrawHandler`) during evaluation, rather than
+    /// exporting callbacks the kernel looks up afterward.
     pub fn eval_module(&self, name: &str, source: &str) -> std::result::Result<(), GuardedError> {
         let compiled = transform::compile(source).map_err(GuardedError::Exception)?;
 
-        let namespace = self.run_guarded(DEFAULT_EVAL_BUDGET, |ctx| {
-            let (module, promise) = Module::declare(ctx.clone(), name, compiled)?.eval()?;
-            promise.finish::<()>()?;
-            Ok(Persistent::save(ctx, module.namespace()?))
-        })?;
-
-        *self.module_namespace.borrow_mut() = Some(namespace);
-        Ok(())
-    }
-
-    /// Calls the entry module's exported `name` function with `args`, if it
-    /// exported one — a program isn't required to export `update`/`draw`,
-    /// so a missing export is `Ok(false)`, not an error. Reuses
-    /// [`Self::run_guarded`] with [`FRAME_BUDGET`] instead of
-    /// `DEFAULT_EVAL_BUDGET`: the same guaranteed-bounded calling
-    /// convention every call into the VM goes through, just a tighter
-    /// per-frame deadline.
-    pub fn call_function<A>(&self, name: &str, args: A) -> std::result::Result<bool, GuardedError>
-    where
-        A: for<'js> IntoArgs<'js>,
-    {
-        let Some(namespace) = self.module_namespace.borrow().clone() else {
-            return Ok(false);
-        };
-
-        self.run_guarded(FRAME_BUDGET, |ctx| {
-            let namespace = namespace.restore(ctx)?;
-            let Ok(function) = namespace.get::<_, Function>(name) else {
-                return Ok(false);
-            };
-            function.call::<A, ()>(args)?;
-            Ok(true)
+        self.run_guarded(DEFAULT_EVAL_BUDGET, |ctx| {
+            let (_module, promise) = Module::declare(ctx.clone(), name, compiled)?.eval()?;
+            promise.finish::<()>()
         })
     }
 
     /// Runs every timer (`setTimeout`/`setInterval`/`setImmediate`/
     /// `requestAnimationFrame`) due as of now, draining pending microtasks
     /// after each one — the same "run a task, then drain microtasks to
-    /// completion" discipline the per-frame `update`/`draw` calls follow.
+    /// completion" discipline every callback into the VM follows.
     /// `setInterval` timers are rescheduled for their next firing after
     /// running, unless their own callback cleared them.
     pub fn run_due_timers(&self) -> std::result::Result<(), GuardedError> {
@@ -249,9 +216,9 @@ impl ElysiumRuntime {
 
     /// Runs every callback queued by `queueMicrotask` (including any that
     /// queue further callbacks of their own), then drains rquickjs's own
-    /// Promise job queue. Called after every per-frame callback into the VM
-    /// (timers, `update`, `draw`) so a program's `.then()` chains and
-    /// `queueMicrotask` calls observe results in the same tick they should.
+    /// Promise job queue. Called after every timer callback so a program's
+    /// `.then()` chains and `queueMicrotask` calls observe results in the
+    /// same tick they should.
     pub fn drain_microtasks(&self) {
         loop {
             let next = {
@@ -315,7 +282,7 @@ impl ElysiumRuntime {
 }
 
 impl Drop for ElysiumRuntime {
-    /// Releases every `Persistent` value this VM's timer/microtask/module
+    /// Releases every `Persistent` value this VM's timer/microtask
     /// machinery is still holding, deterministically, before the natural
     /// field-by-field drop starts tearing down `context`/`js_runtime`.
     /// `timers` and `microtasks` are also captured (as `Rc` clones) inside
@@ -330,7 +297,6 @@ impl Drop for ElysiumRuntime {
         self.context.with(|_ctx| {
             self.timers.clear_all();
             self.microtasks.borrow_mut().clear();
-            *self.module_namespace.borrow_mut() = None;
         });
     }
 }

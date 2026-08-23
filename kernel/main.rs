@@ -35,22 +35,12 @@ fn main() {
 
     let mut framebuffer: Option<Framebuffer> = None;
 
-    ElysiumWindow::new("Elysium", 1280, 720).run(|window, dt| {
+    ElysiumWindow::new("Elysium", 1280, 720).run(|window, _dt| {
         let framebuffer = framebuffer.get_or_insert_with(|| Framebuffer::new(window.clone()));
 
         if let Err(err) = runtime.run_due_timers() {
             report_frame_error("timer", err);
         }
-
-        let dt_seconds = dt.as_secs_f64();
-        if let Err(err) = runtime.call_function("update", (dt_seconds,)) {
-            report_frame_error("update", err);
-        }
-        runtime.drain_microtasks();
-        if let Err(err) = runtime.call_function("draw", ()) {
-            report_frame_error("draw", err);
-        }
-        runtime.drain_microtasks();
 
         framebuffer.render(&draw_commands.borrow());
         draw_commands.borrow_mut().clear();
