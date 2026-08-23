@@ -9,28 +9,32 @@
 export type VNodeType = string | ((props: Props) => VNode);
 
 export interface Props {
-    [key: string]: unknown;
+  [key: string]: unknown;
 }
 
 export interface VNode {
-    type: VNodeType;
-    props: Props;
-    children: Child[];
+  type: VNodeType;
+  props: Props;
+  children: Child[];
 }
 
 type Child = VNode | string | number;
 
 /** Marker type used as `h`'s `type` for `<>...</>` fragments. */
 export function Fragment(props: Props): VNode {
-    return { type: Fragment, props, children: props.children as Child[] };
+  return { type: Fragment, props, children: props.children as Child[] };
 }
 
-export function h(type: VNodeType, props: Props | null, ...children: unknown[]): VNode {
-    return {
-        type,
-        props: props ?? {},
-        children: flattenChildren(children),
-    };
+export function h(
+  type: VNodeType,
+  props: Props | null,
+  ...children: unknown[]
+): VNode {
+  return {
+    type,
+    props: props ?? {},
+    children: flattenChildren(children),
+  };
 }
 
 /** JSX children arrays can nest (from `{list.map(...)}` etc.) and carry
@@ -38,16 +42,16 @@ export function h(type: VNodeType, props: Props | null, ...children: unknown[]):
  * nothing" idiom); both are cleaned up here so consumers only ever see
  * strings, numbers, and vnodes. */
 function flattenChildren(children: unknown[]): Child[] {
-    const out: Child[] = [];
-    for (const child of children) {
-        if (child === null || child === undefined || typeof child === "boolean") {
-            continue;
-        }
-        if (Array.isArray(child)) {
-            out.push(...flattenChildren(child));
-        } else {
-            out.push(child as Child);
-        }
+  const out: Child[] = [];
+  for (const child of children) {
+    if (child === null || child === undefined || typeof child === "boolean") {
+      continue;
     }
-    return out;
+    if (Array.isArray(child)) {
+      out.push(...flattenChildren(child));
+    } else {
+      out.push(child as Child);
+    }
+  }
+  return out;
 }
