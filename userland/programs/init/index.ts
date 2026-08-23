@@ -5,12 +5,12 @@ import {
   clearScreen,
   fillRectangle,
 } from "ely:framebuffer";
-import { registerUpdateTicker } from "ely:loop";
+import { addUpdateTicker } from "ely:loop";
 
 let x = 0;
 const speed = 1; // pixels per second
 
-registerUpdateTicker((dt) => {
+addUpdateTicker((dt) => {
   x += speed * dt;
   if (x > 1280) x = -100;
 });

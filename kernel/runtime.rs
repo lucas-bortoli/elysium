@@ -160,7 +160,7 @@ impl ElysiumRuntime {
     /// Compiles and evaluates `source` as an ES module named `name` (its
     /// path, used as the base for resolving any relative imports it has).
     /// Runs purely for its side effects — a program registers whatever
-    /// per-frame work it wants (`ely:loop`'s `registerUpdateTicker`,
+    /// per-frame work it wants (`ely:loop`'s `addUpdateTicker`,
     /// `ely:framebuffer`'s `addDrawHandler`) during evaluation, rather than
     /// exporting callbacks the kernel looks up afterward.
     pub fn eval_module(&self, name: &str, source: &str) -> std::result::Result<(), GuardedError> {
@@ -677,10 +677,10 @@ mod tests {
     #[test]
     fn update_ticker_fires_once_per_frame_with_a_delta_time() {
         let runtime = eval(
-            "import { registerUpdateTicker } from 'ely:loop'; \
+            "import { addUpdateTicker } from 'ely:loop'; \
              globalThis.calls = 0; \
              globalThis.lastDt = -1; \
-             registerUpdateTicker((dt) => { \
+             addUpdateTicker((dt) => { \
                  globalThis.calls += 1; \
                  globalThis.lastDt = dt; \
              });",
@@ -693,13 +693,13 @@ mod tests {
     }
 
     #[test]
-    fn clear_update_ticker_stops_further_calls() {
+    fn remove_update_ticker_stops_further_calls() {
         let runtime = eval(
-            "import { registerUpdateTicker, clearUpdateTicker } from 'ely:loop'; \
+            "import { addUpdateTicker, removeUpdateTicker } from 'ely:loop'; \
              globalThis.calls = 0; \
-             const id = registerUpdateTicker(() => { \
+             const id = addUpdateTicker(() => { \
                  globalThis.calls += 1; \
-                 clearUpdateTicker(id); \
+                 removeUpdateTicker(id); \
              });",
         );
         for _ in 0..3 {

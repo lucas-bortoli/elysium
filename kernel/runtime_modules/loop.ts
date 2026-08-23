@@ -22,14 +22,14 @@ function scheduleFrame() {
   }
 }
 
-export function registerUpdateTicker(handler: (dt: number) => void): TickerId {
+export function addUpdateTicker(handler: (dt: number) => void): TickerId {
   const id = nextTickerId++;
   tickers.set(id, handler);
   scheduleFrame();
   return id;
 }
 
-export function clearUpdateTicker(id: TickerId): void {
+export function removeUpdateTicker(id: TickerId): void {
   tickers.delete(id);
 }
 

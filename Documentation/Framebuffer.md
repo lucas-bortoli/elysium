@@ -26,11 +26,11 @@ import {
   SLATE_900,
   AMBER_400,
 } from "ely:framebuffer";
-import { registerUpdateTicker } from "ely:loop";
+import { addUpdateTicker } from "ely:loop";
 
 let x = 0;
 
-registerUpdateTicker((dt) => {
+addUpdateTicker((dt) => {
   x += 200 * dt;
   if (x > 1280) x = -100;
 });

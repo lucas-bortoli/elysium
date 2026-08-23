@@ -412,11 +412,11 @@ declare module "ely:loop" {
   export type TickerId = number;
 
   /** Registers `handler` to run once per frame with the time (in seconds)
-   * since the previous frame. Returns an id for `clearUpdateTicker`. */
-  export function registerUpdateTicker(handler: (dt: number) => void): TickerId;
+   * since the previous frame. Returns an id for `removeUpdateTicker`. */
+  export function addUpdateTicker(handler: (dt: number) => void): TickerId;
 
   /** Stops calling the ticker registered under `id`. */
-  export function clearUpdateTicker(id: TickerId): void;
+  export function removeUpdateTicker(id: TickerId): void;
 
   /** The time, in seconds, since the previous frame. */
   export function getDeltaTime(): number;
