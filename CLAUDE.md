@@ -34,6 +34,16 @@ reassembling it. A short document doesn't need section headers at all; a
 longer one should still read as connected reasoning under each heading, not
 a list of one-liners.
 
+## Writing code comments
+
+A comment should describe the code as it stands, not the code it used to be
+or an alternative that was never taken. Watch for the "X, rather than Y" /
+"X, instead of Y" shape: if Y is a real hazard the reader needs ruled out —
+an ASI break, a use-after-free, a race — keeping the contrast earns its
+place. If Y is just a design not chosen, drop it and state what the code
+does; a reader who never knew Y was considered loses nothing, and the
+comment stops rotting the moment the history it references is forgotten.
+
 ## Committing
 
 When asked to commit, split the changes into separate commits along
