@@ -642,4 +642,69 @@ mod tests {
         runtime.drain_microtasks();
         assert_eq!(global::<String>(&runtime, "result"), "hi");
     }
+
+    #[test]
+    fn draw_calls_outside_a_handler_throw_draw_outside_handler_error() {
+        let runtime = eval(
+            "import { clearScreen, DrawOutsideHandlerError } from 'ely:framebuffer'; \
+             globalThis.threw = false; \
+             globalThis.correctType = false; \
+             try { \
+                 clearScreen(0); \
+             } catch (err) { \
+                 globalThis.threw = true; \
+                 globalThis.correctType = err instanceof DrawOutsideHandlerError; \
+             }",
+        );
+        assert!(global::<bool>(&runtime, "threw"));
+        assert!(global::<bool>(&runtime, "correctType"));
+    }
+
+    #[test]
+    fn draw_calls_inside_a_registered_handler_succeed() {
+        let runtime = eval(
+            "import { clearScreen, addDrawHandler, SLATE_900 } from 'ely:framebuffer'; \
+             globalThis.drawn = false; \
+             addDrawHandler(() => { \
+                 clearScreen(SLATE_900); \
+                 globalThis.drawn = true; \
+             });",
+        );
+        runtime.run_due_timers().unwrap();
+        assert!(global::<bool>(&runtime, "drawn"));
+    }
+
+    #[test]
+    fn update_ticker_fires_once_per_frame_with_a_delta_time() {
+        let runtime = eval(
+            "import { registerUpdateTicker } from 'ely:loop'; \
+             globalThis.calls = 0; \
+             globalThis.lastDt = -1; \
+             registerUpdateTicker((dt) => { \
+                 globalThis.calls += 1; \
+                 globalThis.lastDt = dt; \
+             });",
+        );
+        for expected_calls in 1..=3 {
+            runtime.run_due_timers().unwrap();
+            assert_eq!(global::<f64>(&runtime, "calls"), expected_calls as f64);
+            assert!(global::<f64>(&runtime, "lastDt") >= 0.0);
+        }
+    }
+
+    #[test]
+    fn clear_update_ticker_stops_further_calls() {
+        let runtime = eval(
+            "import { registerUpdateTicker, clearUpdateTicker } from 'ely:loop'; \
+             globalThis.calls = 0; \
+             const id = registerUpdateTicker(() => { \
+                 globalThis.calls += 1; \
+                 clearUpdateTicker(id); \
+             });",
+        );
+        for _ in 0..3 {
+            runtime.run_due_timers().unwrap();
+        }
+        assert_eq!(global::<f64>(&runtime, "calls"), 1.0);
+    }
 }
