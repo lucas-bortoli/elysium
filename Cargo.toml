@@ -8,8 +8,12 @@ name = "elysium-os"
 path = "kernel/main.rs"
 
 [dependencies]
+bytemuck = { version = "1.25.2", features = ["derive"] }
+pollster = "1.0.1"
 rquickjs = { version = "0.12.2", features = ["loader"] }
 swc_common = "26.0.0"
 swc_ecma_ast = "29.0.0"
 swc_ecma_parser = "45.0.0"
 swc_ecma_visit = "29.0.0"
+wgpu = "30.0.1"
+winit = "0.30.13"

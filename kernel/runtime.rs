@@ -1,26 +1,41 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use rquickjs::function::IntoArgs;
 use rquickjs::function::Rest;
 use rquickjs::loader::{FileResolver, ImportAttributes, Loader, Resolver};
-use rquickjs::{Context, Ctx, Error, Function, Module, Result, Runtime as JsRuntime, Type, Value};
+use rquickjs::{
+    Context, Ctx, Error, Function, Module, Object, Persistent, Result, Runtime as JsRuntime, Type,
+    Value,
+};
 
+use crate::framebuffer::DrawCommand;
 use crate::transform;
 
-/// TS(X) modules that are part of the Elysium VM itself rather than user
-/// programs, so their source is baked into the executable at build time
-/// instead of being read from disk at runtime (only *building* the VM needs
-/// these files to exist under `runtime_modules/`). Each is importable from
-/// any program as `import ... from "<name>"`; to add another, drop the file
-/// under `runtime_modules/` and add an entry here.
-const EMBEDDED_RUNTIME_MODULES: &[(&str, &str)] =
-    &[("jsx", include_str!("runtime_modules/jsx-runtime.ts"))];
+/// TS(X) modules that belong to the VM itself rather than a user program, so
+/// their source is baked into the executable at build time instead of being
+/// read from disk at runtime (only *building* the VM needs these files to
+/// exist under `runtime_modules/`). Every module the VM provides — today
+/// `jsx` and `framebuffer` — lives under the one `ely:` namespace: `jsx` reaches
+/// it through the bare-specifier rewrite below (and is additionally
+/// bootstrapped as globals, see `bootstrap_jsx_runtime`), while `framebuffer` is
+/// imported by a program writing the full `"ely:framebuffer"` specifier out
+/// explicitly. To add another, drop the file under `runtime_modules/` and
+/// add an entry here.
+const EMBEDDED_RUNTIME_MODULES: &[(&str, &str)] = &[
+    ("jsx", include_str!("runtime_modules/jsx-runtime.ts")),
+    (
+        "framebuffer",
+        include_str!("runtime_modules/framebuffer.ts"),
+    ),
+];
 
-/// Prefix marking a module name as one of [`EMBEDDED_RUNTIME_MODULES`]
-/// rather than an on-disk path — chosen so it can never collide with
-/// anything [`FileResolver`] would resolve a real import to.
-const EMBEDDED_MODULE_SCHEME: &str = "elysium:";
+/// The namespace every VM-owned module lives under, whether a program
+/// reaches it via an explicit `"ely:<name>"` import or (for `jsx`) an
+/// internal bare-specifier rewrite — chosen so it can never collide with
+/// anything [`FileResolver`] would resolve a real on-disk import to.
+const EMBEDDED_MODULE_SCHEME: &str = "ely:";
 
 fn embedded_module_source(name: &str) -> Option<&'static str> {
     EMBEDDED_RUNTIME_MODULES
@@ -57,33 +72,43 @@ pub enum GuardedError {
     Exception(String),
 }
 
-/// Budget for one top-level module evaluation. Generous relative to a
-/// future per-callback budget (e.g. a `love.update`/`love.draw`-style call)
-/// since program initialization can legitimately take longer than a single
-/// frame.
+/// Budget for one top-level module evaluation. Generous relative to
+/// [`FRAME_BUDGET`] since program initialization can legitimately take
+/// longer than a single frame.
 const DEFAULT_EVAL_BUDGET: Duration = Duration::from_secs(5);
+
+/// Budget for one per-frame callback (`update`/`draw`) — tight, since a
+/// program's whole frame budget (kernel included) is a single-digit number
+/// of milliseconds at any reasonable frame rate.
+const FRAME_BUDGET: Duration = Duration::from_millis(16);
 
 pub struct ElysiumRuntime {
     _js_runtime: JsRuntime,
     context: Context,
     guard: Rc<GuardState>,
+    /// The entry module's namespace object, retained across calls so
+    /// `call_function` can look up `update`/`draw` on it after `eval_module`
+    /// returns. `None` until `eval_module` succeeds.
+    module_namespace: RefCell<Option<Persistent<Object<'static>>>>,
 }
 
 impl ElysiumRuntime {
-    pub fn new() -> Result<Self> {
+    /// `draw_commands` is the Framebuffer device's shared draw-command buffer:
+    /// `ely:framebuffer`'s hidden globals push onto it directly rather than
+    /// touching any drawing state themselves, keeping the VM's own bindings
+    /// ignorant of `wgpu`.
+    pub fn new(draw_commands: Rc<RefCell<Vec<DrawCommand>>>) -> Result<Self> {
         let js_runtime = JsRuntime::new()?;
 
         let guard = Rc::new(GuardState::default());
         {
             let guard = Rc::clone(&guard);
-            js_runtime.set_interrupt_handler(Some(Box::new(move || {
-                match guard.deadline.get() {
-                    Some(deadline) if Instant::now() >= deadline => {
-                        guard.fired.set(true);
-                        true
-                    }
-                    _ => false,
+            js_runtime.set_interrupt_handler(Some(Box::new(move || match guard.deadline.get() {
+                Some(deadline) if Instant::now() >= deadline => {
+                    guard.fired.set(true);
+                    true
                 }
+                _ => false,
             })));
         }
 
@@ -106,6 +131,7 @@ impl ElysiumRuntime {
             let global = ctx.globals();
             global.set("print", Function::new(ctx.clone(), print)?)?;
             bootstrap_jsx_runtime(&ctx)?;
+            bootstrap_framebuffer_bindings(&ctx, draw_commands)?;
             Ok(())
         })?;
 
@@ -113,17 +139,49 @@ impl ElysiumRuntime {
             _js_runtime: js_runtime,
             context,
             guard,
+            module_namespace: RefCell::new(None),
         })
     }
 
     /// Compiles and evaluates `source` as an ES module named `name` (its
     /// path, used as the base for resolving any relative imports it has).
+    /// Retains the module's namespace object so a later [`Self::call_function`]
+    /// can look up exported callbacks (`update`, `draw`) on it.
     pub fn eval_module(&self, name: &str, source: &str) -> std::result::Result<(), GuardedError> {
         let compiled = transform::compile(source).map_err(GuardedError::Exception)?;
 
-        self.run_guarded(DEFAULT_EVAL_BUDGET, |ctx| {
-            let (_module, promise) = Module::declare(ctx.clone(), name, compiled)?.eval()?;
-            promise.finish::<()>()
+        let namespace = self.run_guarded(DEFAULT_EVAL_BUDGET, |ctx| {
+            let (module, promise) = Module::declare(ctx.clone(), name, compiled)?.eval()?;
+            promise.finish::<()>()?;
+            Ok(Persistent::save(ctx, module.namespace()?))
+        })?;
+
+        *self.module_namespace.borrow_mut() = Some(namespace);
+        Ok(())
+    }
+
+    /// Calls the entry module's exported `name` function with `args`, if it
+    /// exported one — a program isn't required to export `update`/`draw`,
+    /// so a missing export is `Ok(false)`, not an error. Reuses
+    /// [`Self::run_guarded`] with [`FRAME_BUDGET`] instead of
+    /// `DEFAULT_EVAL_BUDGET`: the same guaranteed-bounded calling
+    /// convention every call into the VM goes through, just a tighter
+    /// per-frame deadline.
+    pub fn call_function<A>(&self, name: &str, args: A) -> std::result::Result<bool, GuardedError>
+    where
+        A: for<'js> IntoArgs<'js>,
+    {
+        let Some(namespace) = self.module_namespace.borrow().clone() else {
+            return Ok(false);
+        };
+
+        self.run_guarded(FRAME_BUDGET, |ctx| {
+            let namespace = namespace.restore(ctx)?;
+            let Ok(function) = namespace.get::<_, Function>(name) else {
+                return Ok(false);
+            };
+            function.call::<A, ()>(args)?;
+            Ok(true)
         })
     }
 
@@ -131,12 +189,6 @@ impl ElysiumRuntime {
     /// deadline before running `f`, clears it after, and — on failure —
     /// distinguishes "the interrupt handler fired" (`Timeout`) from any
     /// other thrown/returned error (`Exception`) via [`GuardState::fired`].
-    ///
-    /// Forward-looking note: a future per-callback entry point (e.g. a
-    /// `call_function(name, args)` for `love.update`/`love.draw`-style
-    /// kernel calls) would call this same helper with a much tighter budget
-    /// than `DEFAULT_EVAL_BUDGET` — no new timeout logic, just a new
-    /// constant and closure body.
     fn run_guarded<T>(
         &self,
         budget: Duration,
@@ -145,15 +197,17 @@ impl ElysiumRuntime {
         self.guard.fired.set(false);
         self.guard.deadline.set(Some(Instant::now() + budget));
 
-        let result = self.context.with(|ctx| -> std::result::Result<T, GuardedError> {
-            f(&ctx).map_err(|err| {
-                if self.guard.fired.get() {
-                    GuardedError::Timeout
-                } else {
-                    GuardedError::Exception(describe_exception(&ctx, err))
-                }
-            })
-        });
+        let result = self
+            .context
+            .with(|ctx| -> std::result::Result<T, GuardedError> {
+                f(&ctx).map_err(|err| {
+                    if self.guard.fired.get() {
+                        GuardedError::Timeout
+                    } else {
+                        GuardedError::Exception(describe_exception(&ctx, err))
+                    }
+                })
+            });
 
         self.guard.deadline.set(None);
         result
@@ -172,6 +226,59 @@ fn bootstrap_jsx_runtime(ctx: &Ctx<'_>) -> Result<()> {
     global.set("h", namespace.get::<_, Value>("h")?)?;
     global.set("Fragment", namespace.get::<_, Value>("Fragment")?)?;
     Ok(())
+}
+
+/// Binds the *hidden* globals `ely:framebuffer`'s embedded module wraps
+/// (`__framebuffer_clear_screen`, `__framebuffer_fill_rectangle`) — never called by
+/// a program directly, only through `ely:framebuffer`'s exported
+/// `clearScreen`/`fillRectangle`. Each closure just resolves its numeric
+/// color id to a [`Color`] and pushes a [`DrawCommand`] onto the shared
+/// buffer; neither one touches any drawing state itself, so this file never
+/// needs to know anything about `wgpu`.
+fn bootstrap_framebuffer_bindings(
+    ctx: &Ctx<'_>,
+    draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
+) -> Result<()> {
+    let global = ctx.globals();
+
+    {
+        let draw_commands = Rc::clone(&draw_commands);
+        global.set(
+            "__framebuffer_clear_screen",
+            Function::new(ctx.clone(), move |ctx: Ctx<'_>, color: u16| -> Result<()> {
+                let color = resolve_color(&ctx, color)?;
+                draw_commands
+                    .borrow_mut()
+                    .push(DrawCommand::ClearScreen { color });
+                Ok(())
+            })?,
+        )?;
+    }
+
+    global.set(
+        "__framebuffer_fill_rectangle",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'_>, x: f32, y: f32, w: f32, h: f32, color: u16| -> Result<()> {
+                let color = resolve_color(&ctx, color)?;
+                draw_commands
+                    .borrow_mut()
+                    .push(DrawCommand::FillRectangle { x, y, w, h, color });
+                Ok(())
+            },
+        )?,
+    )?;
+
+    Ok(())
+}
+
+/// Resolves a numeric color id (as sent by one of `ely:framebuffer`'s generated
+/// `RED_500`-style constants) to a [`Color`], throwing a `TypeError` if it's
+/// out of range — only reachable if a program bypasses the generated
+/// constants and passes an arbitrary number instead.
+fn resolve_color(ctx: &Ctx<'_>, id: u16) -> Result<crate::framebuffer::Color> {
+    crate::framebuffer::Color::from_id(id)
+        .ok_or_else(|| rquickjs::Exception::throw_type(ctx, &format!("{id} is not a valid color")))
 }
 
 /// Compiles and declares (but doesn't evaluate) the embedded runtime module
@@ -225,9 +332,13 @@ fn describe_exception(ctx: &Ctx<'_>, err: Error) -> String {
     }
 }
 
-/// Resolves a bare specifier matching one of [`EMBEDDED_RUNTIME_MODULES`] to
-/// its virtual `elysium:`-prefixed name; everything else (relative imports,
-/// unrecognized bare specifiers) falls through to the wrapped [`FileResolver`].
+/// Resolves specifiers naming a [`EMBEDDED_RUNTIME_MODULES`] entry to its
+/// canonical `ely:`-prefixed form — either because a program already wrote
+/// it out explicitly (`"ely:framebuffer"`, passed through unchanged) or because
+/// it's a bare specifier this rewrites internally (`"jsx"` -> `"ely:jsx"`,
+/// today used only by `jsx`'s global bootstrap, not written by programs).
+/// Everything else (relative imports, unrecognized bare specifiers) falls
+/// through to the wrapped [`FileResolver`].
 struct EmbeddedOrFileResolver(FileResolver);
 
 impl Resolver for EmbeddedOrFileResolver {
@@ -238,15 +349,18 @@ impl Resolver for EmbeddedOrFileResolver {
         name: &str,
         attributes: Option<ImportAttributes<'js>>,
     ) -> Result<String> {
-        if !name.starts_with('.') && embedded_module_source(name).is_some() {
+        if let Some(embedded_name) = name.strip_prefix(EMBEDDED_MODULE_SCHEME) {
+            if embedded_module_source(embedded_name).is_some() {
+                return Ok(name.to_string());
+            }
+        } else if !name.starts_with('.') && embedded_module_source(name).is_some() {
             return Ok(format!("{EMBEDDED_MODULE_SCHEME}{name}"));
         }
         self.0.resolve(ctx, base, name, attributes)
     }
 }
 
-/// Loads a module by name: an `elysium:`-prefixed name comes from
-/// [`EMBEDDED_RUNTIME_MODULES`], anything else is read straight off disk.
+/// Loads a module by name: an `ely:`-prefixed name comes from
 /// Either way the source is compiled (JSX -> `h()`, then TypeScript erased)
 /// before being handed to QuickJS; `import`/`export` are left alone by
 /// `transform::compile`, so the compiled text is still valid module source.
