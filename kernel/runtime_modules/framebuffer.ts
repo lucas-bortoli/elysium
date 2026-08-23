@@ -5,21 +5,86 @@
 // `Color` enum so the numeric ids the two sides agree on never drift.
 
 declare function __framebuffer_clear_screen(color: Color): void;
-declare function __framebuffer_fill_rectangle(x: number, y: number, w: number, h: number, color: Color): void;
+declare function __framebuffer_fill_rectangle(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  color: Color,
+): void;
 
 // A color from the kernel's fixed palette, as one of the named constants
 // below (e.g. `SLATE_900`). The underlying numeric id has no meaning of its
 // own outside matching kernel/framebuffer/colors.rs's `Color` enum.
 export type Color = number;
 
+/** Thrown by `clearScreen`/`fillRectangle` when called from outside a
+ * currently running draw handler (see `addDrawHandler`). */
+export class DrawOutsideHandlerError extends Error {
+  constructor() {
+    super(
+      "clearScreen/fillRectangle can only be called from inside a registered draw handler",
+    );
+    this.name = "DrawOutsideHandlerError";
+  }
+}
+
+export type DrawTickerId = number;
+
+let nextHandlerId = 1;
+const drawHandlers = new Map<DrawTickerId, () => void>();
+let insideDrawHandler = false;
+let frameScheduled = false;
+
+function frame() {
+  frameScheduled = false;
+  insideDrawHandler = true;
+  try {
+    for (const handler of [...drawHandlers.values()]) handler();
+  } finally {
+    insideDrawHandler = false;
+  }
+  if (drawHandlers.size > 0) scheduleFrame();
+}
+
+function scheduleFrame() {
+  if (!frameScheduled) {
+    frameScheduled = true;
+    requestAnimationFrame(frame);
+  }
+}
+
+/** Registers `handler` to run once per frame; `clearScreen`/`fillRectangle`
+ * only take effect when called from inside a running handler. Returns an id
+ * for `removeDrawHandler`. */
+export function addDrawHandler(handler: () => void): DrawTickerId {
+  const id = nextHandlerId++;
+  drawHandlers.set(id, handler);
+  scheduleFrame();
+  return id;
+}
+
+/** Stops calling the draw handler registered under `id`. */
+export function removeDrawHandler(id: DrawTickerId): void {
+  drawHandlers.delete(id);
+}
+
 /** Clears the whole screen to `color`. */
 export function clearScreen(color: Color): void {
-    __framebuffer_clear_screen(color);
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_clear_screen(color);
 }
 
 /** Fills an axis-aligned rectangle at `(x, y)`, `w` wide and `h` tall, with `color`. */
-export function fillRectangle(x: number, y: number, w: number, h: number, color: Color): void {
-    __framebuffer_fill_rectangle(x, y, w, h, color);
+export function fillRectangle(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  color: Color,
+): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_fill_rectangle(x, y, w, h, color);
 }
 
 export const RED_50: Color = 0;
