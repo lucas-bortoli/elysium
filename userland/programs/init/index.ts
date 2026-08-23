@@ -1,10 +1,4 @@
-import {
-  AMBER_400,
-  SLATE_900,
-  addDrawHandler,
-  clearScreen,
-  fillRectangle,
-} from "ely:framebuffer";
+import { Color, addDrawHandler, clearScreen, fillRectangle } from "ely:framebuffer";
 import { addUpdateTicker } from "ely:loop";
 
 let x = 0;
@@ -16,6 +10,6 @@ addUpdateTicker((dt) => {
 });
 
 addDrawHandler(() => {
-  clearScreen(SLATE_900);
-  fillRectangle(x, 300, 100, 100, AMBER_400);
+  clearScreen(Color.Slate900);
+  fillRectangle(x, 300, 100, 100, Color.Amber400);
 });

@@ -4,10 +4,10 @@ Elysium's kernel provides drawing machinery to programs as a module a program
 imports explicitly. The Framebuffer is a drawing surface a program can put pictures on.
 
 Elysium ships with one fixed, curated palette, and every color a program
-can draw with is one of its named constants exported from `ely:framebuffer`.
-Constraining every program to the same palette keeps what gets drawn visually
-consistent across, the way a shared system theme would, instead of every program
-inventing its own arbitrary colors.
+can draw with is one of `Color`'s named entries, exported from
+`ely:framebuffer`. Constraining every program to the same palette keeps
+what gets drawn visually consistent across, the way a shared system theme
+would, instead of every program inventing its own arbitrary colors.
 
 A program doesn't open its own drawing loop to use the framebuffer. Instead
 it registers a draw handler, a function the kernel calls once every frame
@@ -19,13 +19,7 @@ registered through `ely:loop` ([1])) throws a `DrawOutsideHandlerError`
 rather than silently doing nothing.
 
 ```ts
-import {
-  addDrawHandler,
-  clearScreen,
-  fillRectangle,
-  SLATE_900,
-  AMBER_400,
-} from "ely:framebuffer";
+import { Color, addDrawHandler, clearScreen, fillRectangle } from "ely:framebuffer";
 import { addUpdateTicker } from "ely:loop";
 
 let x = 0;
@@ -36,8 +30,8 @@ addUpdateTicker((dt) => {
 });
 
 addDrawHandler(() => {
-  clearScreen(SLATE_900);
-  fillRectangle(x, 300, 100, 100, AMBER_400);
+  clearScreen(Color.Slate900);
+  fillRectangle(x, 300, 100, 100, Color.Amber400);
 });
 ```
 

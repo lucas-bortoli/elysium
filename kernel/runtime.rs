@@ -663,10 +663,10 @@ mod tests {
     #[test]
     fn draw_calls_inside_a_registered_handler_succeed() {
         let runtime = eval(
-            "import { clearScreen, addDrawHandler, SLATE_900 } from 'ely:framebuffer'; \
+            "import { clearScreen, addDrawHandler, Color } from 'ely:framebuffer'; \
              globalThis.drawn = false; \
              addDrawHandler(() => { \
-                 clearScreen(SLATE_900); \
+                 clearScreen(Color.Slate900); \
                  globalThis.drawn = true; \
              });",
         );
