@@ -14,9 +14,15 @@ use window::ElysiumWindow;
 pub mod transform;
 
 fn main() {
-    let path = "userland/programs/init/index.ts";
-    let program =
-        std::fs::read_to_string(path).unwrap_or_else(|err| panic!("failed to read {path}: {err}"));
+    let exe_dir = std::env::current_exe()
+        .expect("failed to locate the running binary")
+        .parent()
+        .expect("binary path has no parent directory")
+        .to_path_buf();
+    let path = exe_dir.join("userland/programs/init/index.ts");
+    let program = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+    let path = path.to_str().expect("binary path is not valid UTF-8");
 
     let draw_commands = Rc::new(RefCell::new(Vec::new()));
     let runtime = ElysiumRuntime::new(Rc::clone(&draw_commands))
