@@ -46,8 +46,6 @@
   "include": [
     "userland/programs/**/*.ts",
     "userland/programs/**/*.tsx",
-    "kernel/runtime_modules/**/*.ts",
-    "kernel/runtime_modules/**/*.tsx",
     "kernel/runtime_modules/**/*.d.ts"
   ],
 
