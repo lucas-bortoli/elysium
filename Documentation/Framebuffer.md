@@ -10,33 +10,41 @@ consistent across, the way a shared system theme would, instead of every program
 inventing its own arbitrary colors.
 
 A program doesn't open its own drawing loop to use the framebuffer. Instead
-it exports up to two functions from its entry module, and the kernel calls
-into them itself, every frame, for as long as the program is running:
-`update(dt)` first, with `dt` the time in seconds since the previous frame,
-then `draw()`, where the drawing calls belong. Both are optional — a
-program that never exports either just never gets called back, and nothing
-about the framebuffer is required for a program to run at all.
+it registers a draw handler, a function the kernel calls once every frame
+for as long as it stays registered: `addDrawHandler` returns an id, and
+`removeDrawHandler(id)` unregisters it. Drawing calls only take effect from
+inside a currently running draw handler — calling `clearScreen` or
+`fillRectangle` from anywhere else (module top level, a timer, a ticker
+registered through `ely:loop` ([1])) throws a `DrawOutsideHandlerError`
+rather than silently doing nothing.
 
 ```ts
 import {
+  addDrawHandler,
   clearScreen,
   fillRectangle,
   SLATE_900,
   AMBER_400,
 } from "ely:framebuffer";
+import { registerUpdateTicker } from "ely:loop";
 
 let x = 0;
 
-export function update(dt: number) {
+registerUpdateTicker((dt) => {
   x += 200 * dt;
   if (x > 1280) x = -100;
-}
+});
 
-export function draw() {
+addDrawHandler(() => {
   clearScreen(SLATE_900);
   fillRectangle(x, 300, 100, 100, AMBER_400);
-}
+});
 ```
 
-Draw calls are batched. What a program draws during `draw()` doesn't appear on screen call by call. That means later calls draw over earlier ones where they
-overlap.
+Draw calls are batched. What a program draws during a draw handler doesn't
+appear on screen call by call. That means later calls draw over earlier
+ones where they overlap.
+
+# References
+
+[1] [Per-frame ticking](Loop.md)

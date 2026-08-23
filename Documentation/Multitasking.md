@@ -40,8 +40,9 @@ One-shot module evaluation — running a program's top-level code — goes
 through it budgeted generously, since program initialization can
 legitimately take longer than a single frame. Every per-frame call into a
 program goes through the same entry point too, just with a much tighter
-budget: `update`/`draw` ([1]) and, per frame, any timer callback due to run
-([2]) — no separate timeout logic was needed for either, just a new budget
+budget: whichever timer callback is due to run that frame, whether a
+program's own `setTimeout`, an update ticker ([1]), or a draw handler ([2])
+— no separate timeout logic was needed for any of them, just a new budget
 and a different call inside.
 
 The VM is destroyed, but Elysium soldiers on: a guarded call ends one of two
@@ -84,5 +85,5 @@ failure mode this design targets.
 
 # References
 
-[1] [The Framebuffer](Framebuffer.md)
-[2] [Timers](Timers.md)
+[1] [Per-frame ticking](Loop.md)
+[2] [The Framebuffer](Framebuffer.md)
