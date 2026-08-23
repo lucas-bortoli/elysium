@@ -36,13 +36,13 @@ deadline, runs the call, disarms the deadline, and classifies the outcome.
 This is deliberate: a kernel author calling into a program should never have
 to remember to wrap that call in a timeout themselves, so budget enforcement
 lives inside the VM's own calling convention rather than in each call site.
-Today the only entry point is one-shot module evaluation — running a
-program's top-level code — budgeted generously, since program
-initialization can legitimately take longer than a single frame. A future
-per-callback entry point, for calling into `love.update`/`love.draw`-style
-kernel callbacks, would reuse the exact same guarded entry point with a much
-tighter, per-frame budget; no new timeout logic would be needed, just a new
-budget and a different call inside.
+One-shot module evaluation — running a program's top-level code — goes
+through it budgeted generously, since program initialization can
+legitimately take longer than a single frame. Every per-frame call into a
+program goes through the same entry point too, just with a much tighter
+budget: `update`/`draw` ([1]) and, per frame, any timer callback due to run
+([2]) — no separate timeout logic was needed for either, just a new budget
+and a different call inside.
 
 The VM is destroyed, but Elysium soldiers on: a guarded call ends one of two
 ways. It can time out, meaning the interrupt hook fired, in which case the
@@ -81,3 +81,8 @@ Running each VM on its own thread remains an option to reach for later if a
 VM ever needs to be forcibly reclaimed rather than just cooperatively
 interrupted — nothing here forecloses it, it just isn't required for the
 failure mode this design targets.
+
+# References
+
+[1] [The Framebuffer](Framebuffer.md)
+[2] [Timers](Timers.md)
