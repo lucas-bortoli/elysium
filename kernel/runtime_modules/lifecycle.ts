@@ -1,3 +1,5 @@
+import type { TickerId } from "ely:lifecycle";
+
 declare function __add_post_init_handler(handler: () => void): void;
 
 /** Registers `handler` to run once, right after the program's top-level
@@ -13,8 +15,6 @@ export function addPostInitHandler(handler: () => void): void {
 export function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
-export type TickerId = number;
 
 let nextTickerId = 1;
 const tickers = new Map<TickerId, (dt: number) => void>();

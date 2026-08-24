@@ -13,6 +13,11 @@ use crate::transform;
 /// imported by a program writing the full `"ely:framebuffer"` specifier out
 /// explicitly. To add another, drop the file under `runtime_modules/` and
 /// add an entry here.
+///
+/// The ambient types userland typechecks programs against (`elysium.d.ts`)
+/// describe this same surface independently, since it has no way to see
+/// these bindings directly — keep the two in sync by hand when this list,
+/// or any of these modules' exported signatures, changes.
 const EMBEDDED_RUNTIME_MODULES: &[(&str, &str)] = &[
     ("jsx", include_str!("runtime_modules/jsx-runtime.ts")),
     (

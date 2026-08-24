@@ -23,7 +23,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npx --yes -p typescript@5.9.3 tsc -p . --noEmit
+      - run: npx --yes -p typescript@5.9.3 tsc -p userland --noEmit
+      - run: npx --yes -p typescript@5.9.3 tsc -p kernel/runtime_modules --noEmit
 
   package:
     name: package (${{ matrix.os }})
