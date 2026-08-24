@@ -3,6 +3,7 @@
 // palette), never raw RGBA channels a program could get wrong.
 
 import type { Size2d } from "ely:math";
+import type { DrawTickerId } from "ely:framebuffer";
 
 declare function __framebuffer_clear_screen(color: Color): void;
 declare function __framebuffer_fill_rectangle(
@@ -322,8 +323,6 @@ export class DrawOutsideHandlerError extends Error {
     this.name = "DrawOutsideHandlerError";
   }
 }
-
-export type DrawTickerId = number;
 
 // The framebuffer's logical resolution — kept in sync by hand with
 // kernel/framebuffer.rs's `FRAMEBUFFER_WIDTH`/`FRAMEBUFFER_HEIGHT`, the same
