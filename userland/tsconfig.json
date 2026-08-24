@@ -1,0 +1,46 @@
+{
+  "compilerOptions": {
+    // The host covers the ES2023 core language and builtins. There's no
+    // browser/Node host, so no DOM/Node lib.
+    "target": "ES2023",
+    "lib": ["ES2023"],
+
+    // Programs are evaluated as real ES modules, resolving relative imports
+    // straight off disk. "preserve" is still the closest fit since nothing
+    // here ever emits: type syntax is erased before a program runs, but
+    // import/export are left untouched.
+    "module": "preserve",
+    "moduleDetection": "force",
+
+    // JSX is rewritten into calls to the `h`/`Fragment` factory (see
+    // elysium.d.ts for the ambient `JSX` namespace this pairs with, and for
+    // `h`/`Fragment` themselves, available as globals so a program never
+    // needs to import them). There's no React runtime, so "react-jsx"'s
+    // automatic `react/jsx-runtime` import isn't applicable here.
+    "jsx": "react",
+    "jsxFactory": "h",
+    "jsxFragmentFactory": "Fragment",
+
+    // Type syntax is erased before a program runs, with no type checking of
+    // its own, so this config is what actually catches program errors
+    // before they run.
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+
+    // Only the host-provided globals declared in elysium.d.ts exist — no
+    // ambient Node/DOM/web-worker types.
+    "types": [],
+
+    // This config is for typechecking only; erasure happens at run time, so
+    // there's nothing for tsc itself to emit.
+    "noEmit": true,
+
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["**/*.ts", "**/*.tsx"]
+}

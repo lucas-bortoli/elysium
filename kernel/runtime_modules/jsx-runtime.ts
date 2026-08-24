@@ -6,22 +6,10 @@
 // does no rendering of its own — it just builds a plain object tree, which a
 // host-provided renderer can later walk to draw to the screen.
 
-export type VNodeType = string | ((props: Props) => VNode);
-
-export interface Props {
-  [key: string]: unknown;
-}
-
-export interface VNode {
-  type: VNodeType;
-  props: Props;
-  children: Child[];
-}
-
-type Child = VNode | string | number;
+type Child = JSX.Element | string | number;
 
 /** Marker type used as `h`'s `type` for `<>...</>` fragments. */
-export function Fragment(props: Props): VNode {
+export function Fragment(props: Props): JSX.Element {
   return { type: Fragment, props, children: props.children as Child[] };
 }
 
@@ -29,7 +17,7 @@ export function h(
   type: VNodeType,
   props: Props | null,
   ...children: unknown[]
-): VNode {
+): JSX.Element {
   return {
     type,
     props: props ?? {},

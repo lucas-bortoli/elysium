@@ -1,42 +1,9 @@
-// Everything TypeScript needs to typecheck a program against the Elysium
-// host API, in one place: ambient globals (print, timers, the JSX factory),
-// the ambient `JSX` namespace, and virtual `"ely:*"` module specifiers.
-// TypeScript has no file on disk to resolve a bare `"ely:framebuffer"`/
-// `"ely:lifecycle"`/`"ely:math"`/`"ely:input"` import against (they're
-// schemes the kernel's module loader recognizes, backed at runtime by the
-// matching .ts file under this directory), so the `declare module` blocks
-// below are what let programs importing them typecheck at all. Keep in
-// sync with the bindings registered in kernel/runtime.rs, kernel/timers.rs,
-// and kernel/input.rs, and with kernel/runtime_modules/jsx-runtime.ts,
-// framebuffer.ts, lifecycle.ts, math.ts, input.ts, and
-// kernel/framebuffer/colors.rs's `Color` enum.
+// Ambient declarations for the Elysium host API: globals (print, timers,
+// the JSX factory), the ambient `JSX` namespace, and the `ely:framebuffer`/
+// `ely:lifecycle`/`ely:math`/`ely:input` namespaces.
 
 /** Writes a line to the host's stdout. */
 declare function print(...message: any): void;
-
-// Ambient JSX namespace paired with the classic (`jsxFactory: "h"`) JSX
-// transform configured in tsconfig.json and jsx-runtime.ts's `h`/`Fragment`.
-// There's no DOM/React here, so this doesn't attempt to type individual
-// intrinsic elements (`<div>`, `<span>`, ...) against a known element
-// catalog — any tag name is accepted, with any props.
-declare namespace JSX {
-  /** What `h(...)`/JSX expressions evaluate to. */
-  type Element = import("./jsx-runtime").VNode;
-
-  interface IntrinsicElements {
-    [tagName: string]: Record<string, unknown>;
-  }
-}
-
-// kernel/runtime.rs bootstraps jsx-runtime.ts's `h`/`Fragment` exports onto
-// every program's global scope, so the classic JSX transform above can find
-// them without a program ever writing `import { h, Fragment } from "jsx"`.
-declare const h: (
-  type: import("./jsx-runtime").VNodeType,
-  props: import("./jsx-runtime").Props | null,
-  ...children: unknown[]
-) => JSX.Element;
-declare const Fragment: (props: import("./jsx-runtime").Props) => JSX.Element;
 
 /** Schedules `callback` to run once, after `delay` milliseconds (clamped to
  * `0` if omitted, negative, or `NaN`), passing any trailing `args` through
@@ -401,7 +368,7 @@ declare module "ely:framebuffer" {
   export function getHeight(): number;
 
   /** The framebuffer's logical size, in pixels. */
-  export function getSize2d(): import("./math").Size2d;
+  export function getSize2d(): import("ely:math").Size2d;
 
   /** Registers `handler` to run once per frame; `clearScreen`/`fillRectangle`
    * only take effect when called from inside a running handler. Returns an
@@ -523,7 +490,7 @@ declare module "ely:input" {
   export function getPointerY(): number;
 
   /** The pointer's current position. */
-  export function getPointerPosition(): import("./math").Vector2d;
+  export function getPointerPosition(): import("ely:math").Vector2d;
 
   /** Whether the pointer's button is currently held down. */
   export function isPointerDown(): boolean;
@@ -538,7 +505,7 @@ declare module "ely:input" {
   export function wasPointerReleased(): boolean;
 
   /** How far the pointer moved since last frame. */
-  export function getPointerDelta(): import("./math").Vector2d;
+  export function getPointerDelta(): import("ely:math").Vector2d;
 
   /** How far the scroll wheel moved since last frame. */
   export function getScrollDelta(): number;
@@ -760,3 +727,37 @@ declare module "ely:input" {
   /** Whether `key` was released this frame. */
   export function wasKeyReleased(key: Key): boolean;
 }
+
+/** What a JSX expression's `type`/`h`'s first argument can be: a tag name,
+ * or a component function. */
+type VNodeType = string | ((props: Props) => JSX.Element);
+
+/** A JSX element's props, keyed by attribute name. */
+interface Props {
+  [key: string]: unknown;
+}
+
+// There's no DOM/React here, so this doesn't attempt to type individual
+// intrinsic elements (`<div>`, `<span>`, ...) against a known element
+// catalog — any tag name is accepted, with any props.
+declare namespace JSX {
+  /** What `h(...)`/JSX expressions evaluate to. */
+  interface Element {
+    type: VNodeType;
+    props: Props;
+    children: (Element | string | number)[];
+  }
+
+  interface IntrinsicElements {
+    [tagName: string]: Record<string, unknown>;
+  }
+}
+
+// `h`/`Fragment` are available as globals, so a program never needs to
+// write `import { h, Fragment } from "jsx"` for JSX to work.
+declare const h: (
+  type: VNodeType,
+  props: Props | null,
+  ...children: unknown[]
+) => JSX.Element;
+declare const Fragment: (props: Props) => JSX.Element;

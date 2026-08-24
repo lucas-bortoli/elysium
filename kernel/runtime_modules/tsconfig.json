@@ -15,12 +15,12 @@
     "moduleDetection": "force",
 
     // JSX is rewritten by kernel/transform/jsx.rs into calls to the `h`/
-    // `Fragment` factory exported from kernel/runtime_modules/jsx-runtime.ts
-    // (see kernel/runtime_modules/elysium.d.ts for the ambient `JSX` namespace
-    // this pairs with). kernel/runtime.rs bootstraps `h`/`Fragment` as
-    // globals, so programs never need to import them — there's no React
-    // runtime, so "react-jsx"'s automatic `react/jsx-runtime` import isn't
-    // applicable here.
+    // `Fragment` factory exported from jsx-runtime.ts (see
+    // userland/elysium.d.ts for the ambient `JSX` namespace this pairs
+    // with). kernel/runtime.rs bootstraps `h`/`Fragment` as globals, so
+    // programs never need to import them — there's no React runtime, so
+    // "react-jsx"'s automatic `react/jsx-runtime` import isn't applicable
+    // here.
     "jsx": "react",
     "jsxFactory": "h",
     "jsxFragmentFactory": "Fragment",
@@ -35,23 +35,16 @@
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
 
-    // Only the host-provided globals declared in
-    // kernel/runtime_modules/elysium.d.ts exist — no ambient
-    // Node/DOM/web-worker types.
+    // Only the host-provided globals declared in userland/elysium.d.ts
+    // exist — no ambient Node/DOM/web-worker types.
     "types": [],
+
+    // This config is for typechecking only; erasure happens at run time, so
+    // there's nothing for tsc itself to emit.
+    "noEmit": true,
 
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": [
-    "userland/programs/**/*.ts",
-    "userland/programs/**/*.tsx",
-    "kernel/runtime_modules/**/*.d.ts"
-  ],
-
-  // Golden fixtures for kernel/transform's type-erasure tests: deliberately
-  // invalid/unusual TS syntax exercising the erasure transform, not meant to
-  // type-check. Excluded (rather than `// @ts-nocheck`'d) so the fixtures'
-  // exact byte content, which the tests compare against, stays untouched.
-  "exclude": ["kernel/transform/fixtures"]
+  "include": ["*.ts", "../../userland/elysium.d.ts"]
 }

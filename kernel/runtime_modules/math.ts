@@ -1,19 +1,4 @@
-export interface Vector2d {
-  x: number;
-  y: number;
-}
-
-export interface Size2d {
-  width: number;
-  height: number;
-}
-
-export interface Rectangle {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
+import type { Vector2d, Rectangle } from "ely:math";
 
 /** Tolerance `floatEquals`/`vector2Equals` compare within, scaled by the
  * magnitude of the values being compared — coarser than `Number.EPSILON`,
