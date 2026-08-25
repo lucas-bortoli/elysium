@@ -51,3 +51,5 @@ ones where they overlap.
 [1] [Per-frame ticking](Lifecycle.md)
 
 [2] [Input](Input.md)
+
+[3] [Loading images](Image.md)
