@@ -624,6 +624,64 @@ impl Color {
         let b = (hex & 0xff) as u8;
         tiny_skia::Color::from_rgba8(r, g, b, 255)
     }
+
+    /// The palette entry whose sRGB color is closest to `(r, g, b)` by
+    /// squared Euclidean distance — a linear scan over all 288 entries,
+    /// fine since this only runs once per pixel at image-load time
+    /// (`kernel/image.rs`'s palette quantization pass), never per frame. A
+    /// few palette shades are exact duplicates of each other (e.g.
+    /// `Zinc50`/`Neutral50`/`Mauve50` are all `0xfafafa`); on a tie, the
+    /// lowest-id entry wins.
+    pub fn nearest(r: u8, g: u8, b: u8) -> Color {
+        (0..COUNT as u16)
+            .map(|id| Color::from_id(id).expect("id in 0..COUNT is always valid"))
+            .min_by_key(|color| {
+                let hex = color.hex();
+                let dr = ((hex >> 16) & 0xff) as i32 - r as i32;
+                let dg = ((hex >> 8) & 0xff) as i32 - g as i32;
+                let db = (hex & 0xff) as i32 - b as i32;
+                dr * dr + dg * dg + db * db
+            })
+            .expect("palette is non-empty")
+    }
 }
 
 const COUNT: usize = 288;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every entry's own color must map back to *a* palette entry with the
+    /// same hex value — not necessarily the same variant, since a few
+    /// shades are exact duplicates (see `nearest`'s doc comment) and ties
+    /// resolve to the lowest id.
+    #[test]
+    fn nearest_round_trips_every_palette_entry_hex() {
+        for id in 0..COUNT as u16 {
+            let color = Color::from_id(id).unwrap();
+            let hex = color.hex();
+            let r = ((hex >> 16) & 0xff) as u8;
+            let g = ((hex >> 8) & 0xff) as u8;
+            let b = (hex & 0xff) as u8;
+            assert_eq!(
+                Color::nearest(r, g, b).hex(),
+                hex,
+                "nearest({r}, {g}, {b}) didn't round-trip {color:?}'s own hex"
+            );
+        }
+    }
+
+    #[test]
+    fn nearest_pure_black_and_white() {
+        assert_eq!(Color::nearest(0, 0, 0), Color::Black);
+        assert_eq!(Color::nearest(255, 255, 255), Color::White);
+    }
+
+    #[test]
+    fn nearest_picks_the_right_hue_family() {
+        assert!(format!("{:?}", Color::nearest(255, 0, 0)).starts_with("Red"));
+        assert!(format!("{:?}", Color::nearest(0, 0, 255)).starts_with("Blue"));
+        assert!(format!("{:?}", Color::nearest(0, 255, 0)).starts_with("Green"));
+    }
+}

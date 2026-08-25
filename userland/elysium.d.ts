@@ -1,6 +1,6 @@
 // Ambient declarations for the Elysium host API: globals (print, timers,
 // the JSX factory), the ambient `JSX` namespace, and the `ely:framebuffer`/
-// `ely:lifecycle`/`ely:math`/`ely:input` namespaces.
+// `ely:lifecycle`/`ely:math`/`ely:input`/`ely:image` namespaces.
 
 /** Writes a line to the host's stdout. */
 declare function print(...message: any): void;
@@ -353,8 +353,8 @@ declare module "ely:framebuffer" {
    * entries (e.g. `Color.Slate900`). */
   export type Color = (typeof Color)[keyof typeof Color];
 
-  /** Thrown by `clearScreen`/`fillRectangle` when called from outside a
-   * currently running draw handler (see `addDrawHandler`). */
+  /** Thrown by `clearScreen`/`fillRectangle`/`drawImage` when called from
+   * outside a currently running draw handler (see `addDrawHandler`). */
   export class DrawOutsideHandlerError extends Error {
     constructor();
   }
@@ -388,6 +388,14 @@ declare module "ely:framebuffer" {
     w: number,
     h: number,
     color: Color,
+  ): void;
+
+  /** Draws `image` with its top-left corner at `(x, y)`, at its natural
+   * size — no scaling or rotation. */
+  export function drawImage(
+    image: import("ely:image").Image | import("ely:image").ImageId,
+    x: number,
+    y: number,
   ): void;
 
   /** Sets how many physical pixels the window draws each logical pixel as
@@ -732,6 +740,34 @@ declare module "ely:input" {
 
   /** Whether `key` was released this frame. */
   export function wasKeyReleased(key: Key): boolean;
+}
+
+declare module "ely:image" {
+  /** Opaque handle to a loaded image, returned by `loadImage`. */
+  export type ImageId = number;
+
+  /** A loaded, palette-quantized picture, ready to be drawn with
+   * `ely:framebuffer`'s `drawImage`. */
+  export interface Image {
+    readonly id: ImageId;
+    readonly width: number;
+    readonly height: number;
+  }
+
+  /** Thrown by `loadImage` when `path` doesn't exist, escapes the
+   * program's own directory, or isn't a decodable PNG. */
+  export class ImageLoadError extends Error {
+    constructor(message: string);
+  }
+
+  /** Loads the PNG at `path`, resolved relative to the program's own root
+   * directory. */
+  export function loadImage(path: string): Image;
+
+  /** Frees a loaded image early. An image not explicitly unloaded stays
+   * loaded for the lifetime of the program, not until nothing references
+   * it anymore — dropping every reference to an `Image` does not free it. */
+  export function unloadImage(image: Image | ImageId): void;
 }
 
 /** What a JSX expression's `type`/`h`'s first argument can be: a tag name,

@@ -27,8 +27,11 @@ pub use colors::Color;
 
 /// One drawing instruction accumulated during a program's `draw()` call.
 /// Colors are always a [`Color`] from the fixed palette, never raw,
-/// program-supplied RGBA channels.
-#[derive(Debug, Clone, Copy)]
+/// program-supplied RGBA channels. Not `Copy` — `DrawImage` carries an
+/// `Rc<tiny_skia::Pixmap>`, already resolved from a JS-supplied image id at
+/// the binding boundary (see `__framebuffer_draw_image` below), the same
+/// way `resolve_color` resolves a color id before it ever reaches here.
+#[derive(Debug, Clone)]
 pub enum DrawCommand {
     ClearScreen {
         color: Color,
@@ -40,22 +43,29 @@ pub enum DrawCommand {
         h: f32,
         color: Color,
     },
+    DrawImage {
+        pixmap: Rc<tiny_skia::Pixmap>,
+        x: f32,
+        y: f32,
+    },
 }
 
 /// Binds the *hidden* globals `ely:framebuffer`'s embedded module wraps
 /// (`__framebuffer_clear_screen`, `__framebuffer_fill_rectangle`,
-/// `__framebuffer_set_scale`) — never called by a program directly, only
-/// through `ely:framebuffer`'s exported `clearScreen`/`fillRectangle`/
-/// `setScale`. The first two just resolve a numeric color id to a
-/// [`Color`] and push a [`DrawCommand`] onto the shared buffer; neither
-/// touches any drawing state itself, so this file never needs to know
-/// anything about how frames get rasterized. `setScale` instead writes
-/// directly into `scale`, the same shared cell [`Framebuffer::render`]
-/// reads each frame to notice a change and reconfigure itself.
+/// `__framebuffer_draw_image`, `__framebuffer_set_scale`) — never called by
+/// a program directly, only through `ely:framebuffer`'s exported
+/// `clearScreen`/`fillRectangle`/`drawImage`/`setScale`. The first three
+/// just resolve a numeric color or image id to a [`Color`]/`Rc<Pixmap>` and
+/// push a [`DrawCommand`] onto the shared buffer; none of them touch any
+/// drawing state itself, so this file never needs to know anything about
+/// how frames get rasterized. `setScale` instead writes directly into
+/// `scale`, the same shared cell [`Framebuffer::render`] reads each frame
+/// to notice a change and reconfigure itself.
 pub fn bootstrap_framebuffer_bindings(
     ctx: &Ctx<'_>,
     draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
     scale: Rc<Cell<u32>>,
+    images: Rc<crate::image::ImageTable>,
 ) -> Result<()> {
     let global = ctx.globals();
 
@@ -73,15 +83,36 @@ pub fn bootstrap_framebuffer_bindings(
         )?;
     }
 
+    {
+        let draw_commands = Rc::clone(&draw_commands);
+        global.set(
+            "__framebuffer_fill_rectangle",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'_>, x: f32, y: f32, w: f32, h: f32, color: u16| -> Result<()> {
+                    let color = resolve_color(&ctx, color)?;
+                    draw_commands.borrow_mut().push(DrawCommand::FillRectangle {
+                        x,
+                        y,
+                        w,
+                        h,
+                        color,
+                    });
+                    Ok(())
+                },
+            )?,
+        )?;
+    }
+
     global.set(
-        "__framebuffer_fill_rectangle",
+        "__framebuffer_draw_image",
         Function::new(
             ctx.clone(),
-            move |ctx: Ctx<'_>, x: f32, y: f32, w: f32, h: f32, color: u16| -> Result<()> {
-                let color = resolve_color(&ctx, color)?;
+            move |ctx: Ctx<'_>, id: u32, x: f32, y: f32| -> Result<()> {
+                let pixmap = crate::image::resolve_image(&ctx, &images, id)?;
                 draw_commands
                     .borrow_mut()
-                    .push(DrawCommand::FillRectangle { x, y, w, h, color });
+                    .push(DrawCommand::DrawImage { pixmap, x, y });
                 Ok(())
             },
         )?,
@@ -207,16 +238,21 @@ impl Framebuffer {
     /// so a program that never calls `clearScreen` sees each frame's
     /// drawing accumulate rather than get erased first. The last
     /// `ClearScreen` in `commands` wins, applied before any
-    /// `FillRectangle`, regardless of where in the command list it falls.
+    /// `FillRectangle`/`DrawImage`, regardless of where in the command list
+    /// it falls. `DrawImage` composites with `tiny_skia`'s default
+    /// source-over blending, which — since the destination is always fully
+    /// opaque by the time the per-command loop runs — keeps `present`'s
+    /// "every frame is fully opaque" assumption true without `present`
+    /// itself needing to know images exist.
     pub fn render(&mut self, commands: &[DrawCommand]) {
         let requested_scale = self.scale.get();
         if requested_scale != self.applied_scale {
             self.apply_scale(requested_scale);
         }
 
-        if let Some(color) = commands.iter().rev().find_map(|c| match *c {
-            DrawCommand::ClearScreen { color } => Some(color),
-            DrawCommand::FillRectangle { .. } => None,
+        if let Some(color) = commands.iter().rev().find_map(|c| match c {
+            DrawCommand::ClearScreen { color } => Some(*color),
+            _ => None,
         }) {
             self.pixmap.fill(color.to_skia());
         }
@@ -227,15 +263,29 @@ impl Framebuffer {
             anti_alias: false,
             ..Default::default()
         };
+        let image_paint = tiny_skia::PixmapPaint::default();
 
         for command in commands {
-            if let DrawCommand::FillRectangle { x, y, w, h, color } = *command {
-                let Some(rect) = tiny_skia::Rect::from_xywh(x, y, w, h) else {
-                    continue; // degenerate (zero/negative/non-finite) size
-                };
-                paint.set_color(color.to_skia());
-                self.pixmap
-                    .fill_rect(rect, &paint, tiny_skia::Transform::identity(), None);
+            match command {
+                DrawCommand::ClearScreen { .. } => {}
+                DrawCommand::FillRectangle { x, y, w, h, color } => {
+                    let Some(rect) = tiny_skia::Rect::from_xywh(*x, *y, *w, *h) else {
+                        continue; // degenerate (zero/negative/non-finite) size
+                    };
+                    paint.set_color(color.to_skia());
+                    self.pixmap
+                        .fill_rect(rect, &paint, tiny_skia::Transform::identity(), None);
+                }
+                DrawCommand::DrawImage { pixmap, x, y } => {
+                    self.pixmap.draw_pixmap(
+                        x.round() as i32,
+                        y.round() as i32,
+                        (**pixmap).as_ref(),
+                        &image_paint,
+                        tiny_skia::Transform::identity(),
+                        None,
+                    );
+                }
             }
         }
 
