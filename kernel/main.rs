@@ -5,7 +5,7 @@ mod runtime;
 mod timers;
 mod window;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use framebuffer::Framebuffer;
@@ -27,9 +27,14 @@ fn main() {
     let path = path.to_str().expect("binary path is not valid UTF-8");
 
     let draw_commands = Rc::new(RefCell::new(Vec::new()));
-    let input = Rc::new(Input::new());
-    let runtime = ElysiumRuntime::new(Rc::clone(&draw_commands), Rc::clone(&input))
-        .expect("failed to initialize Elysium runtime");
+    let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
+    let input = Rc::new(Input::new(Rc::clone(&scale)));
+    let runtime = ElysiumRuntime::new(
+        Rc::clone(&draw_commands),
+        Rc::clone(&input),
+        Rc::clone(&scale),
+    )
+    .expect("failed to initialize Elysium runtime");
 
     if let Err(err) = runtime.eval_module(path, &program) {
         report_frame_error("module evaluation", err);
@@ -40,10 +45,14 @@ fn main() {
 
     let mut framebuffer: Option<Framebuffer> = None;
 
+    // Reflects whatever `scale` was set to by the time evaluation/post-init
+    // handlers finished, so a program that calls `setScale` during startup
+    // gets a window created at the right size from the start, rather than
+    // opening at DEFAULT_SCALE and immediately resizing.
     ElysiumWindow::new(
         "Elysium",
-        framebuffer::FRAMEBUFFER_WIDTH * framebuffer::SCALE,
-        framebuffer::FRAMEBUFFER_HEIGHT * framebuffer::SCALE,
+        framebuffer::FRAMEBUFFER_WIDTH * scale.get(),
+        framebuffer::FRAMEBUFFER_HEIGHT * scale.get(),
     )
     .run(
         {
@@ -51,7 +60,8 @@ fn main() {
             move |event| input.handle_window_event(event)
         },
         |window, _dt| {
-            let framebuffer = framebuffer.get_or_insert_with(|| Framebuffer::new(window.clone()));
+            let framebuffer = framebuffer
+                .get_or_insert_with(|| Framebuffer::new(window.clone(), Rc::clone(&scale)));
 
             if let Err(err) = runtime.run_due_timers() {
                 report_frame_error("timer", err);

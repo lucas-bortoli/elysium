@@ -11,14 +11,19 @@ use std::rc::Rc;
 use rquickjs::{Ctx, Function, Result};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 
-use crate::framebuffer;
 use keys::Key;
 
 pub struct Input {
+    /// Shared with the Framebuffer device's own `scale` cell (see
+    /// `framebuffer::Framebuffer`) — the same physical-pixels-per-
+    /// logical-pixel ratio a program can change via `setScale`, read here
+    /// so `handle_window_event` converts physical pointer coordinates
+    /// against whatever scale is actually in effect, not a stale one.
+    scale: Rc<Cell<u32>>,
     /// The pointer's position in the framebuffer's logical 720x360 space —
-    /// winit reports physical window pixels, divided by `framebuffer::SCALE`
-    /// and floored to a logical pixel on the way in so a program never has
-    /// to think about the window's actual physical size, or deal with a
+    /// winit reports physical window pixels, divided by `scale` and
+    /// floored to a logical pixel on the way in so a program never has to
+    /// think about the window's actual physical size, or deal with a
     /// fractional pixel position.
     position: Cell<(i32, i32)>,
     is_down: Cell<bool>,
@@ -38,8 +43,9 @@ pub struct Input {
 }
 
 impl Input {
-    pub fn new() -> Self {
+    pub fn new(scale: Rc<Cell<u32>>) -> Self {
         Self {
+            scale,
             position: Cell::new((0, 0)),
             is_down: Cell::new(false),
             was_pressed: Cell::new(false),
@@ -57,7 +63,7 @@ impl Input {
     pub fn handle_window_event(&self, event: &WindowEvent) {
         match event {
             WindowEvent::CursorMoved { position, .. } => {
-                let scale = framebuffer::SCALE as f64;
+                let scale = self.scale.get() as f64;
                 let new_x = (position.x / scale).floor() as i32;
                 let new_y = (position.y / scale).floor() as i32;
                 let (old_x, old_y) = self.position.get();
@@ -241,6 +247,14 @@ mod tests {
 
     use super::*;
 
+    /// An `Input` backed by its own scale cell, fixed at
+    /// `framebuffer::DEFAULT_SCALE` — none of these tests exercise a live
+    /// `setScale` change, so a dedicated cell per test (rather than one
+    /// shared across the whole module) keeps each test isolated.
+    fn test_input() -> Input {
+        Input::new(Rc::new(Cell::new(crate::framebuffer::DEFAULT_SCALE)))
+    }
+
     fn cursor_moved(x: f64, y: f64) -> WindowEvent {
         WindowEvent::CursorMoved {
             device_id: DeviceId::dummy(),
@@ -262,21 +276,21 @@ mod tests {
 
     #[test]
     fn cursor_moved_updates_position_in_logical_space() {
-        let input = Input::new();
+        let input = test_input();
         input.handle_window_event(&cursor_moved(144.0, 72.0));
         assert_eq!(input.position.get(), (72, 36));
     }
 
     #[test]
     fn cursor_moved_floors_to_a_logical_pixel() {
-        let input = Input::new();
+        let input = test_input();
         input.handle_window_event(&cursor_moved(145.0, 71.0));
         assert_eq!(input.position.get(), (72, 35));
     }
 
     #[test]
     fn cursor_moved_accumulates_delta_in_logical_space() {
-        let input = Input::new();
+        let input = test_input();
         input.handle_window_event(&cursor_moved(100.0, 100.0));
         input.delta.set((0.0, 0.0)); // isolate movement after the initial jump
         input.handle_window_event(&cursor_moved(120.0, 90.0));
@@ -285,7 +299,7 @@ mod tests {
 
     #[test]
     fn press_sets_down_and_pressed() {
-        let input = Input::new();
+        let input = test_input();
         input.handle_window_event(&mouse_input(true));
         assert!(input.is_down.get());
         assert!(input.was_pressed.get());
@@ -294,7 +308,7 @@ mod tests {
 
     #[test]
     fn release_clears_down_and_sets_released() {
-        let input = Input::new();
+        let input = test_input();
         input.handle_window_event(&mouse_input(true));
         input.handle_window_event(&mouse_input(false));
         assert!(!input.is_down.get());
@@ -303,7 +317,7 @@ mod tests {
 
     #[test]
     fn end_frame_clears_edge_state_and_deltas_but_not_down_or_position() {
-        let input = Input::new();
+        let input = test_input();
         input.handle_window_event(&cursor_moved(144.0, 72.0));
         input.handle_window_event(&mouse_input(true));
 
@@ -323,7 +337,7 @@ mod tests {
 
     #[test]
     fn mouse_wheel_line_delta_accumulates() {
-        let input = Input::new();
+        let input = test_input();
         input.handle_window_event(&WindowEvent::MouseWheel {
             device_id: DeviceId::dummy(),
             delta: MouseScrollDelta::LineDelta(0.0, 1.5),
@@ -339,7 +353,7 @@ mod tests {
 
     #[test]
     fn mouse_wheel_pixel_delta_accumulates() {
-        let input = Input::new();
+        let input = test_input();
         input.handle_window_event(&WindowEvent::MouseWheel {
             device_id: DeviceId::dummy(),
             delta: MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 12.0)),
@@ -350,7 +364,7 @@ mod tests {
 
     #[test]
     fn unrelated_events_are_ignored() {
-        let input = Input::new();
+        let input = test_input();
         input.handle_window_event(&WindowEvent::Resized(PhysicalSize::new(1440, 720)));
         assert_eq!(input.position.get(), (0, 0));
         assert!(!input.is_down.get());
@@ -358,7 +372,7 @@ mod tests {
 
     #[test]
     fn key_press_sets_down_and_pressed() {
-        let input = Input::new();
+        let input = test_input();
         input.handle_key_code(winit::keyboard::KeyCode::KeyW, true, false);
         let index = Key::KeyW as usize;
         assert!(input.key_down[index].get());
@@ -368,7 +382,7 @@ mod tests {
 
     #[test]
     fn key_release_clears_down_and_sets_released() {
-        let input = Input::new();
+        let input = test_input();
         input.handle_key_code(winit::keyboard::KeyCode::KeyW, true, false);
         input.handle_key_code(winit::keyboard::KeyCode::KeyW, false, false);
         let index = Key::KeyW as usize;
@@ -378,7 +392,7 @@ mod tests {
 
     #[test]
     fn key_repeat_does_not_resend_pressed() {
-        let input = Input::new();
+        let input = test_input();
         input.handle_key_code(winit::keyboard::KeyCode::KeyW, true, false);
         input.key_pressed[Key::KeyW as usize].set(false); // isolate the repeat
         input.handle_key_code(winit::keyboard::KeyCode::KeyW, true, true);
@@ -388,14 +402,14 @@ mod tests {
 
     #[test]
     fn other_keys_are_unaffected() {
-        let input = Input::new();
+        let input = test_input();
         input.handle_key_code(winit::keyboard::KeyCode::KeyW, true, false);
         assert!(!input.key_down[Key::KeyA as usize].get());
     }
 
     #[test]
     fn end_frame_clears_key_edges_but_not_key_down() {
-        let input = Input::new();
+        let input = test_input();
         input.handle_key_code(winit::keyboard::KeyCode::KeyW, true, false);
 
         input.end_frame();

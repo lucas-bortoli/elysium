@@ -80,8 +80,15 @@ impl ElysiumRuntime {
     /// touching any drawing state themselves, keeping the VM's own bindings
     /// ignorant of how frames actually get rasterized. `input` is the
     /// Input device's shared pointer state, updated from raw window events
-    /// and read by `ely:input`'s hidden globals.
-    pub fn new(draw_commands: Rc<RefCell<Vec<DrawCommand>>>, input: Rc<Input>) -> Result<Self> {
+    /// and read by `ely:input`'s hidden globals. `scale` is the
+    /// Framebuffer's shared physical-pixels-per-logical-pixel setting;
+    /// `ely:framebuffer`'s `setScale` writes to it directly, the same way
+    /// `draw_commands` is written to.
+    pub fn new(
+        draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
+        input: Rc<Input>,
+        scale: Rc<Cell<u32>>,
+    ) -> Result<Self> {
         let js_runtime = JsRuntime::new()?;
 
         let guard = Rc::new(GuardState::default());
@@ -119,7 +126,7 @@ impl ElysiumRuntime {
             let global = ctx.globals();
             global.set("print", Function::new(ctx.clone(), print)?)?;
             bootstrap_jsx_runtime(&ctx)?;
-            framebuffer::bootstrap_framebuffer_bindings(&ctx, draw_commands)?;
+            framebuffer::bootstrap_framebuffer_bindings(&ctx, draw_commands, scale)?;
             input::bootstrap_input_bindings(&ctx, input)?;
             bootstrap_timers(&ctx, Rc::clone(&timers), Rc::clone(&microtasks))?;
             bootstrap_post_init_handlers(&ctx, Rc::clone(&post_init_handlers))?;
@@ -401,9 +408,11 @@ mod tests {
     /// Like [`eval`], but also hands back the `Input` device backing the
     /// VM, so a test can feed it window events before/after evaluating.
     fn eval_with_input(source: &str) -> (ElysiumRuntime, Rc<Input>) {
-        let input = Rc::new(Input::new());
-        let runtime = ElysiumRuntime::new(Rc::new(RefCell::new(Vec::new())), Rc::clone(&input))
-            .expect("failed to construct runtime");
+        let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
+        let input = Rc::new(Input::new(Rc::clone(&scale)));
+        let runtime =
+            ElysiumRuntime::new(Rc::new(RefCell::new(Vec::new())), Rc::clone(&input), scale)
+                .expect("failed to construct runtime");
         runtime
             .eval_module("test.ts", source)
             .expect("module failed to evaluate");
