@@ -78,9 +78,9 @@ impl ElysiumRuntime {
     /// `draw_commands` is the Framebuffer device's shared draw-command buffer:
     /// `ely:framebuffer`'s hidden globals push onto it directly rather than
     /// touching any drawing state themselves, keeping the VM's own bindings
-    /// ignorant of `wgpu`. `input` is the Input device's shared pointer
-    /// state, updated from raw window events and read by `ely:input`'s
-    /// hidden globals.
+    /// ignorant of how frames actually get rasterized. `input` is the
+    /// Input device's shared pointer state, updated from raw window events
+    /// and read by `ely:input`'s hidden globals.
     pub fn new(draw_commands: Rc<RefCell<Vec<DrawCommand>>>, input: Rc<Input>) -> Result<Self> {
         let js_runtime = JsRuntime::new()?;
 

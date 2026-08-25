@@ -6,8 +6,6 @@
 //! `ely:framebuffer` boundary. Program-supplied colors are always one of these
 //! named shades, never raw, unconstrained RGBA channels.
 
-use std::sync::LazyLock;
-
 /// One shade from the palette. `#[repr(u16)]` and explicit discriminants
 /// because the numeric value *is* the wire format `ely:framebuffer`'s functions
 /// receive from JS. Most variants are only ever constructed from that numeric
@@ -616,45 +614,15 @@ impl Color {
         }
     }
 
-    /// This shade's color as linear `[r, g, b, a]`, each `0.0..=1.0` —
-    /// converted from `hex`'s sRGB (gamma-encoded) bytes, since that's what
-    /// `wgpu` expects both as fragment shader output written to an
-    /// `*_Srgb` render target and as a `LoadOp::Clear` color; feeding it
-    /// gamma-encoded values directly (as if they were already linear)
-    /// washes colors out; the target format's automatic linear-to-sRGB
-    /// encoding re-applies gamma on write. Computed once into
-    /// `LINEAR_PALETTE` below; each call after that is a plain array index.
-    pub fn rgba(self) -> [f32; 4] {
-        LINEAR_PALETTE[self as usize]
-    }
-}
-
-/// `Color::rgba` for every shade, computed once (see [`Color::rgba`]) in
-/// discriminant order from [`Color::hex`].
-static LINEAR_PALETTE: LazyLock<[[f32; 4]; COUNT]> = LazyLock::new(|| {
-    let mut table = [[0.0; 4]; COUNT];
-    let mut id = 0;
-    while id < COUNT {
-        // SAFETY: same as `Color::from_id` — `id` is in `0..COUNT`, and
-        // `Color` is `#[repr(u16)]` with dense discriminants over that range.
-        let color = unsafe { std::mem::transmute::<u16, Color>(id as u16) };
-        let hex = color.hex();
-        let r = ((hex >> 16) & 0xff) as f32 / 255.0;
-        let g = ((hex >> 8) & 0xff) as f32 / 255.0;
-        let b = (hex & 0xff) as f32 / 255.0;
-        table[id] = [srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b), 1.0];
-        id += 1;
-    }
-    table
-});
-
-/// The standard sRGB electro-optical transfer function: converts one
-/// gamma-encoded channel (`0.0..=1.0`) to linear light.
-fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
+    /// This shade's color as a `tiny_skia::Color` (sRGB, fully opaque) —
+    /// no gamma re-encoding happens on the softbuffer path, so this is
+    /// `hex`'s bytes, verbatim.
+    pub fn to_skia(self) -> tiny_skia::Color {
+        let hex = self.hex();
+        let r = ((hex >> 16) & 0xff) as u8;
+        let g = ((hex >> 8) & 0xff) as u8;
+        let b = (hex & 0xff) as u8;
+        tiny_skia::Color::from_rgba8(r, g, b, 255)
     }
 }
 

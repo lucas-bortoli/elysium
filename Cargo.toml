@@ -15,12 +15,11 @@ panic = "abort"
 strip = true
 
 [dependencies]
-bytemuck = { version = "1.25.2", features = ["derive"] }
-pollster = "1.0.1"
 rquickjs = { version = "0.12.2", features = ["loader"] }
+softbuffer = { version = "0.4.8", default-features = false, features = ["x11", "wayland"] }
 swc_common = "26.0.0"
 swc_ecma_ast = "29.0.0"
 swc_ecma_parser = "45.0.0"
 swc_ecma_visit = "29.0.0"
-wgpu = "30.0.1"
+tiny-skia = "0.11.4"
 winit = "0.30.13"
