@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -10,6 +11,7 @@ use rquickjs::{
 
 use crate::esm_resolver::{CompilingLoader, EmbeddedOrFileResolver, bootstrap_jsx_runtime};
 use crate::framebuffer::{self, DrawCommand};
+use crate::image::{self, ImageTable};
 use crate::input::{self, Input};
 use crate::timers::{TimerArgs, TimerQueue, bootstrap_timers};
 use crate::transform;
@@ -69,6 +71,12 @@ pub struct ElysiumRuntime {
     /// Callbacks registered by `ely:lifecycle`'s `addPostInitHandler`, run
     /// once by [`Self::run_post_init_handlers`].
     post_init_handlers: Rc<RefCell<Vec<Persistent<Function<'static>>>>>,
+    /// Images loaded by `ely:image`'s `loadImage`, keyed by id. Holds no
+    /// `Persistent` JS values (unlike the three fields above), so it's not
+    /// subject to the same GC-sweep-ordering hazard — grouped with them in
+    /// `Drop` purely so VM teardown has one obvious place every resource
+    /// gets released.
+    images: Rc<ImageTable>,
     guard: Rc<GuardState>,
     context: Context,
     js_runtime: JsRuntime,
@@ -83,11 +91,15 @@ impl ElysiumRuntime {
     /// and read by `ely:input`'s hidden globals. `scale` is the
     /// Framebuffer's shared physical-pixels-per-logical-pixel setting;
     /// `ely:framebuffer`'s `setScale` writes to it directly, the same way
-    /// `draw_commands` is written to.
+    /// `draw_commands` is written to. `program_dir` is the running
+    /// program's own root directory — `ely:image`'s `loadImage` resolves
+    /// every path against it and can never escape it, regardless of the
+    /// process's actual working directory.
     pub fn new(
         draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
         input: Rc<Input>,
         scale: Rc<Cell<u32>>,
+        program_dir: PathBuf,
     ) -> Result<Self> {
         let js_runtime = JsRuntime::new()?;
 
@@ -121,15 +133,22 @@ impl ElysiumRuntime {
         let timers = Rc::new(TimerQueue::new());
         let microtasks = Rc::new(RefCell::new(Vec::new()));
         let post_init_handlers = Rc::new(RefCell::new(Vec::new()));
+        let images = Rc::new(ImageTable::new());
 
         context.with(|ctx| -> Result<()> {
             let global = ctx.globals();
             global.set("print", Function::new(ctx.clone(), print)?)?;
             bootstrap_jsx_runtime(&ctx)?;
-            framebuffer::bootstrap_framebuffer_bindings(&ctx, draw_commands, scale)?;
+            framebuffer::bootstrap_framebuffer_bindings(
+                &ctx,
+                draw_commands,
+                scale,
+                Rc::clone(&images),
+            )?;
             input::bootstrap_input_bindings(&ctx, input)?;
             bootstrap_timers(&ctx, Rc::clone(&timers), Rc::clone(&microtasks))?;
             bootstrap_post_init_handlers(&ctx, Rc::clone(&post_init_handlers))?;
+            image::bootstrap_image_bindings(&ctx, Rc::clone(&images), program_dir)?;
             Ok(())
         })?;
 
@@ -140,6 +159,7 @@ impl ElysiumRuntime {
             timers,
             microtasks,
             post_init_handlers,
+            images,
         })
     }
 
@@ -309,6 +329,7 @@ impl Drop for ElysiumRuntime {
         self.context.with(|_ctx| {
             self.timers.clear_all();
             self.microtasks.borrow_mut().clear();
+            self.images.clear_all();
         });
     }
 }
@@ -410,13 +431,25 @@ mod tests {
     fn eval_with_input(source: &str) -> (ElysiumRuntime, Rc<Input>) {
         let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
         let input = Rc::new(Input::new(Rc::clone(&scale)));
-        let runtime =
-            ElysiumRuntime::new(Rc::new(RefCell::new(Vec::new())), Rc::clone(&input), scale)
-                .expect("failed to construct runtime");
+        let runtime = ElysiumRuntime::new(
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::clone(&input),
+            scale,
+            test_program_dir(),
+        )
+        .expect("failed to construct runtime");
         runtime
             .eval_module("test.ts", source)
             .expect("module failed to evaluate");
         (runtime, input)
+    }
+
+    /// `loadImage`'s `program_dir` for every test in this module — a fixed
+    /// fixtures directory holding a small, real PNG (`test.png`) plus a
+    /// checked-in `.ts` sibling so a path-traversal test has a real file
+    /// outside this directory to point at.
+    fn test_program_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("kernel/image/fixtures")
     }
 
     fn global<T>(runtime: &ElysiumRuntime, name: &str) -> T
@@ -784,6 +817,49 @@ mod tests {
             .unwrap();
         assert!(!global::<bool>(&runtime, "down2"));
         assert!(global::<bool>(&runtime, "released2"));
+    }
+
+    #[test]
+    fn load_image_and_draw_image_round_trip_without_throwing() {
+        let runtime = eval(
+            "import { loadImage } from 'ely:image'; \
+             import { addDrawHandler, drawImage } from 'ely:framebuffer'; \
+             globalThis.drawn = false; \
+             const image = loadImage('test.png'); \
+             addDrawHandler(() => { drawImage(image, 10, 10); globalThis.drawn = true; });",
+        );
+        runtime.run_due_timers().unwrap();
+        assert!(global::<bool>(&runtime, "drawn"));
+    }
+
+    #[test]
+    fn draw_image_with_an_unknown_id_throws() {
+        let runtime = eval(
+            "import { addDrawHandler, drawImage } from 'ely:framebuffer'; \
+             globalThis.threw = false; \
+             addDrawHandler(() => { \
+                 try { drawImage(999999, 0, 0); } catch { globalThis.threw = true; } \
+             });",
+        );
+        runtime.run_due_timers().unwrap();
+        assert!(global::<bool>(&runtime, "threw"));
+    }
+
+    #[test]
+    fn load_image_outside_program_dir_throws_image_load_error() {
+        let runtime = eval(
+            "import { loadImage, ImageLoadError } from 'ely:image'; \
+             globalThis.threw = false; \
+             globalThis.correctType = false; \
+             try { \
+                 loadImage('../../framebuffer.rs'); \
+             } catch (err) { \
+                 globalThis.threw = true; \
+                 globalThis.correctType = err instanceof ImageLoadError; \
+             }",
+        );
+        assert!(global::<bool>(&runtime, "threw"));
+        assert!(global::<bool>(&runtime, "correctType"));
     }
 
     #[test]
