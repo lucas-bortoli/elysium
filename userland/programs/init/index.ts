@@ -1,6 +1,8 @@
 import {
   Color,
   addDrawHandler,
+  clearScreen,
+  drawImage,
   fillRectangle,
   getWidth,
 } from "ely:framebuffer";
@@ -12,9 +14,12 @@ import {
   wasPointerReleased,
 } from "ely:input";
 import { addPostInitHandler, addUpdateTicker, delay } from "ely:lifecycle";
+import { loadImage } from "ely:image";
 
 let x = 0;
 const speed = 1000; // pixels per second
+
+const bg = loadImage("pexels-elizabeth-ferreira-1040803688-33035533.png");
 
 addUpdateTicker((dt) => {
   x += speed * dt;
@@ -36,6 +41,9 @@ addDrawHandler(() => {
     print("A");
   }
 
+  clearScreen(Color.Black);
+  drawImage(bg, getWidth() / 2 - bg.width / 2, 0);
+  fillRectangle(x, 100 + 2, 100 + 2, 100, Color.Neutral600);
   fillRectangle(x, 100, 100, 100, color);
 });
 
