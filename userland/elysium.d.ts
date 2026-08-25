@@ -389,6 +389,12 @@ declare module "ely:framebuffer" {
     h: number,
     color: Color,
   ): void;
+
+  /** Sets how many physical pixels the window draws each logical pixel as
+   * — an integer of at least 1. Takes effect on the next frame; unlike
+   * `clearScreen`/`fillRectangle`, can be called from anywhere, not just
+   * from inside a draw handler. */
+  export function setScale(scale: number): void;
 }
 
 declare module "ely:math" {

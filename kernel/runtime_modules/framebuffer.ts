@@ -13,6 +13,7 @@ declare function __framebuffer_fill_rectangle(
   h: number,
   color: Color,
 ): void;
+declare function __framebuffer_set_scale(scale: number): void;
 
 // The kernel's fixed, curated color palette. Every color a program can
 // draw with is one of these named entries — never a raw, unconstrained
@@ -399,4 +400,12 @@ export function fillRectangle(
 ): void {
   if (!insideDrawHandler) throw new DrawOutsideHandlerError();
   __framebuffer_fill_rectangle(x, y, w, h, color);
+}
+
+/** Sets how many physical pixels the window draws each logical pixel as —
+ * an integer of at least 1. Takes effect on the next frame; unlike
+ * `clearScreen`/`fillRectangle`, can be called from anywhere, not just
+ * from inside a draw handler. */
+export function setScale(scale: number): void {
+  __framebuffer_set_scale(scale);
 }
