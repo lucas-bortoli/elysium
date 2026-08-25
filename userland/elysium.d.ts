@@ -403,6 +403,9 @@ declare module "ely:framebuffer" {
    * `clearScreen`/`fillRectangle`, can be called from anywhere, not just
    * from inside a draw handler. */
   export function setScale(scale: number): void;
+
+  /** The palette entry closest to the RGB triplet `(r, g, b)` (each `0-255`). */
+  export function nearestColor(r: number, g: number, b: number): Color;
 }
 
 declare module "ely:math" {
@@ -435,6 +438,12 @@ declare module "ely:math" {
   /** Whether `a` and `b` are equal within `EPSILON`, scaled by their magnitude. */
   export function floatEquals(a: number, b: number): boolean;
 
+  /** The vector `{ x: 0, y: 0 }`. */
+  export function vector2Zero(): Vector2d;
+
+  /** The vector `{ x: 1, y: 1 }`. */
+  export function vector2One(): Vector2d;
+
   /** Whether `a` and `b` are equal within `EPSILON`, component-wise. */
   export function vector2Equals(a: Vector2d, b: Vector2d): boolean;
 
@@ -459,6 +468,30 @@ declare module "ely:math" {
   /** The point `t` of the way from `a` to `b` (`t = 0` is `a`, `t = 1` is `b`). */
   export function vector2Lerp(a: Vector2d, b: Vector2d, t: number): Vector2d;
 
+  /** `v` with both components negated. */
+  export function vector2Negate(v: Vector2d): Vector2d;
+
+  /** The length of `v`. */
+  export function vector2Length(v: Vector2d): number;
+
+  /** The squared length of `v`, cheaper than `vector2Length` when only comparing magnitudes. */
+  export function vector2LengthSquared(v: Vector2d): number;
+
+  /** The dot product of `a` and `b`. */
+  export function vector2Dot(a: Vector2d, b: Vector2d): number;
+
+  /** `v` scaled to length 1, or `vector2Zero()` if `v` has zero length. */
+  export function vector2Normalize(v: Vector2d): Vector2d;
+
+  /** `v` rotated by `radians` around the origin. */
+  export function vector2Rotate(v: Vector2d, radians: number): Vector2d;
+
+  /** `v` with each component restricted to the `[min, max]` range. */
+  export function vector2Clamp(v: Vector2d, min: Vector2d, max: Vector2d): Vector2d;
+
+  /** The angle of `v`, in radians, measured counterclockwise from the positive x-axis. */
+  export function vector2Angle(v: Vector2d): number;
+
   /** Whether `a` and `b` overlap by any amount. */
   export function rectangleIntersects(a: Rectangle, b: Rectangle): boolean;
 
@@ -470,6 +503,12 @@ declare module "ely:math" {
 
   /** The value `t` of the way from `a` to `b` (`t = 0` is `a`, `t = 1` is `b`). */
   export function lerp(a: number, b: number, t: number): number;
+
+  /** `degrees` converted to radians. */
+  export function degToRad(degrees: number): number;
+
+  /** `radians` converted to degrees. */
+  export function radToDeg(radians: number): number;
 }
 
 declare module "ely:lifecycle" {

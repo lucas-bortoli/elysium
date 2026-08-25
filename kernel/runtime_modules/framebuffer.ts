@@ -19,6 +19,11 @@ declare function __framebuffer_draw_image(
   x: number,
   y: number,
 ): void;
+declare function __framebuffer_nearest_color(
+  r: number,
+  g: number,
+  b: number,
+): Color;
 declare function __framebuffer_set_scale(scale: number): void;
 
 // The kernel's fixed, curated color palette. Every color a program can
@@ -413,6 +418,11 @@ export function fillRectangle(
 export function drawImage(image: Image | ImageId, x: number, y: number): void {
   if (!insideDrawHandler) throw new DrawOutsideHandlerError();
   __framebuffer_draw_image(typeof image === "number" ? image : image.id, x, y);
+}
+
+/** The palette entry closest to the RGB triplet `(r, g, b)` (each `0-255`). */
+export function nearestColor(r: number, g: number, b: number): Color {
+  return __framebuffer_nearest_color(r, g, b);
 }
 
 /** Sets how many physical pixels the window draws each logical pixel as —
