@@ -13,6 +13,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install X11 dev headers (softbuffer's x11 feature)
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libx11-dev libx11-xcb-dev
       - run: cargo test
 
   typecheck:
@@ -28,6 +30,8 @@ jobs:
 
   package:
     name: package (${{ matrix.os }})
+    needs: [test, typecheck]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     strategy:
       matrix:
         include:
@@ -42,6 +46,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install X11 dev headers (softbuffer's x11 feature)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libx11-dev libx11-xcb-dev
       - run: cargo build --release
       - name: zip
         shell: bash
