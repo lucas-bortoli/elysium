@@ -1,4 +1,4 @@
-//! The Framebuffer device: a GPU-backed drawing surface bound to a window.
+//! The Framebuffer device: a CPU-rasterized drawing surface bound to a window.
 //!
 //! `Framebuffer` never touches `winit`'s event loop itself — it only ever
 //! sees a window handle, handed to it by `kernel/window.rs`'s
@@ -11,9 +11,10 @@
 //! binds `ely:framebuffer`'s hidden globals to push [`DrawCommand`]s onto a
 //! plain `Vec` shared with the kernel's frame loop; only once a guarded
 //! `draw()` call returns does that Vec get handed to [`Framebuffer::render`],
-//! which is the only place in the kernel that speaks `wgpu`.
+//! which is the only place in the kernel that rasterizes and presents a frame.
 
 use std::cell::RefCell;
+use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -46,7 +47,7 @@ pub enum DrawCommand {
 /// `clearScreen`/`fillRectangle`. Each closure just resolves its numeric
 /// color id to a [`Color`] and pushes a [`DrawCommand`] onto the shared
 /// buffer; neither one touches any drawing state itself, so this file never
-/// needs to know anything about `wgpu`.
+/// needs to know anything about how frames get rasterized.
 pub fn bootstrap_framebuffer_bindings(
     ctx: &Ctx<'_>,
     draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
@@ -93,42 +94,6 @@ fn resolve_color(ctx: &Ctx<'_>, id: u16) -> Result<Color> {
         .ok_or_else(|| rquickjs::Exception::throw_type(ctx, &format!("{id} is not a valid color")))
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
-    position: [f32; 2],
-    color: [f32; 4],
-}
-
-const SHADER_SOURCE: &str = r#"
-struct VertexInput {
-    @location(0) position: vec2<f32>,
-    @location(1) color: vec4<f32>,
-};
-
-struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) color: vec4<f32>,
-};
-
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    out.clip_position = vec4<f32>(in.position, 0.0, 1.0);
-    out.color = in.color;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return in.color;
-}
-"#;
-
-/// Initial capacity (in vertices) of the vertex buffer backing
-/// [`Framebuffer::render`]'s `FillRectangle` commands; it grows on demand.
-const INITIAL_VERTEX_CAPACITY: usize = 1024;
-
 /// The logical resolution programs draw in — independent of the window's
 /// physical pixel size, which is always [`SCALE`] times this. Mirrored by
 /// hand in `kernel/runtime_modules/framebuffer.ts`'s `getWidth`/`getHeight`,
@@ -139,270 +104,129 @@ pub const FRAMEBUFFER_HEIGHT: u32 = 360;
 pub const SCALE: u32 = 2;
 
 pub struct Framebuffer {
-    window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
-    vertex_capacity: usize,
+    // Always FRAMEBUFFER_WIDTH x FRAMEBUFFER_HEIGHT — logical resolution,
+    // never the physical (scaled) window size. Programs already draw in
+    // logical pixels, so every DrawCommand's x/y/w/h goes straight into
+    // tiny-skia with no per-draw scaling math; the upscale to the window's
+    // physical size happens once, in `present`.
+    pixmap: tiny_skia::Pixmap,
+    // Reused every frame in `present`: one packed-XRGB row, built once per
+    // source row and duplicated SCALE times into the destination buffer,
+    // instead of allocating a fresh row each frame.
+    row_scratch: Vec<u32>,
+    // Never read after construction, but must outlive `surface`: some
+    // softbuffer backends (X11 in particular) hold a live connection this
+    // surface's presents depend on for as long as it exists.
+    #[allow(dead_code)]
+    context: softbuffer::Context<Arc<Window>>,
+    surface: softbuffer::Surface<Arc<Window>, Arc<Window>>,
 }
 
 impl Framebuffer {
-    /// Builds the `wgpu` surface/device/pipeline for `window`. Blocks on
-    /// `wgpu`'s async adapter/device request via `pollster` so the rest of
-    /// the kernel — a per-frame, synchronous loop — never has to think
-    /// about async.
+    /// Allocates the logical-resolution `Pixmap` programs draw into and
+    /// the softbuffer surface that presents it, sized to the fixed
+    /// `FRAMEBUFFER_WIDTH * SCALE` x `FRAMEBUFFER_HEIGHT * SCALE` physical
+    /// size — not queried from `window`, since Elysium doesn't follow the
+    /// OS's DPI scale factor (see `present`'s doc comment).
     pub fn new(window: Arc<Window>) -> Framebuffer {
-        pollster::block_on(Self::new_async(window))
-    }
+        let physical_width = FRAMEBUFFER_WIDTH * SCALE;
+        let physical_height = FRAMEBUFFER_HEIGHT * SCALE;
 
-    async fn new_async(window: Arc<Window>) -> Framebuffer {
-        let size = window.inner_size();
+        let pixmap = tiny_skia::Pixmap::new(FRAMEBUFFER_WIDTH, FRAMEBUFFER_HEIGHT)
+            .expect("failed to allocate the framebuffer's backing pixmap");
 
-        let instance = wgpu::Instance::default();
-        let surface = instance
-            .create_surface(Arc::clone(&window))
-            .expect("failed to create a GPU surface for the window");
-
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                compatible_surface: Some(&surface),
-                ..Default::default()
-            })
-            .await
-            .expect("failed to find a GPU adapter");
-
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await
-            .expect("failed to open a connection to the GPU");
-
-        let capabilities = surface.get_capabilities(&adapter);
-        let format = capabilities
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(capabilities.formats[0]);
-
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            color_space: wgpu::SurfaceColorSpace::Auto,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: capabilities.present_modes[0],
-            alpha_mode: capabilities.alpha_modes[0],
-            view_formats: Vec::new(),
-            desired_maximum_frame_latency: 2,
-        };
-        surface.configure(&device, &config);
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("elysium-framebuffer-shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER_SOURCE.into()),
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("elysium-framebuffer-pipeline-layout"),
-            bind_group_layouts: &[],
-            immediate_size: 0,
-        });
-
-        let vertex_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
-        };
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("elysium-framebuffer-pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(vertex_layout)],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let vertex_buffer = create_vertex_buffer(&device, INITIAL_VERTEX_CAPACITY);
+        let context = softbuffer::Context::new(Arc::clone(&window))
+            .expect("failed to create a softbuffer context for the window");
+        let mut surface = softbuffer::Surface::new(&context, Arc::clone(&window))
+            .expect("failed to create a softbuffer surface for the window");
+        surface
+            .resize(
+                NonZeroU32::new(physical_width).expect("FRAMEBUFFER_WIDTH * SCALE is 0"),
+                NonZeroU32::new(physical_height).expect("FRAMEBUFFER_HEIGHT * SCALE is 0"),
+            )
+            .expect("failed to size the softbuffer surface to the window");
 
         Framebuffer {
-            window,
+            pixmap,
+            row_scratch: vec![0u32; physical_width as usize],
+            context,
             surface,
-            device,
-            queue,
-            config,
-            pipeline,
-            vertex_buffer,
-            vertex_capacity: INITIAL_VERTEX_CAPACITY,
         }
     }
 
-    /// Turns one frame's worth of accumulated [`DrawCommand`]s into a
-    /// single GPU render pass and presents it. The last `ClearScreen` in
-    /// `commands` wins as the pass's clear color; every `FillRectangle`
-    /// becomes two triangles in one vertex buffer, drawn in one call.
+    /// Rasterizes one frame's worth of accumulated [`DrawCommand`]s onto
+    /// the logical `Pixmap` and presents it. Clearing is opt-in: a frame
+    /// with no `ClearScreen` command leaves the pixmap exactly as the
+    /// previous frame left it, rather than forcing a clear every frame —
+    /// so a program that never calls `clearScreen` sees each frame's
+    /// drawing accumulate rather than get erased first. The last
+    /// `ClearScreen` in `commands` wins, applied before any
+    /// `FillRectangle`, regardless of where in the command list it falls.
     pub fn render(&mut self, commands: &[DrawCommand]) {
-        self.reconfigure_if_resized();
-
-        let mut clear_color = wgpu::Color::BLACK;
-        let mut vertices: Vec<Vertex> = Vec::new();
-        for command in commands {
-            match *command {
-                DrawCommand::ClearScreen { color } => {
-                    let [r, g, b, a] = color.rgba();
-                    clear_color = wgpu::Color {
-                        r: r as f64,
-                        g: g as f64,
-                        b: b as f64,
-                        a: a as f64,
-                    };
-                }
-                DrawCommand::FillRectangle { x, y, w, h, color } => {
-                    push_rectangle(
-                        &mut vertices,
-                        x,
-                        y,
-                        w,
-                        h,
-                        color,
-                        FRAMEBUFFER_WIDTH as f32,
-                        FRAMEBUFFER_HEIGHT as f32,
-                    );
-                }
-            }
+        if let Some(color) = commands.iter().rev().find_map(|c| match *c {
+            DrawCommand::ClearScreen { color } => Some(color),
+            DrawCommand::FillRectangle { .. } => None,
+        }) {
+            self.pixmap.fill(color.to_skia());
         }
 
-        if vertices.len() > self.vertex_capacity {
-            self.vertex_capacity = vertices.len();
-            self.vertex_buffer = create_vertex_buffer(&self.device, self.vertex_capacity);
-        }
-        if !vertices.is_empty() {
-            self.queue
-                .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
-        }
-
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-                self.surface.configure(&self.device, &self.config);
-                frame
-            }
-            // Timeout/Occluded/Outdated/Lost/Validation: skip this frame
-            // rather than panic, same as a resize racing a frame acquire.
-            _ => {
-                self.surface.configure(&self.device, &self.config);
-                return;
-            }
+        // anti_alias: false matches the old backend's hard rectangle edges
+        // (no MSAA).
+        let mut paint = tiny_skia::Paint {
+            anti_alias: false,
+            ..Default::default()
         };
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("elysium-framebuffer-encoder"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("elysium-framebuffer-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear_color),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            if !vertices.is_empty() {
-                pass.set_pipeline(&self.pipeline);
-                pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-                pass.draw(0..vertices.len() as u32, 0..1);
+        for command in commands {
+            if let DrawCommand::FillRectangle { x, y, w, h, color } = *command {
+                let Some(rect) = tiny_skia::Rect::from_xywh(x, y, w, h) else {
+                    continue; // degenerate (zero/negative/non-finite) size
+                };
+                paint.set_color(color.to_skia());
+                self.pixmap
+                    .fill_rect(rect, &paint, tiny_skia::Transform::identity(), None);
             }
         }
 
-        self.queue.submit(Some(encoder.finish()));
-        self.queue.present(frame);
+        self.present();
     }
 
-    /// Picks up any window resize since the last frame — the surface must
-    /// be reconfigured to the new size before `get_current_texture` will
-    /// hand back correctly sized frames.
-    fn reconfigure_if_resized(&mut self) {
-        let size = self.window.inner_size();
-        if size.width != self.config.width || size.height != self.config.height {
-            self.config.width = size.width.max(1);
-            self.config.height = size.height.max(1);
-            self.surface.configure(&self.device, &self.config);
+    /// Copies the logical `Pixmap` into the window's physical-resolution
+    /// softbuffer surface, replicating each logical pixel into a fixed
+    /// SCALE x SCALE block. Assumes the window's actual physical size is
+    /// exactly FRAMEBUFFER_WIDTH*SCALE x FRAMEBUFFER_HEIGHT*SCALE —
+    /// Elysium doesn't follow the OS's DPI scale factor, so a host
+    /// reporting one other than 1.0 will see a mismatched/clipped
+    /// presentation.
+    fn present(&mut self) {
+        let mut buffer = self
+            .surface
+            .buffer_mut()
+            .expect("failed to acquire the softbuffer back buffer");
+
+        // Pixmap::data() is tightly packed RGBA8, row-major, premultiplied,
+        // no row padding. Every frame that reaches here started from a
+        // fully opaque fill (see `render`), so nothing here needs to
+        // un-premultiply.
+        let src = self.pixmap.data();
+        let src_w = self.pixmap.width() as usize;
+        let src_h = self.pixmap.height() as usize;
+        let scale = SCALE as usize;
+        let dst_w = src_w * scale;
+
+        for sy in 0..src_h {
+            for sx in 0..src_w {
+                let i = (sy * src_w + sx) * 4;
+                let (r, g, b) = (src[i], src[i + 1], src[i + 2]);
+                let color = (b as u32) | ((g as u32) << 8) | ((r as u32) << 16); // packed XRGB
+                self.row_scratch[sx * scale..sx * scale + scale].fill(color);
+            }
+            for dy in 0..scale {
+                let dst_start = (sy * scale + dy) * dst_w;
+                buffer[dst_start..dst_start + dst_w].copy_from_slice(&self.row_scratch);
+            }
         }
+
+        buffer.present().expect("failed to present the frame");
     }
-}
-
-fn create_vertex_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("elysium-framebuffer-vertex-buffer"),
-        size: (capacity * std::mem::size_of::<Vertex>()) as wgpu::BufferAddress,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    })
-}
-
-/// Appends the two triangles (six vertices) making up an axis-aligned
-/// rectangle at `(x, y)`, `w` by `h` pixels, converting from pixel space
-/// (origin top-left, `y` down) to clip space (origin center, `y` up,
-/// `-1.0..=1.0`).
-fn push_rectangle(
-    vertices: &mut Vec<Vertex>,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    color: Color,
-    screen_w: f32,
-    screen_h: f32,
-) {
-    let to_clip = |px: f32, py: f32| [(px / screen_w) * 2.0 - 1.0, 1.0 - (py / screen_h) * 2.0];
-    let rgba = color.rgba();
-    let vertex = |position: [f32; 2]| Vertex {
-        position,
-        color: rgba,
-    };
-
-    let top_left = to_clip(x, y);
-    let top_right = to_clip(x + w, y);
-    let bottom_left = to_clip(x, y + h);
-    let bottom_right = to_clip(x + w, y + h);
-
-    vertices.push(vertex(top_left));
-    vertices.push(vertex(bottom_left));
-    vertices.push(vertex(top_right));
-    vertices.push(vertex(top_right));
-    vertices.push(vertex(bottom_left));
-    vertices.push(vertex(bottom_right));
 }
