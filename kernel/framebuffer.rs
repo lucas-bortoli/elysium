@@ -52,15 +52,10 @@ pub enum DrawCommand {
 
 /// Binds the *hidden* globals `ely:framebuffer`'s embedded module wraps
 /// (`__framebuffer_clear_screen`, `__framebuffer_fill_rectangle`,
-/// `__framebuffer_draw_image`, `__framebuffer_set_scale`) — never called by
-/// a program directly, only through `ely:framebuffer`'s exported
-/// `clearScreen`/`fillRectangle`/`drawImage`/`setScale`. The first three
-/// just resolve a numeric color or image id to a [`Color`]/`Rc<Pixmap>` and
-/// push a [`DrawCommand`] onto the shared buffer; none of them touch any
-/// drawing state itself, so this file never needs to know anything about
-/// how frames get rasterized. `setScale` instead writes directly into
-/// `scale`, the same shared cell [`Framebuffer::render`] reads each frame
-/// to notice a change and reconfigure itself.
+/// `__framebuffer_draw_image`, `__framebuffer_nearest_color`,
+/// `__framebuffer_set_scale`) — never called by a program directly, only
+/// through `ely:framebuffer`'s exported
+/// `clearScreen`/`fillRectangle`/`drawImage`/`nearestColor`/`setScale`.
 pub fn bootstrap_framebuffer_bindings(
     ctx: &Ctx<'_>,
     draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
@@ -116,6 +111,13 @@ pub fn bootstrap_framebuffer_bindings(
                 Ok(())
             },
         )?,
+    )?;
+
+    global.set(
+        "__framebuffer_nearest_color",
+        Function::new(ctx.clone(), move |r: u8, g: u8, b: u8| -> u16 {
+            Color::nearest(r, g, b) as u16
+        })?,
     )?;
 
     global.set(
