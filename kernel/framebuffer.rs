@@ -13,12 +13,13 @@
 //! `draw()` call returns does that Vec get handed to [`Framebuffer::render`],
 //! which is the only place in the kernel that rasterizes and presents a frame.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use rquickjs::{Ctx, Function, Result};
+use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 mod colors;
@@ -42,15 +43,19 @@ pub enum DrawCommand {
 }
 
 /// Binds the *hidden* globals `ely:framebuffer`'s embedded module wraps
-/// (`__framebuffer_clear_screen`, `__framebuffer_fill_rectangle`) — never called by
-/// a program directly, only through `ely:framebuffer`'s exported
-/// `clearScreen`/`fillRectangle`. Each closure just resolves its numeric
-/// color id to a [`Color`] and pushes a [`DrawCommand`] onto the shared
-/// buffer; neither one touches any drawing state itself, so this file never
-/// needs to know anything about how frames get rasterized.
+/// (`__framebuffer_clear_screen`, `__framebuffer_fill_rectangle`,
+/// `__framebuffer_set_scale`) — never called by a program directly, only
+/// through `ely:framebuffer`'s exported `clearScreen`/`fillRectangle`/
+/// `setScale`. The first two just resolve a numeric color id to a
+/// [`Color`] and push a [`DrawCommand`] onto the shared buffer; neither
+/// touches any drawing state itself, so this file never needs to know
+/// anything about how frames get rasterized. `setScale` instead writes
+/// directly into `scale`, the same shared cell [`Framebuffer::render`]
+/// reads each frame to notice a change and reconfigure itself.
 pub fn bootstrap_framebuffer_bindings(
     ctx: &Ctx<'_>,
     draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
+    scale: Rc<Cell<u32>>,
 ) -> Result<()> {
     let global = ctx.globals();
 
@@ -82,6 +87,23 @@ pub fn bootstrap_framebuffer_bindings(
         )?,
     )?;
 
+    global.set(
+        "__framebuffer_set_scale",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'_>, new_scale: u32| -> Result<()> {
+                if new_scale == 0 {
+                    return Err(rquickjs::Exception::throw_range(
+                        &ctx,
+                        "scale must be at least 1",
+                    ));
+                }
+                scale.set(new_scale);
+                Ok(())
+            },
+        )?,
+    )?;
+
     Ok(())
 }
 
@@ -95,13 +117,18 @@ fn resolve_color(ctx: &Ctx<'_>, id: u16) -> Result<Color> {
 }
 
 /// The logical resolution programs draw in — independent of the window's
-/// physical pixel size, which is always [`SCALE`] times this. Mirrored by
-/// hand in `kernel/runtime_modules/framebuffer.ts`'s `getWidth`/`getHeight`,
-/// the same way `kernel/framebuffer/colors.rs`'s `Color` enum is kept in
-/// sync with that file's `Color` constant.
+/// physical pixel size. Mirrored by hand in
+/// `kernel/runtime_modules/framebuffer.ts`'s `getWidth`/`getHeight`, the
+/// same way `kernel/framebuffer/colors.rs`'s `Color` enum is kept in sync
+/// with that file's `Color` constant.
 pub const FRAMEBUFFER_WIDTH: u32 = 720;
 pub const FRAMEBUFFER_HEIGHT: u32 = 360;
-pub const SCALE: u32 = 2;
+
+/// The scale a `Framebuffer` starts at before any `setScale` call — not a
+/// fixed factor: the physical-pixels-per-logical-pixel ratio now lives in
+/// a runtime `Cell<u32>`, shared with `ely:framebuffer`'s `setScale`
+/// binding, so a program can change it while Elysium is running.
+pub const DEFAULT_SCALE: u32 = 2;
 
 pub struct Framebuffer {
     // Always FRAMEBUFFER_WIDTH x FRAMEBUFFER_HEIGHT — logical resolution,
@@ -111,9 +138,22 @@ pub struct Framebuffer {
     // physical size happens once, in `present`.
     pixmap: tiny_skia::Pixmap,
     // Reused every frame in `present`: one packed-XRGB row, built once per
-    // source row and duplicated SCALE times into the destination buffer,
-    // instead of allocating a fresh row each frame.
+    // source row and duplicated `applied_scale` times into the destination
+    // buffer, instead of allocating a fresh row each frame. Reallocated
+    // whenever `applied_scale` changes.
     row_scratch: Vec<u32>,
+    // Shared with `ely:framebuffer`'s `setScale` binding — the scale a
+    // program most recently requested, checked once per `render` call.
+    scale: Rc<Cell<u32>>,
+    // The scale `pixmap`/`row_scratch`/`surface`/`window` are currently
+    // configured for. Compared against `scale` each frame; `render`
+    // reconfigures everything through `apply_scale` when they differ,
+    // rather than redoing that work on every frame regardless.
+    applied_scale: u32,
+    // Needed to resize the OS window itself when the scale changes — see
+    // `apply_scale`. `Framebuffer` still never touches the event loop,
+    // only this handle, same as before.
+    window: Arc<Window>,
     // Never read after construction, but must outlive `surface`: some
     // softbuffer backends (X11 in particular) hold a live connection this
     // surface's presents depend on for as long as it exists.
@@ -124,13 +164,16 @@ pub struct Framebuffer {
 
 impl Framebuffer {
     /// Allocates the logical-resolution `Pixmap` programs draw into and
-    /// the softbuffer surface that presents it, sized to the fixed
-    /// `FRAMEBUFFER_WIDTH * SCALE` x `FRAMEBUFFER_HEIGHT * SCALE` physical
-    /// size — not queried from `window`, since Elysium doesn't follow the
-    /// OS's DPI scale factor (see `present`'s doc comment).
-    pub fn new(window: Arc<Window>) -> Framebuffer {
-        let physical_width = FRAMEBUFFER_WIDTH * SCALE;
-        let physical_height = FRAMEBUFFER_HEIGHT * SCALE;
+    /// the softbuffer surface that presents it, sized to
+    /// `FRAMEBUFFER_WIDTH * scale.get()` x `FRAMEBUFFER_HEIGHT * scale.get()`
+    /// — not queried from `window`, since Elysium doesn't follow the OS's
+    /// DPI scale factor (see `present`'s doc comment). `scale` is shared
+    /// with `ely:framebuffer`'s `setScale` binding; `render` notices when
+    /// it changes and reconfigures accordingly.
+    pub fn new(window: Arc<Window>, scale: Rc<Cell<u32>>) -> Framebuffer {
+        let applied_scale = scale.get();
+        let physical_width = FRAMEBUFFER_WIDTH * applied_scale;
+        let physical_height = FRAMEBUFFER_HEIGHT * applied_scale;
 
         let pixmap = tiny_skia::Pixmap::new(FRAMEBUFFER_WIDTH, FRAMEBUFFER_HEIGHT)
             .expect("failed to allocate the framebuffer's backing pixmap");
@@ -141,14 +184,17 @@ impl Framebuffer {
             .expect("failed to create a softbuffer surface for the window");
         surface
             .resize(
-                NonZeroU32::new(physical_width).expect("FRAMEBUFFER_WIDTH * SCALE is 0"),
-                NonZeroU32::new(physical_height).expect("FRAMEBUFFER_HEIGHT * SCALE is 0"),
+                NonZeroU32::new(physical_width).expect("scale is 0"),
+                NonZeroU32::new(physical_height).expect("scale is 0"),
             )
             .expect("failed to size the softbuffer surface to the window");
 
         Framebuffer {
             pixmap,
             row_scratch: vec![0u32; physical_width as usize],
+            scale,
+            applied_scale,
+            window,
             context,
             surface,
         }
@@ -163,6 +209,11 @@ impl Framebuffer {
     /// `ClearScreen` in `commands` wins, applied before any
     /// `FillRectangle`, regardless of where in the command list it falls.
     pub fn render(&mut self, commands: &[DrawCommand]) {
+        let requested_scale = self.scale.get();
+        if requested_scale != self.applied_scale {
+            self.apply_scale(requested_scale);
+        }
+
         if let Some(color) = commands.iter().rev().find_map(|c| match *c {
             DrawCommand::ClearScreen { color } => Some(color),
             DrawCommand::FillRectangle { .. } => None,
@@ -191,13 +242,37 @@ impl Framebuffer {
         self.present();
     }
 
+    /// Reconfigures everything that depends on the physical-pixels-per-
+    /// logical-pixel ratio for a newly requested `scale`: resizes the OS
+    /// window to match (still not user-resizable — `.with_resizable(false)`
+    /// only blocks resize via OS chrome, not a program calling this),
+    /// resizes the softbuffer surface to the new physical size, and
+    /// reallocates `row_scratch` at the new width. `pixmap` itself is
+    /// untouched — it's always logical resolution, regardless of scale.
+    fn apply_scale(&mut self, scale: u32) {
+        self.applied_scale = scale;
+        let physical_width = FRAMEBUFFER_WIDTH * scale;
+        let physical_height = FRAMEBUFFER_HEIGHT * scale;
+
+        let _ = self
+            .window
+            .request_inner_size(PhysicalSize::new(physical_width, physical_height));
+        self.surface
+            .resize(
+                NonZeroU32::new(physical_width).expect("scale is 0"),
+                NonZeroU32::new(physical_height).expect("scale is 0"),
+            )
+            .expect("failed to resize the softbuffer surface");
+        self.row_scratch = vec![0u32; physical_width as usize];
+    }
+
     /// Copies the logical `Pixmap` into the window's physical-resolution
-    /// softbuffer surface, replicating each logical pixel into a fixed
-    /// SCALE x SCALE block. Assumes the window's actual physical size is
-    /// exactly FRAMEBUFFER_WIDTH*SCALE x FRAMEBUFFER_HEIGHT*SCALE —
-    /// Elysium doesn't follow the OS's DPI scale factor, so a host
-    /// reporting one other than 1.0 will see a mismatched/clipped
-    /// presentation.
+    /// softbuffer surface, replicating each logical pixel into an
+    /// `applied_scale` x `applied_scale` block. Assumes the window's
+    /// actual physical size is exactly `FRAMEBUFFER_WIDTH * applied_scale`
+    /// x `FRAMEBUFFER_HEIGHT * applied_scale` — Elysium doesn't follow the
+    /// OS's DPI scale factor, so a host reporting one other than 1.0 will
+    /// see a mismatched/clipped presentation.
     fn present(&mut self) {
         let mut buffer = self
             .surface
@@ -211,7 +286,7 @@ impl Framebuffer {
         let src = self.pixmap.data();
         let src_w = self.pixmap.width() as usize;
         let src_h = self.pixmap.height() as usize;
-        let scale = SCALE as usize;
+        let scale = self.applied_scale as usize;
         let dst_w = src_w * scale;
 
         for sy in 0..src_h {
