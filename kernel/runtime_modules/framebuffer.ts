@@ -4,6 +4,7 @@
 
 import type { Size2d } from "ely:math";
 import type { DrawTickerId } from "ely:framebuffer";
+import type { Image, ImageId } from "ely:image";
 
 declare function __framebuffer_clear_screen(color: Color): void;
 declare function __framebuffer_fill_rectangle(
@@ -12,6 +13,11 @@ declare function __framebuffer_fill_rectangle(
   w: number,
   h: number,
   color: Color,
+): void;
+declare function __framebuffer_draw_image(
+  id: number,
+  x: number,
+  y: number,
 ): void;
 declare function __framebuffer_set_scale(scale: number): void;
 
@@ -319,7 +325,7 @@ export type Color = (typeof Color)[keyof typeof Color];
 export class DrawOutsideHandlerError extends Error {
   constructor() {
     super(
-      "clearScreen/fillRectangle can only be called from inside a registered draw handler",
+      "clearScreen/fillRectangle/drawImage can only be called from inside a registered draw handler",
     );
     this.name = "DrawOutsideHandlerError";
   }
@@ -400,6 +406,13 @@ export function fillRectangle(
 ): void {
   if (!insideDrawHandler) throw new DrawOutsideHandlerError();
   __framebuffer_fill_rectangle(x, y, w, h, color);
+}
+
+/** Draws `image` with its top-left corner at `(x, y)`, at its natural size —
+ * no scaling or rotation. */
+export function drawImage(image: Image | ImageId, x: number, y: number): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_draw_image(typeof image === "number" ? image : image.id, x, y);
 }
 
 /** Sets how many physical pixels the window draws each logical pixel as —
