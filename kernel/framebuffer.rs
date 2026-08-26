@@ -250,45 +250,7 @@ impl Framebuffer {
             self.apply_scale(requested_scale);
         }
 
-        if let Some(color) = commands.iter().rev().find_map(|c| match c {
-            DrawCommand::ClearScreen { color } => Some(*color),
-            _ => None,
-        }) {
-            self.pixmap.fill(color.to_skia());
-        }
-
-        // anti_alias: false matches the old backend's hard rectangle edges
-        // (no MSAA).
-        let mut paint = tiny_skia::Paint {
-            anti_alias: false,
-            ..Default::default()
-        };
-        let image_paint = tiny_skia::PixmapPaint::default();
-
-        for command in commands {
-            match command {
-                DrawCommand::ClearScreen { .. } => {}
-                DrawCommand::FillRectangle { x, y, w, h, color } => {
-                    let Some(rect) = tiny_skia::Rect::from_xywh(*x, *y, *w, *h) else {
-                        continue; // degenerate (zero/negative/non-finite) size
-                    };
-                    paint.set_color(color.to_skia());
-                    self.pixmap
-                        .fill_rect(rect, &paint, tiny_skia::Transform::identity(), None);
-                }
-                DrawCommand::DrawImage { pixmap, x, y } => {
-                    self.pixmap.draw_pixmap(
-                        x.round() as i32,
-                        y.round() as i32,
-                        (**pixmap).as_ref(),
-                        &image_paint,
-                        tiny_skia::Transform::identity(),
-                        None,
-                    );
-                }
-            }
-        }
-
+        rasterize(&mut self.pixmap, commands);
         self.present();
     }
 
@@ -353,5 +315,54 @@ impl Framebuffer {
         }
 
         buffer.present().expect("failed to present the frame");
+    }
+}
+
+/// Rasterizes one frame's worth of accumulated [`DrawCommand`]s onto
+/// `pixmap`. Pulled out of [`Framebuffer::render`] so it can run against a
+/// bare `Pixmap` with no window or softbuffer surface behind it — the
+/// piece a headless benchmark cares about timing. See `render`'s doc
+/// comment for the clearing/compositing rules this follows.
+pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
+    if let Some(color) = commands.iter().rev().find_map(|c| match c {
+        DrawCommand::ClearScreen { color } => Some(*color),
+        _ => None,
+    }) {
+        pixmap.fill(color.to_skia());
+    }
+
+    // anti_alias: false matches the old backend's hard rectangle edges (no
+    // MSAA).
+    let mut paint = tiny_skia::Paint {
+        anti_alias: false,
+        ..Default::default()
+    };
+    let image_paint = tiny_skia::PixmapPaint::default();
+
+    for command in commands {
+        match command {
+            DrawCommand::ClearScreen { .. } => {}
+            DrawCommand::FillRectangle { x, y, w, h, color } => {
+                let Some(rect) = tiny_skia::Rect::from_xywh(*x, *y, *w, *h) else {
+                    continue; // degenerate (zero/negative/non-finite) size
+                };
+                paint.set_color(color.to_skia());
+                pixmap.fill_rect(rect, &paint, tiny_skia::Transform::identity(), None);
+            }
+            DrawCommand::DrawImage {
+                pixmap: image,
+                x,
+                y,
+            } => {
+                pixmap.draw_pixmap(
+                    x.round() as i32,
+                    y.round() as i32,
+                    (**image).as_ref(),
+                    &image_paint,
+                    tiny_skia::Transform::identity(),
+                    None,
+                );
+            }
+        }
     }
 }

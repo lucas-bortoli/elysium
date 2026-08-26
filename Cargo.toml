@@ -3,6 +3,10 @@ name = "elysium-os"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "elysium_os"
+path = "kernel/lib.rs"
+
 [[bin]]
 name = "elysium"
 path = "kernel/main.rs"

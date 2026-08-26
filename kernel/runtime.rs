@@ -55,6 +55,11 @@ const DEFAULT_EVAL_BUDGET: Duration = Duration::from_secs(5);
 /// of milliseconds at any reasonable frame rate.
 const FRAME_BUDGET: Duration = Duration::from_millis(16);
 
+/// The Framebuffer device's shared draw-command buffer, as handed back by
+/// [`ElysiumRuntime::new_headless`] to a caller that needs to read what a
+/// draw handler produced.
+type SharedDrawCommands = Rc<RefCell<Vec<DrawCommand>>>;
+
 pub struct ElysiumRuntime {
     /// This and the field below hold [`Persistent`] JS values, which must be
     /// dropped while `js_runtime` is still alive to free their underlying
@@ -311,6 +316,27 @@ impl ElysiumRuntime {
         self.guard.deadline.set(None);
         result
     }
+
+    /// A fresh VM with an in-memory draw-command buffer and no real window
+    /// — the construction every headless consumer (unit tests, benches)
+    /// needs, factored out so they don't each duplicate the
+    /// `Input`/`scale`/`draw_commands` wiring [`Self::new`] requires. Hands
+    /// back the `Input` device and the shared draw-command buffer alongside
+    /// the runtime, since a caller driving a draw handler (e.g. a benchmark
+    /// rasterizing what a frame produced) needs to read and clear it the
+    /// same way `kernel/main.rs`'s frame loop does.
+    pub fn new_headless(program_dir: PathBuf) -> Result<(Self, Rc<Input>, SharedDrawCommands)> {
+        let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
+        let input = Rc::new(Input::new(Rc::clone(&scale)));
+        let draw_commands = Rc::new(RefCell::new(Vec::new()));
+        let runtime = Self::new(
+            Rc::clone(&draw_commands),
+            Rc::clone(&input),
+            scale,
+            program_dir,
+        )?;
+        Ok((runtime, input, draw_commands))
+    }
 }
 
 impl Drop for ElysiumRuntime {
@@ -429,15 +455,8 @@ mod tests {
     /// Like [`eval`], but also hands back the `Input` device backing the
     /// VM, so a test can feed it window events before/after evaluating.
     fn eval_with_input(source: &str) -> (ElysiumRuntime, Rc<Input>) {
-        let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
-        let input = Rc::new(Input::new(Rc::clone(&scale)));
-        let runtime = ElysiumRuntime::new(
-            Rc::new(RefCell::new(Vec::new())),
-            Rc::clone(&input),
-            scale,
-            test_program_dir(),
-        )
-        .expect("failed to construct runtime");
+        let (runtime, input, _draw_commands) =
+            ElysiumRuntime::new_headless(test_program_dir()).expect("failed to construct runtime");
         runtime
             .eval_module("test.ts", source)
             .expect("module failed to evaluate");

@@ -1,20 +1,10 @@
-mod esm_resolver;
-mod framebuffer;
-mod image;
-mod input;
-mod runtime;
-mod timers;
-mod window;
-
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use framebuffer::Framebuffer;
-use input::Input;
-use runtime::{ElysiumRuntime, GuardedError};
-use window::ElysiumWindow;
-
-pub mod transform;
+use elysium_os::framebuffer::{self, Framebuffer};
+use elysium_os::input::Input;
+use elysium_os::runtime::{ElysiumRuntime, GuardedError};
+use elysium_os::window::ElysiumWindow;
 
 fn main() {
     let exe_dir = std::env::current_exe()
