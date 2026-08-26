@@ -804,6 +804,40 @@ declare module "ely:filesystem" {
   export class RelativePathError extends Error {
     constructor(message: string);
   }
+
+  export const sep: string;
+
+  /** Resolves `.`/`..` segments and collapses redundant slashes. The result
+   * is always rooted at `/`; a `..` that would go above the root is dropped
+   * rather than escaping it. */
+  export function normalize(path: string): string;
+
+  /** Joins path segments into one and normalizes the result. */
+  export function join(...paths: string[]): string;
+
+  /** The final segment of a path, with `ext` stripped from the end if
+   * present. Trailing slashes are ignored. */
+  export function extractBaseName(path: string, ext?: string): string;
+
+  /** The path up to, but not including, the final segment. Trailing
+   * slashes are ignored, and the root's own parent is itself. */
+  export function extractDirectoryName(path: string): string;
+
+  /** The final segment's extension, including the leading `.`, or `""` if
+   * it has none. A leading dot, as in `.bashrc`, is not itself an
+   * extension. */
+  export function extractExtension(path: string): string;
+
+  /** Builds an absolute path by resolving segments right-to-left, stopping
+   * at the first one that's already absolute. Equivalent to `join` when
+   * none of the segments are absolute. */
+  export function resolve(...paths: string[]): string;
+
+  /** Replaces characters outside `[a-zA-Z0-9_.-]` with `_` and truncates to
+   * `maxLength`. `.` and `..` are replaced outright, since they would
+   * otherwise pass through unchanged and remain usable for directory
+   * traversal. */
+  export function sanitizeName(filename: string, maxLength?: number): string;
 }
 
 declare module "ely:image" {
