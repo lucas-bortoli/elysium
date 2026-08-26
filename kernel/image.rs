@@ -91,23 +91,30 @@ pub fn resolve_image(ctx: &Ctx<'_>, images: &ImageTable, id: u32) -> Result<Rc<t
         .ok_or_else(|| rquickjs::Exception::throw_type(ctx, &format!("{id} is not a loaded image")))
 }
 
-/// Resolves `requested` against `canonical_program_dir` and verifies it
-/// doesn't escape it. `PathBuf::join` with an absolute `requested` (e.g.
-/// `/etc/passwd`) discards `canonical_program_dir` entirely and returns the
-/// absolute path verbatim, so canonicalizing and then checking
-/// `starts_with` is what actually catches that case — along with any `../`
-/// traversal and any symlink that resolves outside the directory — rather
-/// than string-matching `..`/a leading `/`, which a symlink could still get
-/// around.
-fn resolve_program_path(
-    canonical_program_dir: &Path,
+/// Resolves `requested` — a virtual, userland-rooted path (e.g.
+/// `/programs/init/sprite.png`) — against `canonical_userland_root`, and
+/// verifies it doesn't escape it. `requested` must start with `/`: this
+/// isn't itself the security boundary (a program can't reach this binding
+/// except through `ely:image`'s `loadImage`, which already rejects a
+/// non-absolute path as a `RelativePathError` before ever calling here) but
+/// it keeps a caller that does reach this directly from silently getting a
+/// path resolved relative to `canonical_userland_root` by accident.
+/// Escaping the root — via `../` traversal or a symlink that resolves
+/// outside it — is caught by canonicalizing the joined path and checking
+/// `starts_with`, rather than string-matching `..`, which a symlink could
+/// still get around.
+fn resolve_userland_path(
+    canonical_userland_root: &Path,
     requested: &str,
 ) -> std::result::Result<PathBuf, String> {
-    let candidate = canonical_program_dir.join(requested);
+    let Some(relative) = requested.strip_prefix('/') else {
+        return Err(format!("{requested} is not an absolute path"));
+    };
+    let candidate = canonical_userland_root.join(relative);
     let canonical_candidate =
         std::fs::canonicalize(&candidate).map_err(|err| format!("{requested}: {err}"))?;
-    if !canonical_candidate.starts_with(canonical_program_dir) {
-        return Err(format!("{requested} is outside the program's directory"));
+    if !canonical_candidate.starts_with(canonical_userland_root) {
+        return Err(format!("{requested} is outside the userland directory"));
     }
     Ok(canonical_candidate)
 }
@@ -136,32 +143,27 @@ fn quantize_to_palette(mut pixmap: tiny_skia::Pixmap) -> tiny_skia::Pixmap {
 /// Binds the *hidden* globals `ely:image`'s embedded module wraps
 /// (`__image_load`, `__image_width`, `__image_height`, `__image_unload`) —
 /// never called by a program directly, only through `ely:image`'s exported
-/// `loadImage`/`unloadImage`. `program_dir` is canonicalized once here, up
-/// front: every `loadImage` call resolves against this same canonical
+/// `loadImage`/`unloadImage`. `userland_root` is already canonicalized by
+/// the caller ([`crate::runtime::ElysiumRuntime::new`]): every `loadImage`
+/// call resolves its absolute, virtual path against this same canonical
 /// root, never the process's current working directory and never wherever
 /// the calling `.ts` file happens to live.
 pub fn bootstrap_image_bindings(
     ctx: &Ctx<'_>,
     images: Rc<ImageTable>,
-    program_dir: PathBuf,
+    userland_root: PathBuf,
 ) -> Result<()> {
-    let canonical_program_dir = std::fs::canonicalize(&program_dir).unwrap_or_else(|err| {
-        panic!(
-            "program directory {} is invalid: {err}",
-            program_dir.display()
-        )
-    });
     let global = ctx.globals();
 
     {
         let images = Rc::clone(&images);
-        let program_dir = canonical_program_dir.clone();
+        let userland_root = userland_root.clone();
         global.set(
             "__image_load",
             Function::new(
                 ctx.clone(),
                 move |ctx: Ctx<'_>, path: String| -> Result<u32> {
-                    let resolved = resolve_program_path(&program_dir, &path)
+                    let resolved = resolve_userland_path(&userland_root, &path)
                         .map_err(|err| rquickjs::Exception::throw_message(&ctx, &err))?;
                     let bytes = std::fs::read(&resolved).map_err(|err| {
                         rquickjs::Exception::throw_message(&ctx, &format!("{path}: {err}"))

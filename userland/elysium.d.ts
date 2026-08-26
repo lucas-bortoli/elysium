@@ -1,6 +1,16 @@
 // Ambient declarations for the Elysium host API: globals (print, timers,
 // the JSX factory), the ambient `JSX` namespace, and the `ely:framebuffer`/
-// `ely:lifecycle`/`ely:math`/`ely:input`/`ely:image` namespaces.
+// `ely:lifecycle`/`ely:math`/`ely:input`/`ely:image`/`ely:filesystem`
+// namespaces.
+
+/** A module's own location, expressed as an absolute path rooted at the
+ * userland tree.
+ * Both are `undefined` for a module that isn't part of the userland tree
+ * (an `ely:`-namespaced runtime module). */
+interface ImportMeta {
+  readonly directoryName: string;
+  readonly fileName: string;
+}
 
 /** Writes a line to the host's stdout. */
 declare function print(...message: any): void;
@@ -487,7 +497,11 @@ declare module "ely:math" {
   export function vector2Rotate(v: Vector2d, radians: number): Vector2d;
 
   /** `v` with each component restricted to the `[min, max]` range. */
-  export function vector2Clamp(v: Vector2d, min: Vector2d, max: Vector2d): Vector2d;
+  export function vector2Clamp(
+    v: Vector2d,
+    min: Vector2d,
+    max: Vector2d,
+  ): Vector2d;
 
   /** The angle of `v`, in radians, measured counterclockwise from the positive x-axis. */
   export function vector2Angle(v: Vector2d): number;
@@ -781,6 +795,17 @@ declare module "ely:input" {
   export function wasKeyReleased(key: Key): boolean;
 }
 
+declare module "ely:filesystem" {
+  /** Thrown when a userland filesystem path is given relative instead of
+   * absolute. Every such path must start with `/` and is resolved against
+   * the userland root, never wherever the calling module happens to live —
+   * `import.meta.directoryName`/`fileName` are how a module finds its own
+   * location to build an absolute path from. */
+  export class RelativePathError extends Error {
+    constructor(message: string);
+  }
+}
+
 declare module "ely:image" {
   /** Opaque handle to a loaded image, returned by `loadImage`. */
   export type ImageId = number;
@@ -794,13 +819,14 @@ declare module "ely:image" {
   }
 
   /** Thrown by `loadImage` when `path` doesn't exist, escapes the
-   * program's own directory, or isn't a decodable PNG. */
+   * userland root, or isn't a decodable PNG. */
   export class ImageLoadError extends Error {
     constructor(message: string);
   }
 
-  /** Loads the PNG at `path`, resolved relative to the program's own root
-   * directory. */
+  /** Loads the PNG at `path`, an absolute path resolved against the
+   * userland root. Throws `RelativePathError` (from `ely:filesystem`) if
+   * `path` doesn't start with `/`. */
   export function loadImage(path: string): Image;
 
   /** Frees a loaded image early. An image not explicitly unloaded stays

@@ -19,7 +19,9 @@ import { loadImage } from "ely:image";
 let x = 0;
 const speed = 1000; // pixels per second
 
-const bg = loadImage("pexels-elizabeth-ferreira-1040803688-33035533.png");
+const bg = loadImage(
+  `${import.meta.directoryName}/pexels-elizabeth-ferreira-1040803688-33035533.png`,
+);
 
 addUpdateTicker((dt) => {
   x += speed * dt;

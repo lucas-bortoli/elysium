@@ -22,11 +22,8 @@ fn main() {
         .parent()
         .expect("binary path has no parent directory")
         .to_path_buf();
-    let path = exe_dir.join("userland/programs/init/index.ts");
-    let program_dir = path
-        .parent()
-        .expect("entry module path has no parent directory")
-        .to_path_buf();
+    let userland_root = exe_dir.join("userland");
+    let path = userland_root.join("programs/init/index.ts");
     let program = std::fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
     let path = path.to_str().expect("binary path is not valid UTF-8");
@@ -38,7 +35,7 @@ fn main() {
         Rc::clone(&draw_commands),
         Rc::clone(&input),
         Rc::clone(&scale),
-        program_dir,
+        userland_root,
     )
     .expect("failed to initialize Elysium runtime");
 

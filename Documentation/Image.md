@@ -9,16 +9,12 @@ screen.
 import { addDrawHandler, drawImage } from "ely:framebuffer";
 import { loadImage } from "ely:image";
 
-const sprite = loadImage("sprite.png");
+const sprite = loadImage(`${import.meta.directoryName}/sprite.png`);
 
 addDrawHandler(() => {
   drawImage(sprite, 100, 80);
 });
 ```
-
-Loading is synchronous, the same way importing another module is — a
-program never has to `await` an image before drawing it, or handle it
-still being "in flight" partway through startup.
 
 An image is still bound by the same fixed, curated palette everything else
 on the Framebuffer is drawn with. Loading a PNG doesn't hand its colors to
@@ -38,13 +34,18 @@ at the image's natural pixel size — there's no scaling or rotation. Like
 `clearScreen`/`fillRectangle`, it only takes effect from inside a currently
 running draw handler.
 
-`loadImage` reads a path relative to the program's own directory, never
-the process's actual working directory, and a path can't be made to point
-anywhere outside that directory — a program's isolation extends to what it
-can read off disk through this call, the same as everything else about how
-programs run in their own VM. `loadImage` throws an `ImageLoadError` if the
-file doesn't exist, escapes the program's directory, or isn't a PNG file
-Elysium can decode.
+`loadImage` reads an absolute path against the root of the whole userland
+tree — the same tree every program lives under — never the process's
+actual working directory, and a path can't be made to point anywhere
+outside that tree. This means `path` must start with `/`; `loadImage`
+throws a `RelativePathError` if it doesn't. A program builds a path
+relative to its own location using `import.meta.directoryName` (its own
+directory) or `import.meta.fileName` (its own file), both already
+expressed as absolute userland paths — `${import.meta.directoryName}/sprite.png`
+reaches a picture checked in alongside the program's own source, the same
+way a relative import would, just spelled out explicitly. `loadImage`
+throws an `ImageLoadError` if the file doesn't exist, escapes the userland
+tree, or isn't a PNG file Elysium can decode.
 
 An image loaded this way stays loaded for as long as the program keeps
 running, whether or not the program still holds a reference to it — this
