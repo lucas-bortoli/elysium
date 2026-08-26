@@ -4,12 +4,13 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use rquickjs::function::Rest;
-use rquickjs::loader::FileResolver;
 use rquickjs::{
     Context, Ctx, Error, Function, Module, Persistent, Result, Runtime as JsRuntime, Type, Value,
 };
 
-use crate::esm_resolver::{CompilingLoader, EmbeddedOrFileResolver, bootstrap_jsx_runtime};
+use crate::esm_resolver::{
+    CompilingLoader, EmbeddedOrFileResolver, bootstrap_jsx_runtime, set_virtual_import_meta,
+};
 use crate::framebuffer::{self, DrawCommand};
 use crate::image::{self, ImageTable};
 use crate::input::{self, Input};
@@ -78,6 +79,12 @@ pub struct ElysiumRuntime {
     /// gets released.
     images: Rc<ImageTable>,
     guard: Rc<GuardState>,
+    /// Canonicalized once in [`Self::new`]; shared by `ely:image`'s
+    /// `loadImage` (which resolves an absolute virtual path against it) and
+    /// by [`Self::eval_module`] (which uses it to give the entry module's
+    /// own `import.meta.directoryName`/`fileName` a virtual identity, the same
+    /// way [`CompilingLoader`] does for every module it loads afterward).
+    userland_root: PathBuf,
     context: Context,
     js_runtime: JsRuntime,
 }
@@ -91,16 +98,25 @@ impl ElysiumRuntime {
     /// and read by `ely:input`'s hidden globals. `scale` is the
     /// Framebuffer's shared physical-pixels-per-logical-pixel setting;
     /// `ely:framebuffer`'s `setScale` writes to it directly, the same way
-    /// `draw_commands` is written to. `program_dir` is the running
-    /// program's own root directory — `ely:image`'s `loadImage` resolves
-    /// every path against it and can never escape it, regardless of the
-    /// process's actual working directory.
+    /// `draw_commands` is written to. `userland_root` is the root of the
+    /// whole userland tree, shared by every program — `ely:image`'s
+    /// `loadImage` resolves an absolute virtual path against it and can
+    /// never escape it, regardless of the process's actual working
+    /// directory, and every module's `import.meta.directoryName`/`fileName` is
+    /// expressed relative to this same root.
     pub fn new(
         draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
         input: Rc<Input>,
         scale: Rc<Cell<u32>>,
-        program_dir: PathBuf,
+        userland_root: PathBuf,
     ) -> Result<Self> {
+        let userland_root = std::fs::canonicalize(&userland_root).unwrap_or_else(|err| {
+            panic!(
+                "userland root {} is invalid: {err}",
+                userland_root.display()
+            )
+        });
+
         let js_runtime = JsRuntime::new()?;
 
         let guard = Rc::new(GuardState::default());
@@ -120,12 +136,8 @@ impl ElysiumRuntime {
         // erased) as it's loaded. A bare specifier matching one of
         // EMBEDDED_RUNTIME_MODULES resolves to that embedded source instead.
         js_runtime.set_loader(
-            EmbeddedOrFileResolver(
-                FileResolver::default()
-                    .with_pattern("{}.ts")
-                    .with_pattern("{}.tsx"),
-            ),
-            CompilingLoader,
+            EmbeddedOrFileResolver::new(userland_root.clone()),
+            CompilingLoader::new(userland_root.clone()),
         );
 
         let context = Context::full(&js_runtime)?;
@@ -148,7 +160,7 @@ impl ElysiumRuntime {
             input::bootstrap_input_bindings(&ctx, input)?;
             bootstrap_timers(&ctx, Rc::clone(&timers), Rc::clone(&microtasks))?;
             bootstrap_post_init_handlers(&ctx, Rc::clone(&post_init_handlers))?;
-            image::bootstrap_image_bindings(&ctx, Rc::clone(&images), program_dir)?;
+            image::bootstrap_image_bindings(&ctx, Rc::clone(&images), userland_root.clone())?;
             Ok(())
         })?;
 
@@ -159,6 +171,7 @@ impl ElysiumRuntime {
             timers,
             microtasks,
             post_init_handlers,
+            userland_root,
             images,
         })
     }
@@ -178,7 +191,9 @@ impl ElysiumRuntime {
         let compiled = transform::compile(source).map_err(GuardedError::Exception)?;
 
         self.run_guarded(DEFAULT_EVAL_BUDGET, |ctx| {
-            let (_module, promise) = Module::declare(ctx.clone(), name, compiled)?.eval()?;
+            let module = Module::declare(ctx.clone(), name, compiled)?;
+            set_virtual_import_meta(&module, name, &self.userland_root)?;
+            let (_module, promise) = module.eval()?;
             promise.finish::<()>()
         })
         .map_err(remap_deadlock_error)
@@ -429,26 +444,36 @@ mod tests {
     /// Like [`eval`], but also hands back the `Input` device backing the
     /// VM, so a test can feed it window events before/after evaluating.
     fn eval_with_input(source: &str) -> (ElysiumRuntime, Rc<Input>) {
+        eval_named_with_input("test.ts", source)
+    }
+
+    /// Like [`eval_with_input`], but lets a test pick the entry module's own
+    /// name — needed to exercise `import.meta.directoryName`/`fileName`, since
+    /// those are only set when `name` canonicalizes to somewhere inside
+    /// [`test_userland_root`].
+    fn eval_named_with_input(name: &str, source: &str) -> (ElysiumRuntime, Rc<Input>) {
         let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
         let input = Rc::new(Input::new(Rc::clone(&scale)));
         let runtime = ElysiumRuntime::new(
             Rc::new(RefCell::new(Vec::new())),
             Rc::clone(&input),
             scale,
-            test_program_dir(),
+            test_userland_root(),
         )
         .expect("failed to construct runtime");
         runtime
-            .eval_module("test.ts", source)
+            .eval_module(name, source)
             .expect("module failed to evaluate");
         (runtime, input)
     }
 
-    /// `loadImage`'s `program_dir` for every test in this module — a fixed
-    /// fixtures directory holding a small, real PNG (`test.png`) plus a
-    /// checked-in `.ts` sibling so a path-traversal test has a real file
-    /// outside this directory to point at.
-    fn test_program_dir() -> std::path::PathBuf {
+    /// `loadImage`'s `userland_root` for every test in this module — a fixed
+    /// fixtures directory holding a small, real PNG (`test.png`) and a small
+    /// real module (`meta_module.ts`) used to exercise
+    /// `import.meta.directoryName`/`fileName`; `kernel/framebuffer.rs`, two levels
+    /// up, is a real file outside this directory a path-traversal test can
+    /// point at.
+    fn test_userland_root() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("kernel/image/fixtures")
     }
 
@@ -825,7 +850,7 @@ mod tests {
             "import { loadImage } from 'ely:image'; \
              import { addDrawHandler, drawImage } from 'ely:framebuffer'; \
              globalThis.drawn = false; \
-             const image = loadImage('test.png'); \
+             const image = loadImage('/test.png'); \
              addDrawHandler(() => { drawImage(image, 10, 10); globalThis.drawn = true; });",
         );
         runtime.run_due_timers().unwrap();
@@ -846,13 +871,13 @@ mod tests {
     }
 
     #[test]
-    fn load_image_outside_program_dir_throws_image_load_error() {
+    fn load_image_outside_userland_root_throws_image_load_error() {
         let runtime = eval(
             "import { loadImage, ImageLoadError } from 'ely:image'; \
              globalThis.threw = false; \
              globalThis.correctType = false; \
              try { \
-                 loadImage('../../framebuffer.rs'); \
+                 loadImage('/../../framebuffer.rs'); \
              } catch (err) { \
                  globalThis.threw = true; \
                  globalThis.correctType = err instanceof ImageLoadError; \
@@ -860,6 +885,64 @@ mod tests {
         );
         assert!(global::<bool>(&runtime, "threw"));
         assert!(global::<bool>(&runtime, "correctType"));
+    }
+
+    #[test]
+    fn load_image_with_a_relative_path_throws_relative_path_error() {
+        let runtime = eval(
+            "import { loadImage } from 'ely:image'; \
+             import { RelativePathError } from 'ely:filesystem'; \
+             globalThis.threw = false; \
+             globalThis.correctType = false; \
+             try { \
+                 loadImage('test.png'); \
+             } catch (err) { \
+                 globalThis.threw = true; \
+                 globalThis.correctType = err instanceof RelativePathError; \
+             }",
+        );
+        assert!(global::<bool>(&runtime, "threw"));
+        assert!(global::<bool>(&runtime, "correctType"));
+    }
+
+    #[test]
+    fn relative_import_resolves_and_evaluates() {
+        let entry = test_userland_root().join("entry.ts");
+        let (runtime, _input) = eval_named_with_input(
+            entry.to_str().unwrap(),
+            "import { value } from './relative_import_target.ts'; \
+             globalThis.value = value;",
+        );
+        assert_eq!(global::<f64>(&runtime, "value"), 42.0);
+    }
+
+    #[test]
+    fn relative_import_escaping_userland_root_fails_to_resolve() {
+        let entry = test_userland_root().join("entry.ts");
+        let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
+        let input = Rc::new(Input::new(Rc::clone(&scale)));
+        let runtime = ElysiumRuntime::new(
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::clone(&input),
+            scale,
+            test_userland_root(),
+        )
+        .expect("failed to construct runtime");
+        let result =
+            runtime.eval_module(entry.to_str().unwrap(), "import '../../../../etc/passwd';");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn import_meta_reports_virtual_userland_paths() {
+        let module = test_userland_root().join("meta_module.ts");
+        let (runtime, _input) = eval_named_with_input(
+            module.to_str().unwrap(),
+            "globalThis.directoryName = import.meta.directoryName; \
+             globalThis.fileName = import.meta.fileName;",
+        );
+        assert_eq!(global::<String>(&runtime, "directoryName"), "/");
+        assert_eq!(global::<String>(&runtime, "fileName"), "/meta_module.ts");
     }
 
     #[test]
