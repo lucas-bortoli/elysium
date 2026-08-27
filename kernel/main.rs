@@ -1,4 +1,5 @@
 mod esm_resolver;
+mod filesystem;
 mod framebuffer;
 mod image;
 mod input;

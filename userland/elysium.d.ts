@@ -838,6 +838,166 @@ declare module "ely:filesystem" {
    * otherwise pass through unchanged and remain usable for directory
    * traversal. */
   export function sanitizeName(filename: string, maxLength?: number): string;
+
+  // The classes below are a shared vocabulary reused across every
+  // function — mirroring `std::io::ErrorKind` being one shared set of
+  // variants for every Rust filesystem call, rather than a bespoke error
+  // type per call site. Each function's exported error type
+  // (`ReadFileError`, `WriteFileError`, ...) is just the union of
+  // whichever of these it can actually throw.
+
+  /** A path, or a component of it, doesn't exist. */
+  export class NotFoundError extends Error {
+    constructor(message: string);
+  }
+
+  /** A file operation (read, write, or removing a file) found a directory
+   * instead. */
+  export class IsADirectoryError extends Error {
+    constructor(message: string);
+  }
+
+  /** A directory operation (`createDirectory`, `listDirectory`) is
+   * blocked by an existing non-directory somewhere along the path. */
+  export class NotADirectoryError extends Error {
+    constructor(message: string);
+  }
+
+  /** `readTextFile`'s bytes aren't valid UTF-8. */
+  export class TextDecodeError extends Error {
+    constructor(message: string);
+  }
+
+  /** Anything else the underlying operation failed with — permission
+   * denied, disk full, and so on. `.message` carries the full underlying
+   * OS error text plus the operation and path involved, so it stays
+   * useful for debugging even though it isn't one of the
+   * specifically-typed cases above. */
+  export class UnknownError extends Error {
+    constructor(message: string);
+  }
+
+  /** Every case `readFile` can actually throw natively (beyond
+   * `RelativePathError`, thrown before any native call). */
+  export type ReadFileError = NotFoundError | IsADirectoryError | UnknownError;
+
+  /** Every case `readTextFile` can actually throw natively — like
+   * `ReadFileError`, plus `TextDecodeError` for non-UTF-8 bytes. */
+  export type ReadTextFileError =
+    | NotFoundError
+    | IsADirectoryError
+    | TextDecodeError
+    | UnknownError;
+
+  /** Every case `writeFile` can actually throw natively. */
+  export type WriteFileError = NotFoundError | IsADirectoryError | UnknownError;
+
+  /** Every case `writeTextFile` can actually throw natively. */
+  export type WriteTextFileError = NotFoundError | IsADirectoryError | UnknownError;
+
+  /** Every case `remove` can actually throw natively. */
+  export type DeleteError = NotFoundError | UnknownError;
+
+  /** Every case `createDirectory` can actually throw natively. */
+  export type CreateDirectoryError = NotADirectoryError | UnknownError;
+
+  /** Every case `listDirectory` can actually throw natively. */
+  export type ListDirectoryError = NotFoundError | NotADirectoryError | UnknownError;
+
+  /** Every case `stat` can actually throw natively. */
+  export type StatError = NotFoundError | UnknownError;
+
+  /** A byte range within a file, used by `readFile`/`writeFile` to operate
+   * on part of a file instead of the whole thing. Both fields are
+   * optional: `offset` defaults to `0`, `length` defaults to "the rest of
+   * the file" for `readFile` and "all of `data`" for `writeFile`. */
+  export interface ByteRange {
+    offset?: number;
+    length?: number;
+  }
+
+  /** The result of `stat`, and of each entry `listDirectory` returns.
+   * `path` is the entry's own absolute, virtual path — for
+   * `listDirectory`, that's the listed directory joined with the entry's
+   * name, not just the name by itself. */
+  export type EntryStat =
+    | { readonly kind: "File"; readonly size: number; readonly path: string }
+    | { readonly kind: "Directory"; readonly path: string };
+
+  /** Reads the whole file at `path`, or — if `range` is given — only the
+   * bytes from `range.offset` (default `0`) spanning at most
+   * `range.length` bytes (default: to the end of the file). `path` must
+   * be absolute.
+   * @throws {RelativePathError} if `path` isn't absolute.
+   * @throws {NotFoundError} if `path` doesn't exist.
+   * @throws {IsADirectoryError} if `path` names a directory.
+   * @throws {UnknownError} on any other failure. */
+  export function readFile(
+    path: string,
+    range?: import("ely:container").Option<ByteRange>,
+  ): Uint8Array;
+
+  /** Writes `data` to `path`. With no `range`, the file is truncated and
+   * replaced entirely. With `range`, the file is patched in place:
+   * writing starts at `range.offset` (default `0`), and bytes outside the
+   * written span are left untouched. `path` must be absolute.
+   * @throws {RelativePathError} if `path` isn't absolute.
+   * @throws {NotFoundError} if `path`'s parent directory doesn't exist.
+   * @throws {IsADirectoryError} if `path` names a directory.
+   * @throws {UnknownError} on any other failure. */
+  export function writeFile(
+    path: string,
+    data: Uint8Array,
+    range?: import("ely:container").Option<ByteRange>,
+  ): void;
+
+  /** Reads the file at `path` as UTF-8 text. `path` must be absolute.
+   * @throws {RelativePathError} if `path` isn't absolute.
+   * @throws {NotFoundError} if `path` doesn't exist.
+   * @throws {IsADirectoryError} if `path` names a directory.
+   * @throws {TextDecodeError} if `path`'s bytes aren't valid UTF-8.
+   * @throws {UnknownError} on any other failure. */
+  export function readTextFile(path: string): string;
+
+  /** Writes `text` to `path`, truncating and replacing it entirely. `path`
+   * must be absolute.
+   * @throws {RelativePathError} if `path` isn't absolute.
+   * @throws {NotFoundError} if `path`'s parent directory doesn't exist.
+   * @throws {IsADirectoryError} if `path` names a directory.
+   * @throws {UnknownError} on any other failure. */
+  export function writeTextFile(path: string, text: string): void;
+
+  /** Removes the file or directory at `path`. A directory is removed
+   * recursively, along with everything inside it. `path` must be
+   * absolute.
+   * @throws {RelativePathError} if `path` isn't absolute.
+   * @throws {NotFoundError} if `path` doesn't exist.
+   * @throws {UnknownError} on any other failure. */
+  export function remove(path: string): void;
+
+  /** Creates the directory at `path`, along with any missing parent
+   * directories. `path` must be absolute.
+   * @throws {RelativePathError} if `path` isn't absolute.
+   * @throws {NotADirectoryError} if a non-directory already exists
+   * somewhere along `path`.
+   * @throws {UnknownError} on any other failure. */
+  export function createDirectory(path: string): void;
+
+  /** Lists the entries directly inside the directory at `path`, each as
+   * an `EntryStat` whose `path` is that entry's own absolute path (the
+   * listed directory joined with its name). `path` must be absolute.
+   * @throws {RelativePathError} if `path` isn't absolute.
+   * @throws {NotFoundError} if `path` doesn't exist.
+   * @throws {NotADirectoryError} if `path` names a file.
+   * @throws {UnknownError} on any other failure. */
+  export function listDirectory(path: string): EntryStat[];
+
+  /** Reports whether `path` is a file or a directory, its size in bytes
+   * if it's a file, and its own absolute path. `path` must be absolute.
+   * @throws {RelativePathError} if `path` isn't absolute.
+   * @throws {NotFoundError} if `path` doesn't exist.
+   * @throws {UnknownError} on any other failure. */
+  export function stat(path: string): EntryStat;
 }
 
 declare module "ely:container" {
