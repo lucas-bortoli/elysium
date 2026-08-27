@@ -21,7 +21,16 @@ use crate::framebuffer::Color;
 
 struct ImageEntry {
     id: u32,
-    pixmap: Rc<tiny_skia::Pixmap>,
+    image: LoadedImage,
+}
+
+/// A quantized image plus whether it has any transparency. The Framebuffer
+/// blits a fully opaque image with a straight copy instead of a per-pixel
+/// `source-over` blend.
+#[derive(Clone)]
+pub struct LoadedImage {
+    pub pixmap: Rc<tiny_skia::Pixmap>,
+    pub opaque: bool,
 }
 
 /// The VM's set of loaded images. See the module doc comment for why this
@@ -45,23 +54,27 @@ impl ImageTable {
         id
     }
 
-    /// Takes ownership of an already-quantized `pixmap`, assigns it a fresh
-    /// id, and returns the id.
-    fn insert(&self, pixmap: tiny_skia::Pixmap) -> u32 {
+    /// Takes ownership of an already-quantized `pixmap` (with `opaque`
+    /// recording whether it has any transparency), assigns it a fresh id,
+    /// and returns the id.
+    fn insert(&self, pixmap: tiny_skia::Pixmap, opaque: bool) -> u32 {
         let id = self.allocate_id();
         self.images.borrow_mut().push(ImageEntry {
             id,
-            pixmap: Rc::new(pixmap),
+            image: LoadedImage {
+                pixmap: Rc::new(pixmap),
+                opaque,
+            },
         });
         id
     }
 
-    fn get(&self, id: u32) -> Option<Rc<tiny_skia::Pixmap>> {
+    fn get(&self, id: u32) -> Option<LoadedImage> {
         self.images
             .borrow()
             .iter()
             .find(|entry| entry.id == id)
-            .map(|entry| Rc::clone(&entry.pixmap))
+            .map(|entry| entry.image.clone())
     }
 
     fn remove(&self, id: u32) {
@@ -85,7 +98,7 @@ impl ImageTable {
 /// `framebuffer::resolve_color`'s handling of an out-of-range color id.
 /// Used both by `__image_width`/`__image_height` below and by
 /// `framebuffer::bootstrap_framebuffer_bindings`'s `__framebuffer_draw_image`.
-pub fn resolve_image(ctx: &Ctx<'_>, images: &ImageTable, id: u32) -> Result<Rc<tiny_skia::Pixmap>> {
+pub fn resolve_image(ctx: &Ctx<'_>, images: &ImageTable, id: u32) -> Result<LoadedImage> {
     images
         .get(id)
         .ok_or_else(|| rquickjs::Exception::throw_type(ctx, &format!("{id} is not a loaded image")))
@@ -123,10 +136,13 @@ fn resolve_userland_path(
 /// palette entry via `Color::nearest`, then re-premultiplies by that
 /// pixel's original alpha — alpha itself is never touched, so transparency
 /// survives quantization untouched. Runs once, at load time, never per
-/// frame.
-fn quantize_to_palette(mut pixmap: tiny_skia::Pixmap) -> tiny_skia::Pixmap {
+/// frame. Also reports whether the image is fully opaque, so the
+/// Framebuffer can blit it with a plain copy.
+fn quantize_to_palette(mut pixmap: tiny_skia::Pixmap) -> (tiny_skia::Pixmap, bool) {
+    let mut opaque = true;
     for pixel in pixmap.pixels_mut() {
         let straight = pixel.demultiply();
+        opaque &= straight.alpha() == 255;
         let matched = Color::nearest(straight.red(), straight.green(), straight.blue());
         let hex = matched.hex();
         let matched_straight = tiny_skia::ColorU8::from_rgba(
@@ -137,7 +153,34 @@ fn quantize_to_palette(mut pixmap: tiny_skia::Pixmap) -> tiny_skia::Pixmap {
         );
         *pixel = matched_straight.premultiply();
     }
-    pixmap
+    (pixmap, opaque)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quantize_to_palette;
+
+    fn solid(w: u32, h: u32, rgba: [u8; 4]) -> tiny_skia::Pixmap {
+        let mut pixmap = tiny_skia::Pixmap::new(w, h).unwrap();
+        let color = tiny_skia::Color::from_rgba8(rgba[0], rgba[1], rgba[2], rgba[3]);
+        pixmap.fill(color);
+        pixmap
+    }
+
+    #[test]
+    fn quantize_reports_a_fully_opaque_image_as_opaque() {
+        let (_, opaque) = quantize_to_palette(solid(4, 4, [10, 20, 30, 255]));
+        assert!(opaque);
+    }
+
+    #[test]
+    fn quantize_reports_any_transparency_as_not_opaque() {
+        let mut pixmap = solid(4, 4, [10, 20, 30, 255]);
+        // Punch one pixel to partial alpha.
+        pixmap.pixels_mut()[5] = tiny_skia::ColorU8::from_rgba(10, 20, 30, 128).premultiply();
+        let (_, opaque) = quantize_to_palette(pixmap);
+        assert!(!opaque);
+    }
 }
 
 /// Binds the *hidden* globals `ely:image`'s embedded module wraps
@@ -171,7 +214,8 @@ pub fn bootstrap_image_bindings(
                     let pixmap = tiny_skia::Pixmap::decode_png(&bytes).map_err(|err| {
                         rquickjs::Exception::throw_message(&ctx, &format!("{path}: {err}"))
                     })?;
-                    Ok(images.insert(quantize_to_palette(pixmap)))
+                    let (pixmap, opaque) = quantize_to_palette(pixmap);
+                    Ok(images.insert(pixmap, opaque))
                 },
             )?,
         )?;
@@ -182,7 +226,7 @@ pub fn bootstrap_image_bindings(
         global.set(
             "__image_width",
             Function::new(ctx.clone(), move |ctx: Ctx<'_>, id: u32| -> Result<u32> {
-                Ok(resolve_image(&ctx, &images, id)?.width())
+                Ok(resolve_image(&ctx, &images, id)?.pixmap.width())
             })?,
         )?;
     }
@@ -192,7 +236,7 @@ pub fn bootstrap_image_bindings(
         global.set(
             "__image_height",
             Function::new(ctx.clone(), move |ctx: Ctx<'_>, id: u32| -> Result<u32> {
-                Ok(resolve_image(&ctx, &images, id)?.height())
+                Ok(resolve_image(&ctx, &images, id)?.pixmap.height())
             })?,
         )?;
     }
