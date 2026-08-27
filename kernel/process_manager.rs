@@ -19,6 +19,11 @@ use crate::runtime::{ElysiumRuntime, GuardedError};
 /// window-close broadcast) before the kernel force-reaps it.
 pub const GRACE: Duration = Duration::from_millis(300);
 
+/// Hard ceiling on live processes. A `spawn` past this is rejected and
+/// logged. With lazy start a runaway `spawn` chain adds at most one process
+/// per frame; this stops it entirely and bounds worst-case memory.
+const MAX_PROCESSES: usize = 128;
+
 /// Where a process is in its lifecycle. There is no `Poisoned` state: a
 /// faulted process is removed from the table in the same pass, so it is
 /// never scheduled again.
@@ -34,6 +39,11 @@ struct ProcessEntry {
     mailbox: VecDeque<Envelope>,
     state: ProcessState,
     label: String,
+    /// `Some(virtual path)` until the process has taken its first turn and
+    /// evaluated its entry module; `None` afterward. Startup — resolving
+    /// the path, `eval_module`, post-init handlers — is deferred to that
+    /// first turn so `apply_pending` runs no program code.
+    pending_path: Option<String>,
     /// Set once we've logged that messages are piling up with no
     /// message handler, so the warning isn't repeated every frame.
     warned_no_handler: bool,
@@ -70,17 +80,20 @@ impl ProcessManager {
         self.entries.is_empty()
     }
 
-    /// Starts a process from a userland-virtual entry path (e.g.
-    /// `/programs/init/index.ts`). Used for the init process and, via
-    /// [`Self::apply_pending`], for every `spawn`. On failure nothing is
-    /// added to the table and the id is released.
+    /// Allocates a process for the userland-virtual entry path
+    /// `virtual_path` (e.g. `/programs/init/index.ts`) and adds it to the
+    /// table as not-yet-started. Used for the init process and, via
+    /// [`Self::apply_pending`], for every `spawn`. The program's code
+    /// doesn't run until the process's first [`Self::tick`] turn; the only
+    /// way this fails is an internal runtime-construction error, not a
+    /// program error.
     pub fn spawn_from_path(
         &mut self,
         virtual_path: &str,
         arguments_json: Option<String>,
     ) -> Result<ProcessId, GuardedError> {
         let id = self.channel.allocate_id();
-        match self.install(id, virtual_path, arguments_json) {
+        match self.allocate_process(id, virtual_path, arguments_json) {
             Ok(()) => Ok(id),
             Err(err) => {
                 self.channel.forget(id);
@@ -96,6 +109,31 @@ impl ProcessManager {
         let mut i = 0;
         'entries: while i < self.entries.len() {
             let id = self.entries[i].id;
+
+            // 0. On its first turn, a process resolves its entry path,
+            // evaluates its module, and runs its post-init handlers. Any
+            // failure here — a missing file, a top-level throw, a post-init
+            // throw — drops the process through the same path as any other
+            // fault.
+            if let Some(path) = self.entries[i].pending_path.take() {
+                match self.resolve_program(&path) {
+                    Ok((name, source)) => {
+                        if let Err(err) = self.entries[i].runtime.eval_module(&name, &source) {
+                            self.fault(i, "module evaluation", err);
+                            continue 'entries;
+                        }
+                        if let Err(err) = self.entries[i].runtime.run_post_init_handlers() {
+                            self.fault(i, "post-init handler", err);
+                            continue 'entries;
+                        }
+                        trace_process(id, &format!("started from {path}"));
+                    }
+                    Err(err) => {
+                        self.fault(i, "startup", err);
+                        continue 'entries;
+                    }
+                }
+            }
 
             // 1. Drain the mailbox, but only once a handler exists.
             if self.entries[i].runtime.has_message_handler() {
@@ -168,64 +206,49 @@ impl ProcessManager {
     }
 
     /// Applies everything the `ely:process` bindings queued during the pass
-    /// just finished. Control requests and spawns are drained in a loop:
-    /// installing a process runs its module body, which can itself spawn or
-    /// terminate, and those need to settle in the same frame so a child
-    /// spawned mid-install — and any message sent to it — resolves now
-    /// rather than a frame late. Sends are delivered only once every spawn
-    /// has landed, so their targets exist. All of this runs when no
-    /// process is executing, which is what makes dropping one here safe.
+    /// just finished: control requests, then spawns, then sends. None of
+    /// this runs program code — [`Self::allocate_process`] only builds a
+    /// VM — so a spawn can't cascade into more spawns here, and this is a
+    /// single straight-line pass. It runs when no process is executing,
+    /// which is what makes dropping one here (a `Kill`, a rejected spawn)
+    /// safe.
     fn apply_pending(&mut self, now: Instant) {
-        /// Guards against a process that spawns on every install pinning
-        /// the kernel inside this loop.
-        const MAX_INSTALLS_PER_FRAME: usize = 1024;
-        let mut installed = 0;
-
-        loop {
-            let control = self.channel.take_control();
-            let spawns = self.channel.take_spawns();
-            if control.is_empty() && spawns.is_empty() {
-                break;
-            }
-
-            for request in control {
-                match request {
-                    Control::Kill { target, by } => {
-                        if let Some(pos) = self.entries.iter().position(|e| e.id == target) {
-                            trace_process(target, &format!("terminated by {by}"));
-                            self.remove_at(pos);
-                        } else {
-                            self.channel.forget(target);
-                        }
+        for request in self.channel.take_control() {
+            match request {
+                Control::Kill { target, by } => {
+                    if let Some(pos) = self.entries.iter().position(|e| e.id == target) {
+                        trace_process(target, &format!("terminated by {by}"));
+                        self.remove_at(pos);
+                    } else {
+                        self.channel.forget(target);
                     }
-                    Control::ArmDraining { target, by } => {
-                        let Some(entry) = self.entries.iter_mut().find(|e| e.id == target) else {
-                            continue;
-                        };
-                        if matches!(entry.state, ProcessState::Running) {
-                            entry.state = ProcessState::Draining(now + GRACE);
-                            trace_process(target, &format!("exit requested by {by}; draining"));
-                        }
+                }
+                Control::ArmDraining { target, by } => {
+                    let Some(entry) = self.entries.iter_mut().find(|e| e.id == target) else {
+                        continue;
+                    };
+                    if matches!(entry.state, ProcessState::Running) {
+                        entry.state = ProcessState::Draining(now + GRACE);
+                        trace_process(target, &format!("exit requested by {by}; draining"));
                     }
                 }
             }
+        }
 
-            for SpawnRequest {
-                id,
-                path,
-                arguments_json,
-            } in spawns
-            {
-                if installed >= MAX_INSTALLS_PER_FRAME {
-                    trace_process(id, "spawn skipped: too many spawns in one frame");
-                    self.channel.forget(id);
-                    continue;
-                }
-                installed += 1;
-                if let Err(err) = self.install(id, &path, arguments_json) {
-                    trace_process(id, &format!("spawn failed: {}", describe(err)));
-                    self.channel.forget(id);
-                }
+        for SpawnRequest {
+            id,
+            path,
+            arguments_json,
+        } in self.channel.take_spawns()
+        {
+            if self.entries.len() >= MAX_PROCESSES {
+                trace_process(id, "spawn rejected: process table is full");
+                self.channel.forget(id);
+                continue;
+            }
+            if let Err(err) = self.allocate_process(id, &path, arguments_json) {
+                trace_process(id, &format!("spawn failed: {}", describe(err)));
+                self.channel.forget(id);
             }
         }
 
@@ -237,17 +260,16 @@ impl ProcessManager {
         }
     }
 
-    /// Builds a runtime for `id`, evaluates its entry module, runs its
-    /// post-init handlers, and — only if all of that succeeds — adds it to
-    /// the table.
-    fn install(
+    /// Builds a VM for `id` and adds it to the table as not-yet-started.
+    /// No program code runs here — the entry module is evaluated on the
+    /// process's first [`Self::tick`] turn. The only failure is an internal
+    /// runtime-construction error.
+    fn allocate_process(
         &mut self,
         id: ProcessId,
         virtual_path: &str,
         arguments_json: Option<String>,
     ) -> Result<(), GuardedError> {
-        let (name, source) = self.resolve_program(virtual_path)?;
-
         let runtime = ElysiumRuntime::new(
             Rc::clone(&self.draw_commands),
             Rc::clone(&self.input),
@@ -259,19 +281,17 @@ impl ProcessManager {
         )
         .map_err(|err| GuardedError::Exception(format!("runtime init failed: {err}")))?;
 
-        runtime.eval_module(&name, &source)?;
-        runtime.run_post_init_handlers()?;
-
         self.channel.register(id);
         self.entries.push(ProcessEntry {
             id,
             runtime,
             mailbox: VecDeque::new(),
             state: ProcessState::Running,
+            pending_path: Some(virtual_path.to_string()),
             label: virtual_path.to_string(),
             warned_no_handler: false,
         });
-        trace_process(id, &format!("created from {virtual_path}"));
+        trace_process(id, &format!("allocated for {virtual_path}"));
         Ok(())
     }
 
@@ -382,6 +402,7 @@ mod tests {
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         let root =
             std::env::temp_dir().join(format!("elysium-process-test-{}-{id}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
         for (path, source) in programs {
             let full = root.join(path);
             std::fs::create_dir_all(full.parent().unwrap()).unwrap();
@@ -428,26 +449,43 @@ mod tests {
     }
 
     #[test]
-    fn spawn_from_a_bad_path_errors_and_adds_nothing() {
-        let mut mgr = manager(userland_with(&[]));
-        let result = mgr.spawn_from_path("/nope.ts", None);
-        assert!(result.is_err());
-        assert!(mgr.is_empty());
+    fn a_module_body_runs_only_on_the_first_tick() {
+        let root = userland_with(&[(
+            "main.ts",
+            "globalThis.ran = true; setInterval(() => {}, 1000);",
+        )]);
+        let mut mgr = manager(root);
+        let id = mgr.spawn_from_path("/main.ts", None).unwrap();
+        // Allocated but not started: no globals yet.
+        assert!(!mgr.is_empty());
+        mgr.tick(Instant::now());
+        assert!(mgr.eval_in::<bool>(id, "globalThis.ran === true"));
     }
 
     #[test]
-    fn a_throwing_program_is_dropped_without_touching_its_sibling() {
+    fn a_bad_path_is_allocated_then_dropped_on_its_first_tick() {
+        let root = userland_with(&[("quiet.ts", "setInterval(() => {}, 1000);")]);
+        let mut mgr = manager(root);
+        // The spawn succeeds — the VM is built — but the missing file is
+        // only discovered on the first turn, which drops the process.
+        mgr.spawn_from_path("/nope.ts", None).unwrap();
+        mgr.spawn_from_path("/quiet.ts", None).unwrap();
+        assert_eq!(mgr.ids().len(), 2);
+        mgr.tick(Instant::now());
+        assert_eq!(mgr.ids().len(), 1, "only the resolvable program survives");
+    }
+
+    #[test]
+    fn a_top_level_throw_is_dropped_on_the_first_tick_without_touching_its_sibling() {
         let root = userland_with(&[
             ("boom.ts", "throw new Error('boom');"),
             ("quiet.ts", "setInterval(() => {}, 1000);"),
         ]);
         let mut mgr = manager(root);
-        // boom fails during install (module eval), so it never enters the
-        // table; quiet stays.
-        assert!(mgr.spawn_from_path("/boom.ts", None).is_err());
+        mgr.spawn_from_path("/boom.ts", None).unwrap();
         mgr.spawn_from_path("/quiet.ts", None).unwrap();
         mgr.tick(Instant::now());
-        assert_eq!(mgr.ids().len(), 1);
+        assert_eq!(mgr.ids().len(), 1, "the thrower is gone, the sibling stays");
     }
 
     #[test]
@@ -484,11 +522,13 @@ mod tests {
         ]);
         let mut mgr = manager(root);
         let parent = mgr.spawn_from_path("/parent.ts", None).unwrap();
-        // First tick: parent runs, queues the spawn; child installed in
-        // apply_pending but not yet ticked.
+        // Tick 1: parent starts and queues the spawn; the child is
+        // allocated in apply_pending but hasn't evaluated.
         mgr.tick(Instant::now());
         let child: u32 = mgr.eval_in(parent, "child");
         assert!(mgr.ids().contains(&child));
+        // Tick 2: the child takes its first turn and reads its arguments.
+        mgr.tick(Instant::now());
         let hello: String = mgr.eval_in(child, "args.hello");
         assert_eq!(hello, "world");
     }
@@ -652,12 +692,14 @@ mod tests {
         let root = userland_with(&[(
             "main.ts",
             "import { postMessage, ProcessNotFoundError } from 'ely:process'; \
+             setInterval(() => {}, 1000); \
              globalThis.correct = false; \
              try { postMessage(9999, { kind: 'x', data: undefined }); } \
              catch (err) { globalThis.correct = err instanceof ProcessNotFoundError; }",
         )]);
         let mut mgr = manager(root);
         let id = mgr.spawn_from_path("/main.ts", None).unwrap();
+        mgr.tick(Instant::now());
         assert!(mgr.eval_in::<bool>(id, "correct"));
     }
 
@@ -668,6 +710,7 @@ mod tests {
                 "main.ts",
                 "import { spawn, postMessage, ReservedMessageKindError } from 'ely:process'; \
              const child = spawn('/child.ts', undefined); \
+             setInterval(() => {}, 1000); \
              globalThis.correct = false; \
              try { postMessage(child, { kind: 'ely:exit', data: undefined }); } \
              catch (err) { globalThis.correct = err instanceof ReservedMessageKindError; }",
@@ -676,6 +719,49 @@ mod tests {
         ]);
         let mut mgr = manager(root);
         let id = mgr.spawn_from_path("/main.ts", None).unwrap();
+        mgr.tick(Instant::now());
         assert!(mgr.eval_in::<bool>(id, "correct"));
+    }
+
+    #[test]
+    fn the_process_table_is_capped() {
+        let root = userland_with(&[(
+            "swarm.ts",
+            "import { spawn } from 'ely:process'; \
+             for (let i = 0; i < 500; i++) spawn('/swarm.ts', undefined); \
+             setInterval(() => {}, 1000);",
+        )]);
+        let mut mgr = manager(root);
+        mgr.spawn_from_path("/swarm.ts", None).unwrap();
+        // Tick 1 starts the spawner, which queues 500 spawns; apply_pending
+        // fills the table to the cap and rejects the rest.
+        mgr.tick(Instant::now());
+        assert_eq!(mgr.ids().len(), MAX_PROCESSES);
+        // The rejected ids are not live, so messaging them would throw.
+        assert!(!mgr.channel.is_live(9_999));
+    }
+
+    #[test]
+    fn a_self_spawning_chain_grows_one_per_tick_and_plateaus_at_the_cap() {
+        let root = userland_with(&[(
+            "fork.ts",
+            "import { spawn } from 'ely:process'; \
+             spawn('/fork.ts', undefined); \
+             setInterval(() => {}, 1000);",
+        )]);
+        let mut mgr = manager(root);
+        mgr.spawn_from_path("/fork.ts", None).unwrap();
+
+        mgr.tick(Instant::now()); // spawner starts, queues one child
+        assert_eq!(mgr.ids().len(), 2);
+        mgr.tick(Instant::now()); // child starts, queues one grandchild
+        assert_eq!(mgr.ids().len(), 3);
+        mgr.tick(Instant::now());
+        assert_eq!(mgr.ids().len(), 4);
+
+        for _ in 0..MAX_PROCESSES + 10 {
+            mgr.tick(Instant::now());
+        }
+        assert_eq!(mgr.ids().len(), MAX_PROCESSES, "growth stops at the cap");
     }
 }

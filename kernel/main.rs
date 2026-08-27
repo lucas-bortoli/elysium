@@ -54,9 +54,11 @@ fn main() {
 
     let mut framebuffer: Option<Framebuffer> = None;
 
-    // Reflects whatever `scale` was set to by the time evaluation/post-init
-    // handlers finished, so a program that calls `setScale` during startup
-    // gets a window created at the right size from the start.
+    // The window is created before any process runs (init evaluates on
+    // frame 1), so it opens at DEFAULT_SCALE. A process that calls
+    // `setScale` during startup resizes the window live on that first
+    // frame via `Framebuffer::apply_scale` rather than changing the
+    // initial size.
     ElysiumWindow::new(
         "Elysium",
         framebuffer::FRAMEBUFFER_WIDTH * scale.get(),

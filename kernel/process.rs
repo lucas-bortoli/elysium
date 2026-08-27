@@ -84,13 +84,6 @@ impl ProcessChannel {
         channel
     }
 
-    /// A standalone channel for tests / direct `ElysiumRuntime` use, whose
-    /// spawn and send requests simply pile up unread.
-    #[allow(dead_code)]
-    pub fn detached() -> Self {
-        Self::new()
-    }
-
     /// Hands out the next id and records it as live immediately, so the
     /// caller of `spawn` can use it as a message target before the process
     /// itself has been installed.
