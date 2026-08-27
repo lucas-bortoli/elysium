@@ -626,27 +626,50 @@ impl Color {
     }
 
     /// The palette entry whose sRGB color is closest to `(r, g, b)` by
-    /// squared Euclidean distance — a linear scan over all 288 entries,
-    /// fine since this only runs once per pixel at image-load time
-    /// (`kernel/image.rs`'s palette quantization pass), never per frame. A
-    /// few palette shades are exact duplicates of each other (e.g.
+    /// squared Euclidean distance — a linear scan over all 288 entries.
+    /// Runs once per pixel at image-load time (`kernel/image.rs`'s palette
+    /// quantization pass) and behind the `nearestColor` binding, never per
+    /// frame. A few palette shades are exact duplicates of each other (e.g.
     /// `Zinc50`/`Neutral50`/`Mauve50` are all `0xfafafa`); on a tie, the
     /// lowest-id entry wins.
     pub fn nearest(r: u8, g: u8, b: u8) -> Color {
-        (0..COUNT as u16)
-            .map(|id| Color::from_id(id).expect("id in 0..COUNT is always valid"))
-            .min_by_key(|color| {
-                let hex = color.hex();
-                let dr = ((hex >> 16) & 0xff) as i32 - r as i32;
-                let dg = ((hex >> 8) & 0xff) as i32 - g as i32;
-                let db = (hex & 0xff) as i32 - b as i32;
-                dr * dr + dg * dg + db * db
-            })
-            .expect("palette is non-empty")
+        let (r, g, b) = (r as i32, g as i32, b as i32);
+        // A plain indexed loop rather than `min_by_key` — the iterator
+        // adapters don't inline in a debug build, and this runs per pixel.
+        let mut best = PALETTE_RGB[0];
+        let mut best_dist = i32::MAX;
+        for &(pr, pg, pb, color) in PALETTE_RGB.iter() {
+            let (dr, dg, db) = (pr as i32 - r, pg as i32 - g, pb as i32 - b);
+            let dist = dr * dr + dg * dg + db * db;
+            if dist < best_dist {
+                best_dist = dist;
+                best = (pr, pg, pb, color);
+            }
+        }
+        best.3
     }
 }
 
 const COUNT: usize = 288;
+
+/// Every palette entry's straight sRGB `(r, g, b)` alongside its `Color`,
+/// in id order, computed once on first use. `Color::nearest` scans this
+/// flat array rather than re-running `Color::hex`'s 288-arm match for
+/// every entry on every call — which profiling showed dominating runtime
+/// when several processes each quantize an image at load time.
+static PALETTE_RGB: std::sync::LazyLock<[(u8, u8, u8, Color); COUNT]> =
+    std::sync::LazyLock::new(|| {
+        std::array::from_fn(|i| {
+            let color = Color::from_id(i as u16).expect("id in 0..COUNT is always valid");
+            let hex = color.hex();
+            (
+                ((hex >> 16) & 0xff) as u8,
+                ((hex >> 8) & 0xff) as u8,
+                (hex & 0xff) as u8,
+                color,
+            )
+        })
+    });
 
 #[cfg(test)]
 mod tests {
@@ -683,5 +706,34 @@ mod tests {
         assert!(format!("{:?}", Color::nearest(255, 0, 0)).starts_with("Red"));
         assert!(format!("{:?}", Color::nearest(0, 0, 255)).starts_with("Blue"));
         assert!(format!("{:?}", Color::nearest(0, 255, 0)).starts_with("Green"));
+    }
+
+    /// The precomputed-palette scan must agree with a naive scan that
+    /// rebuilds each entry from its id — including lowest-id-wins on ties.
+    #[test]
+    fn nearest_matches_a_naive_reference_scan() {
+        fn reference(r: u8, g: u8, b: u8) -> Color {
+            (0..COUNT as u16)
+                .map(|id| Color::from_id(id).unwrap())
+                .min_by_key(|color| {
+                    let hex = color.hex();
+                    let dr = ((hex >> 16) & 0xff) as i32 - r as i32;
+                    let dg = ((hex >> 8) & 0xff) as i32 - g as i32;
+                    let db = (hex & 0xff) as i32 - b as i32;
+                    dr * dr + dg * dg + db * db
+                })
+                .unwrap()
+        }
+        for r in (0..=255).step_by(17) {
+            for g in (0..=255).step_by(17) {
+                for b in (0..=255).step_by(17) {
+                    assert_eq!(
+                        Color::nearest(r, g, b),
+                        reference(r, g, b),
+                        "at ({r},{g},{b})"
+                    );
+                }
+            }
+        }
     }
 }
