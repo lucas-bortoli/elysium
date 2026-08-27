@@ -45,6 +45,8 @@ pub enum DrawCommand {
     },
     DrawImage {
         pixmap: Rc<tiny_skia::Pixmap>,
+        /// Fully opaque — blit with a plain copy, no `source-over` blend.
+        opaque: bool,
         x: f32,
         y: f32,
     },
@@ -104,10 +106,13 @@ pub fn bootstrap_framebuffer_bindings(
         Function::new(
             ctx.clone(),
             move |ctx: Ctx<'_>, id: u32, x: f32, y: f32| -> Result<()> {
-                let pixmap = crate::image::resolve_image(&ctx, &images, id)?;
-                draw_commands
-                    .borrow_mut()
-                    .push(DrawCommand::DrawImage { pixmap, x, y });
+                let image = crate::image::resolve_image(&ctx, &images, id)?;
+                draw_commands.borrow_mut().push(DrawCommand::DrawImage {
+                    pixmap: image.pixmap,
+                    opaque: image.opaque,
+                    x,
+                    y,
+                });
                 Ok(())
             },
         )?,
@@ -241,11 +246,12 @@ impl Framebuffer {
     /// drawing accumulate rather than get erased first. The last
     /// `ClearScreen` in `commands` wins, applied before any
     /// `FillRectangle`/`DrawImage`, regardless of where in the command list
-    /// it falls. `DrawImage` composites with `tiny_skia`'s default
-    /// source-over blending, which — since the destination is always fully
-    /// opaque by the time the per-command loop runs — keeps `present`'s
-    /// "every frame is fully opaque" assumption true without `present`
-    /// itself needing to know images exist.
+    /// it falls. A `DrawImage` known to be fully opaque is copied straight
+    /// in (`BlendMode::Source`); one with any transparency composites with
+    /// `tiny_skia`'s default source-over blending. Either way the
+    /// destination stays fully opaque, keeping `present`'s "every frame is
+    /// fully opaque" assumption true without `present` needing to know
+    /// images exist.
     pub fn render(&mut self, commands: &[DrawCommand]) {
         let requested_scale = self.scale.get();
         if requested_scale != self.applied_scale {
@@ -265,7 +271,13 @@ impl Framebuffer {
             anti_alias: false,
             ..Default::default()
         };
-        let image_paint = tiny_skia::PixmapPaint::default();
+        let blend_paint = tiny_skia::PixmapPaint::default();
+        // An opaque image has nothing to composite, so copy its pixels
+        // straight in rather than running `source-over` per pixel.
+        let copy_paint = tiny_skia::PixmapPaint {
+            blend_mode: tiny_skia::BlendMode::Source,
+            ..tiny_skia::PixmapPaint::default()
+        };
 
         for command in commands {
             match command {
@@ -278,12 +290,17 @@ impl Framebuffer {
                     self.pixmap
                         .fill_rect(rect, &paint, tiny_skia::Transform::identity(), None);
                 }
-                DrawCommand::DrawImage { pixmap, x, y } => {
+                DrawCommand::DrawImage {
+                    pixmap,
+                    opaque,
+                    x,
+                    y,
+                } => {
                     self.pixmap.draw_pixmap(
                         x.round() as i32,
                         y.round() as i32,
                         (**pixmap).as_ref(),
-                        &image_paint,
+                        if *opaque { &copy_paint } else { &blend_paint },
                         tiny_skia::Transform::identity(),
                         None,
                     );
