@@ -28,6 +28,16 @@ ends up looking like it was always drawn from the same palette every other
 program on the system uses, rather than introducing its own arbitrary
 colors.
 
+By default each pixel is snapped on its own, which leaves visible bands
+wherever the original had a smooth gradient the palette can't follow. A
+program that would rather trade those bands for a finer texture can ask
+for dithering by passing `{ dither: true }` as a second argument to
+`loadImage`. With dithering on, the error made rounding each pixel to the
+palette is carried into its neighbors, so a region that falls between two
+available shades becomes a stipple of both that averages out to the color
+the palette couldn't name directly. It costs a little more work at load
+time and makes flat areas grainier, so it stays opt-in per image.
+
 `drawImage(image, x, y)` places `image`'s top-left corner at `(x, y)`, in
 the same logical coordinate space `fillRectangle` and the pointer both use,
 at the image's natural pixel size — there's no scaling or rotation. Like

@@ -5,7 +5,7 @@
 
 import { RelativePathError } from "ely:filesystem";
 
-declare function __image_load(path: string): number;
+declare function __image_load(path: string, options: { dither: boolean }): number;
 declare function __image_width(id: number): number;
 declare function __image_height(id: number): number;
 declare function __image_unload(id: number): void;
@@ -28,21 +28,32 @@ export class ImageLoadError extends Error {
   }
 }
 
+/** Options for {@link loadImage}. */
+export interface LoadImageOptions {
+  /** Diffuse each pixel's quantization error into its neighbors
+   * (Floyd–Steinberg) instead of snapping every pixel independently. Turns
+   * the banding a flat snap leaves across a gradient into a fine stipple
+   * that averages out to the original color, at the cost of a grainier
+   * look in flat areas. Defaults to `false`. */
+  dither?: boolean;
+}
+
 /** Loads the PNG at `path`, an absolute path resolved against the userland
  * root — never the process's working directory, and never anywhere outside
  * that root. `path` must start with `/`; a module builds one relative to
  * its own location with `import.meta.directoryName`/`fileName`. Every pixel's
- * color is snapped to its nearest shade in the kernel's fixed palette;
- * alpha is left untouched. Throws `RelativePathError` if `path` doesn't
- * start with `/`, or `ImageLoadError` if it doesn't exist, escapes the
- * userland root, or isn't a decodable PNG. */
-export function loadImage(path: string): Image {
+ * color is snapped to its nearest shade in the kernel's fixed palette
+ * (optionally with dithering, see {@link LoadImageOptions.dither}); alpha is
+ * left untouched. Throws `RelativePathError` if `path` doesn't start with
+ * `/`, or `ImageLoadError` if it doesn't exist, escapes the userland root,
+ * or isn't a decodable PNG. */
+export function loadImage(path: string, options?: LoadImageOptions): Image {
   if (!path.startsWith("/")) {
     throw new RelativePathError(`${path} is not an absolute path`);
   }
 
   try {
-    const id = __image_load(path);
+    const id = __image_load(path, { dither: options?.dither ?? false });
     return { id, width: __image_width(id), height: __image_height(id) };
   } catch (err) {
     throw new ImageLoadError(err instanceof Error ? err.message : String(err));

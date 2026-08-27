@@ -1059,10 +1059,20 @@ declare module "ely:image" {
     constructor(message: string);
   }
 
+  /** Options for `loadImage`. */
+  export interface LoadImageOptions {
+    /** Diffuse each pixel's quantization error into its neighbors
+     * (Floyd–Steinberg) instead of snapping every pixel independently.
+     * Trades the banding a flat snap leaves across a gradient for a finer
+     * stipple, at the cost of a grainier look in flat areas. Defaults to
+     * `false`. */
+    dither?: boolean;
+  }
+
   /** Loads the PNG at `path`, an absolute path resolved against the
    * userland root. Throws `RelativePathError` (from `ely:filesystem`) if
    * `path` doesn't start with `/`. */
-  export function loadImage(path: string): Image;
+  export function loadImage(path: string, options?: LoadImageOptions): Image;
 
   /** Frees a loaded image early. An image not explicitly unloaded stays
    * loaded for the lifetime of the program, not until nothing references

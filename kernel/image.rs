@@ -15,7 +15,7 @@ use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use rquickjs::{Ctx, Function, Result};
+use rquickjs::{Ctx, Function, Object, Result};
 
 use crate::framebuffer::Color;
 
@@ -132,26 +132,109 @@ fn resolve_userland_path(
     Ok(canonical_candidate)
 }
 
+/// Splits `hex` into its straight `(r, g, b)` bytes.
+fn hex_rgb(hex: u32) -> (u8, u8, u8) {
+    (
+        ((hex >> 16) & 0xff) as u8,
+        ((hex >> 8) & 0xff) as u8,
+        (hex & 0xff) as u8,
+    )
+}
+
 /// Snaps every pixel's straight (un-premultiplied) RGB to its nearest
 /// palette entry via `Color::nearest`, then re-premultiplies by that
 /// pixel's original alpha — alpha itself is never touched, so transparency
-/// survives quantization untouched. Runs once, at load time, never per
-/// frame. Also reports whether the image is fully opaque, so the
+/// survives quantization untouched. When `dither` is set, the per-pixel
+/// quantization error is diffused to neighboring pixels instead of being
+/// discarded (see [`quantize_with_dithering`]). Runs once, at load time,
+/// never per frame. Also reports whether the image is fully opaque, so the
 /// Framebuffer can blit it with a plain copy.
-fn quantize_to_palette(mut pixmap: tiny_skia::Pixmap) -> (tiny_skia::Pixmap, bool) {
+fn quantize_to_palette(mut pixmap: tiny_skia::Pixmap, dither: bool) -> (tiny_skia::Pixmap, bool) {
+    if dither {
+        return quantize_with_dithering(pixmap);
+    }
+
     let mut opaque = true;
     for pixel in pixmap.pixels_mut() {
         let straight = pixel.demultiply();
         opaque &= straight.alpha() == 255;
         let matched = Color::nearest(straight.red(), straight.green(), straight.blue());
-        let hex = matched.hex();
-        let matched_straight = tiny_skia::ColorU8::from_rgba(
-            ((hex >> 16) & 0xff) as u8,
-            ((hex >> 8) & 0xff) as u8,
-            (hex & 0xff) as u8,
-            straight.alpha(),
-        );
+        let (r, g, b) = hex_rgb(matched.hex());
+        let matched_straight = tiny_skia::ColorU8::from_rgba(r, g, b, straight.alpha());
         *pixel = matched_straight.premultiply();
+    }
+    (pixmap, opaque)
+}
+
+/// Floyd–Steinberg error diffusion. Each pixel is snapped to its nearest
+/// palette entry just as in the flat path, but the difference between the
+/// pixel's (error-adjusted) color and the entry it snapped to is spread to
+/// the not-yet-visited neighbors — 7/16 to the right, then 3/16, 5/16, 1/16
+/// across the row below — walking the image left-to-right, top-to-bottom.
+/// That turns the banding a flat snap leaves across a gradient into a fine
+/// stipple that averages out to the original color.
+///
+/// The error is accumulated in `f32` per channel and diffused against the
+/// unclamped target, so nothing is lost when a channel saturates at 0 or
+/// 255. Alpha is never touched and never carries error; a pixel's own alpha
+/// is re-applied after its RGB is chosen.
+fn quantize_with_dithering(mut pixmap: tiny_skia::Pixmap) -> (tiny_skia::Pixmap, bool) {
+    let width = pixmap.width() as usize;
+    let height = pixmap.height() as usize;
+    // Full-image error buffer rather than a two-row ring: this runs once at
+    // load time, and a flat `Vec` keeps the diffusion arithmetic obvious.
+    let mut error = vec![[0.0f32; 3]; width * height];
+    let mut opaque = true;
+    let pixels = pixmap.pixels_mut();
+
+    for y in 0..height {
+        for x in 0..width {
+            let idx = y * width + x;
+            let straight = pixels[idx].demultiply();
+            opaque &= straight.alpha() == 255;
+
+            let carried = error[idx];
+            let target = [
+                straight.red() as f32 + carried[0],
+                straight.green() as f32 + carried[1],
+                straight.blue() as f32 + carried[2],
+            ];
+            let (mr, mg, mb) = hex_rgb(
+                Color::nearest(
+                    target[0].clamp(0.0, 255.0) as u8,
+                    target[1].clamp(0.0, 255.0) as u8,
+                    target[2].clamp(0.0, 255.0) as u8,
+                )
+                .hex(),
+            );
+
+            let residual = [
+                target[0] - mr as f32,
+                target[1] - mg as f32,
+                target[2] - mb as f32,
+            ];
+            let mut diffuse = |nx: usize, ny: usize, factor: f32| {
+                let slot = &mut error[ny * width + nx];
+                slot[0] += residual[0] * factor;
+                slot[1] += residual[1] * factor;
+                slot[2] += residual[2] * factor;
+            };
+            if x + 1 < width {
+                diffuse(x + 1, y, 7.0 / 16.0);
+            }
+            if y + 1 < height {
+                if x > 0 {
+                    diffuse(x - 1, y + 1, 3.0 / 16.0);
+                }
+                diffuse(x, y + 1, 5.0 / 16.0);
+                if x + 1 < width {
+                    diffuse(x + 1, y + 1, 1.0 / 16.0);
+                }
+            }
+
+            let out = tiny_skia::ColorU8::from_rgba(mr, mg, mb, straight.alpha());
+            pixels[idx] = out.premultiply();
+        }
     }
     (pixmap, opaque)
 }
@@ -159,6 +242,7 @@ fn quantize_to_palette(mut pixmap: tiny_skia::Pixmap) -> (tiny_skia::Pixmap, boo
 #[cfg(test)]
 mod tests {
     use super::quantize_to_palette;
+    use std::collections::HashSet;
 
     fn solid(w: u32, h: u32, rgba: [u8; 4]) -> tiny_skia::Pixmap {
         let mut pixmap = tiny_skia::Pixmap::new(w, h).unwrap();
@@ -167,9 +251,22 @@ mod tests {
         pixmap
     }
 
+    /// The straight RGB of every pixel, as a set — how many distinct colors
+    /// a quantized image ended up using.
+    fn distinct_colors(pixmap: &tiny_skia::Pixmap) -> HashSet<(u8, u8, u8)> {
+        pixmap
+            .pixels()
+            .iter()
+            .map(|p| {
+                let s = p.demultiply();
+                (s.red(), s.green(), s.blue())
+            })
+            .collect()
+    }
+
     #[test]
     fn quantize_reports_a_fully_opaque_image_as_opaque() {
-        let (_, opaque) = quantize_to_palette(solid(4, 4, [10, 20, 30, 255]));
+        let (_, opaque) = quantize_to_palette(solid(4, 4, [10, 20, 30, 255]), false);
         assert!(opaque);
     }
 
@@ -178,8 +275,42 @@ mod tests {
         let mut pixmap = solid(4, 4, [10, 20, 30, 255]);
         // Punch one pixel to partial alpha.
         pixmap.pixels_mut()[5] = tiny_skia::ColorU8::from_rgba(10, 20, 30, 128).premultiply();
-        let (_, opaque) = quantize_to_palette(pixmap);
+        let (_, opaque) = quantize_to_palette(pixmap, false);
         assert!(!opaque);
+    }
+
+    #[test]
+    fn dithering_still_reports_opacity() {
+        let (_, opaque) = quantize_to_palette(solid(4, 4, [10, 20, 30, 255]), true);
+        assert!(opaque);
+
+        let mut pixmap = solid(4, 4, [10, 20, 30, 255]);
+        pixmap.pixels_mut()[5] = tiny_skia::ColorU8::from_rgba(10, 20, 30, 128).premultiply();
+        let (_, opaque) = quantize_to_palette(pixmap, true);
+        assert!(!opaque);
+    }
+
+    #[test]
+    fn dithering_a_solid_palette_color_leaves_it_flat() {
+        // Pure black is its own palette entry, so there is no error to
+        // diffuse and every pixel must land on exactly one color.
+        let (out, _) = quantize_to_palette(solid(8, 8, [0, 0, 0, 255]), true);
+        assert_eq!(distinct_colors(&out).len(), 1);
+    }
+
+    #[test]
+    fn dithering_a_gradient_mixes_more_palette_colors_than_a_flat_snap() {
+        let make_gradient = || {
+            let mut pixmap = tiny_skia::Pixmap::new(64, 8).unwrap();
+            for (i, pixel) in pixmap.pixels_mut().iter_mut().enumerate() {
+                let v = ((i % 64) * 255 / 63) as u8;
+                *pixel = tiny_skia::ColorU8::from_rgba(v, v, v, 255).premultiply();
+            }
+            pixmap
+        };
+        let (flat, _) = quantize_to_palette(make_gradient(), false);
+        let (dithered, _) = quantize_to_palette(make_gradient(), true);
+        assert!(distinct_colors(&dithered).len() > distinct_colors(&flat).len());
     }
 }
 
@@ -205,7 +336,8 @@ pub fn bootstrap_image_bindings(
             "__image_load",
             Function::new(
                 ctx.clone(),
-                move |ctx: Ctx<'_>, path: String| -> Result<u32> {
+                move |ctx: Ctx<'_>, path: String, options: Object<'_>| -> Result<u32> {
+                    let dither = options.get::<_, Option<bool>>("dither")?.unwrap_or(false);
                     let resolved = resolve_userland_path(&userland_root, &path)
                         .map_err(|err| rquickjs::Exception::throw_message(&ctx, &err))?;
                     let bytes = std::fs::read(&resolved).map_err(|err| {
@@ -214,7 +346,7 @@ pub fn bootstrap_image_bindings(
                     let pixmap = tiny_skia::Pixmap::decode_png(&bytes).map_err(|err| {
                         rquickjs::Exception::throw_message(&ctx, &format!("{path}: {err}"))
                     })?;
-                    let (pixmap, opaque) = quantize_to_palette(pixmap);
+                    let (pixmap, opaque) = quantize_to_palette(pixmap, dither);
                     Ok(images.insert(pixmap, opaque))
                 },
             )?,
