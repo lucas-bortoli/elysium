@@ -1,108 +1,196 @@
-# Multitasking: keeping one program from hanging Elysium
+# Multitasking: many programs, one kernel
 
-> The VM is destroyed, but Elysium soldiers on.
+> A faulted process is destroyed, but Elysium soldiers on.
 
-Elysium runs one program per VM, and that isolation isn't a one-shot thing:
-the kernel calls back into a running program repeatedly over its lifetime,
-the way `love.update`/`love.draw` callbacks, message handlers, or timers
-would. Any single one of those calls has to be boundable, because if a
-program's script code enters an infinite loop or a runaway computation, that
-can't be allowed to hang the call — and by extension the kernel, and by
-extension the rest of Elysium.
+Elysium runs many programs at once, each in its own isolated JavaScript
+process. The kernel keeps a table of them and, once per frame, gives every
+process a turn: it delivers any messages waiting for that process, runs
+whatever timers of that process are due, and then decides whether the
+process still has anything left to do. A process that has run out of work is
+reaped; a process that faults is dropped without disturbing the others; and
+when the table is finally empty, the kernel exits. The first process, the
+init program, is started by the kernel at boot and is otherwise no different
+from any process a program spawns later.
+
+## Bounding a single call into a process
+
+Isolation between processes isn't a one-shot thing: the kernel calls back
+into a running program repeatedly over its lifetime — a due timer, an update
+ticker ([1]), a draw handler ([2]), a delivered message. Any one of those
+calls has to be boundable, because if a program's script code enters an
+infinite loop or a runaway computation, that can't be allowed to hang the
+call — and by extension the process's turn, the frame, and the rest of
+Elysium.
 
 The JS engine supports installing a hook that it checks periodically while
 running script code, roughly every 10,000 loop-iteration or function-call
 steps. If that hook signals "stop," the engine immediately raises an
 exception that unwinds the entire evaluation and cannot be caught by the
-program's own `try`/`catch`. Elysium installs one such hook per VM, for its
-whole lifetime, but it doesn't fire on a fixed schedule — it checks a
-deadline that gets armed immediately before a guarded call begins and
+program's own `try`/`catch`. Elysium installs one such hook per process, for
+the process's whole lifetime, but it doesn't fire on a fixed schedule — it
+checks a deadline armed immediately before a guarded call begins and
 disarmed immediately after, so between calls no deadline is armed and the
 hook does nothing.
 
-This is cooperative, not preemptive: it can only interrupt a VM that's
+This is cooperative, not preemptive: it can only interrupt a process that's
 actually still stepping through script code. Ordinary infinite loops
 (`while (true) {}`, runaway recursion, and the like) are stepping
 constantly, so they're reliably caught. What this doesn't protect against is
-a VM stuck inside a single long-running call out to the host itself — a slow
-or blocking built-in — since control never returns to the script-stepping
-loop for the hook to check in. That's a different problem, a slow or
-blocking host binding, and isn't solved here. For the actual threat model —
-runaway script code — cooperative interruption at this granularity is
-enough.
+a process stuck inside a single long-running call out to the host itself — a
+slow or blocking built-in — since control never returns to the
+script-stepping loop for the hook to check in. That's a different problem
+and isn't solved here. For the actual threat model — runaway script code —
+cooperative interruption at this granularity is enough.
 
-Every call into a VM goes through one guarded entry point that arms the
-deadline, runs the call, disarms the deadline, and classifies the outcome.
-This is deliberate: a kernel author calling into a program should never have
-to remember to wrap that call in a timeout themselves, so budget enforcement
-lives inside the VM's own calling convention rather than in each call site.
-One-shot module evaluation — running a program's top-level code — goes
-through it budgeted generously, since program initialization can
-legitimately take longer than a single frame. Every per-frame call into a
-program goes through the same entry point too, just with a much tighter
-budget: whichever timer callback is due to run that frame, whether a
-program's own `setTimeout`, an update ticker ([1]), or a draw handler ([2])
-— no separate timeout logic was needed for any of them, just a new budget
-and a different call inside.
-
-The VM is destroyed, but Elysium soldiers on: a guarded call ends one of two
-ways. It can time out, meaning the interrupt hook fired, in which case the
-VM is considered poisoned from that point on and must be torn down, never
-reused for another call — the caller, today Elysium's startup and
-eventually the kernel, is expected to continue running everything else, so
-one program hanging doesn't take the rest of the system down with it. Or it
-can throw normally, an ordinary uncaught program error, which gets no
-special handling beyond normal error reporting and doesn't poison the VM.
-Tearing the VM down on timeout isn't automatic, since the guarded call
-itself has no way to know whether it's being driven by a one-shot startup
-run today or a long-lived per-frame kernel loop tomorrow — that decision is
-left to whoever owns the VM.
+Every call into a process goes through one guarded entry point that arms the
+deadline, runs the call, disarms it, and classifies the outcome. This is
+deliberate: nobody calling into a program should have to remember to wrap
+that call in a timeout, so budget enforcement lives inside the process's own
+calling convention rather than at each call site. One-shot module evaluation
+— running a program's top-level code — goes through it budgeted generously,
+since initialization can legitimately take longer than a frame. Every
+per-frame call goes through the same entry point with a much tighter budget.
 
 Because module evaluation is one bounded, synchronous guarded call, a
 program's top-level code can't `await` anything whose resolution depends on
-a later guarded call — a timer, an update ticker, a draw handler — since
-none of those run until evaluation has already returned. Elysium rejects
-such top-level awaits at compile time rather than let them hang. A program
-that needs to do timer-dependent work as part of starting up registers a
-post-init handler ([1]) instead, which runs once the program has finished
-evaluating and those calls are live.
+a later guarded call — a timer, a ticker, a draw handler, a message — since
+none of those run until evaluation has returned. Elysium rejects such
+top-level awaits at compile time rather than let them hang. A program that
+needs timer-dependent work as part of starting up registers a post-init
+handler ([1]) instead, which runs once evaluation has finished and those
+calls are live.
 
-This is a sharper version of an objection raised early in top-level await's
-own design, back when it could still block sibling modules in a dependency
-graph from loading at all: "you've just put your entire app... at the mercy
-of that network request" ([3]). JS engines eventually settled on a design
-where an await deep in one module doesn't stall unrelated modules loading
-alongside it — but that mitigation depends on there being a concurrent
-module graph and an event loop to keep servicing it while one module waits.
-Elysium's one-shot evaluation has neither: there's nothing else running
-during it for a stalled await to yield to, so the original objection applies
-here at full strength rather than the softened one the eventual spec shipped
-with.
-
-Recognizing a timeout took its own bookkeeping, because the engine doesn't
+Recognizing a timeout takes its own bookkeeping, because the engine doesn't
 distinguish an interrupt-triggered exception from an ordinary thrown one in
-any way that's reliably inspectable afterward — both surface as the same
-kind of exception, and the one the engine raises on interrupt could in
-principle look just like something a program threw itself, so matching its
-name or message after the fact would be unreliable. Instead the interrupt
-hook itself records, at the exact moment it decides to interrupt, that it
-was the one that did it — a direct record of cause rather than a guess
-reconstructed afterward from timing or exception content.
+any reliably inspectable way. Instead the interrupt hook itself records, at
+the moment it decides to interrupt, that it was the one that did it — a
+direct record of cause rather than a guess reconstructed from timing or
+exception text.
 
-This deliberately doesn't do a few things. It doesn't run each VM on its own
-thread — everything here runs on a single thread, with no concurrency
-primitives beyond the interrupt hook. It doesn't forcefully kill a VM either:
-the interrupt hook is the only signal available, and there's no way to reach
-into a running VM from outside and abort it instantly. If a VM ever gets
-stuck somewhere the hook can't reach (the blocking-host-call case above),
-the only recourse would be running that VM on its own thread and abandoning
-it — not implemented, and not needed for the runaway-script-code threat
-model this addresses. It also doesn't enforce a memory limit; a separate,
-already-available mechanism covers that and isn't part of this document.
-Running each VM on its own thread remains an option to reach for later if a
-VM ever needs to be forcibly reclaimed rather than just cooperatively
-interrupted — nothing here forecloses it, it just isn't required for the
-failure mode this design targets.
+## A process's turn
+
+Each frame, the manager walks its table in order and gives every process a
+turn made of three steps.
+
+First it drains the process's mailbox. Messages are queued, not delivered
+synchronously at send time, so a `postMessage` from one process lands in the
+recipient's mailbox and is handed to its message handler here, on the
+recipient's own turn, under the same guarded call a timer callback gets. A
+process that hasn't yet registered a message handler (via
+`addMessageHandler`) is left with its mailbox untouched: messages that
+arrive before the first handler is added wait there and are delivered once
+one is, rather than being dropped.
+
+Then it runs the timers that process has due — its `setTimeout`s and
+`setInterval`s, and the `requestAnimationFrame` callbacks that update
+tickers and draw handlers ride on.
+
+Finally it decides whether to reap the process. A process is reaped when it
+has explicitly ended itself by calling `exit()`, or when it has genuinely
+run out of work: no pending timers, no queued microtasks, no unsettled
+Promise jobs, an empty mailbox, and no registered message handler. That last
+condition matters — a process with a handler registered has said it wants to
+keep receiving, so a purely message-driven server process is kept alive
+rather than reaped the instant its mailbox empties. It ends by calling
+`exit()`, by `removeMessageHandler`-ing its way back to zero handlers (and
+having nothing else pending), or by being asked to leave (see below). A
+consequence of the "no unsettled jobs" wording: a Promise that never
+resolves leaves nothing pending, so a process blocked only on one is
+considered idle and reaped.
+
+## Faults drop one process, not the kernel
+
+A guarded call ends one of three ways. It can time out, meaning the
+interrupt hook fired. It can throw an ordinary uncaught error. Or it can
+fail an allocation against the process's 16 MB heap cap, which surfaces as
+an ordinary exception. In every case the manager drops that one process —
+logging a line saying which process and why — and moves on to the next. The
+kernel and every other process keep running. This applies to the init
+process too: a fault in init drops init, which may leave the table empty, no
+differently from a fault in anything else.
+
+A timed-out process must never be called into again, but since the manager
+removes it from the table in the same pass, nothing ever gets the chance.
+
+## Ending a process
+
+There is no `exit()` that one process can call on another — forcibly
+stopping a process at an arbitrary point is the same hazard as
+`pthread_cancel`, leaving half-updated state behind. Instead there are three
+ways a process ends:
+
+It ends **itself** by calling `exit()`. The manager reaps it at the end of
+its current turn, after the call stack has unwound — cooperative, never
+mid-instruction. `finally` blocks that haven't run yet don't run.
+
+It is **asked to leave** via `requestExit(target)`. The kernel delivers an
+`{ kind: "ely:exit" }` message to the target and starts a grace period. A
+cooperative program handles that message — winds down, calls `exit()` — and
+is reaped normally. One that ignores it is force-reaped once the grace
+period elapses. Closing the window does this to every process at once, then
+hard-stops after the grace period regardless.
+
+It is **terminated** via `terminate(target)`. The kernel drops it at the end
+of the frame, when no process is executing — no grace period, no `finally`
+blocks. This is safe for the same reason `exit()` is: the process is removed
+between turns, never while it holds the stack. It is the escalation when a
+`requestExit` goes unanswered and you don't want to wait out the grace
+period.
+
+`requestExit` and `terminate` reach any live process by id; `postMessage`
+does too. A process id is just a number — there is no handle object.
+
+## Messages
+
+A message is an envelope: `{ kind, from, to, data }`. `kind` is a label the
+receiver switches on; `from` and `to` are process ids; `data` is the payload
+(an `ely:container` `Option` — anything JSON round-trippable, or absent).
+Kernel-originated messages use a `kind` under the `ely:` namespace (today
+only `ely:exit`), and userland `postMessage` refuses to send an
+`ely:`-prefixed `kind`, so a program can trust that an `ely:`-kinded message
+genuinely came from the kernel. Sending to an id that isn't a live process
+throws rather than silently vanishing.
+
+## Spawning
+
+`spawn(path, args)` starts a process from a userland-virtual entry path and
+returns its id. The `args` value is delivered synchronously — the child
+reads it with `currentArguments()` during its own top-level code, not as a
+first message. The child's module evaluation and post-init handlers run
+right away, but it doesn't take a turn in the frame loop until the next
+frame. A process spawned by another process mid-frame — and any message sent
+to it in that same frame — is resolved before the frame ends, so a spawn
+immediately followed by a `postMessage` to the new child works.
+
+## The shared screen and input
+
+There is one framebuffer and one input device, shared by every process.
+Draw commands from all processes go into a single buffer in the order their
+draw handlers ran that frame, painter's algorithm, with the last
+`clearScreen` winning; there is no compositor and no per-process layer.
+Every process sees the same pointer and keyboard state — input is
+broadcast, with no notion of focus. `setScale` writes the one shared
+window's scale, last writer wins.
+
+## Frame pacing
+
+Elysium still targets 30 fps. A frame runs every process's turn back to
+back; the event loop then sleeps for whatever is left of the frame's time
+budget after that work. If the processes together overrun the budget, the
+frame simply runs long — there is no accumulated debt and no catch-up burst
+of short frames afterward.
+
+## What this deliberately doesn't do
+
+It doesn't run each process on its own thread — everything here is one
+thread, with no concurrency primitives beyond the interrupt hook. It doesn't
+forcibly abort a process mid-execution: `exit()`, the `requestExit` grace
+period, and the between-turns `terminate` are all cooperative or deferred,
+never a preemptive kill of running script code. A process wedged somewhere
+the interrupt hook can't reach (the blocking-host-call case above) still has
+no recourse; running processes on their own threads remains the option to
+reach for if one ever needs to be forcibly reclaimed, and nothing here
+forecloses it.
 
 # References
 
