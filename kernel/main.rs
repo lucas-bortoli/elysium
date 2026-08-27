@@ -74,6 +74,8 @@ fn main() {
             let draw_commands = Rc::clone(&draw_commands);
             let scale = Rc::clone(&scale);
             let input = Rc::clone(&input);
+            let mut fps_frames: u32 = 0;
+            let mut fps_since = Instant::now();
             move |window, _dt| {
                 let framebuffer = framebuffer
                     .get_or_insert_with(|| Framebuffer::new(window.clone(), Rc::clone(&scale)));
@@ -83,6 +85,15 @@ fn main() {
                 framebuffer.render(&draw_commands.borrow());
                 draw_commands.borrow_mut().clear();
                 input.end_frame();
+
+                // Report the average frame rate over the last second.
+                fps_frames += 1;
+                let elapsed = fps_since.elapsed();
+                if elapsed >= std::time::Duration::from_secs(1) {
+                    eprintln!("[fps] {:.1}", fps_frames as f64 / elapsed.as_secs_f64());
+                    fps_frames = 0;
+                    fps_since = Instant::now();
+                }
             }
         },
         {
