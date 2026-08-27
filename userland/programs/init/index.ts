@@ -15,7 +15,9 @@ import {
 } from "ely:input";
 import { addPostInitHandler, addUpdateTicker, delay } from "ely:lifecycle";
 import { loadImage } from "ely:image";
+import * as process from "ely:process";
 import * as fs from "ely:filesystem";
+import { none } from "ely:container";
 
 let x = 0;
 const speed = 1000; // pixels per second
@@ -66,5 +68,9 @@ addPostInitHandler(async () => {
   recurse("/", 1);
   print("--- userland directory information ---");
 
+  // Show off multitasking: a sibling process that runs, talks, and exits
+  // on its own while init keeps drawing.
+  const child = process.spawn("/programs/spawn-demo/index.ts", undefined);
+  process.postMessage(child, { kind: "hello", data: none() });
   await delay(100);
 });
