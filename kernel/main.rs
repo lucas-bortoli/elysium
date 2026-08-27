@@ -3,16 +3,19 @@ mod filesystem;
 mod framebuffer;
 mod image;
 mod input;
+mod process;
+mod process_manager;
 mod runtime;
 mod timers;
 mod window;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Instant;
 
 use framebuffer::Framebuffer;
 use input::Input;
-use runtime::{ElysiumRuntime, GuardedError};
+use process_manager::{GRACE, ProcessManager};
 use window::ElysiumWindow;
 
 pub mod transform;
@@ -24,35 +27,36 @@ fn main() {
         .expect("binary path has no parent directory")
         .to_path_buf();
     let userland_root = exe_dir.join("userland");
-    let path = userland_root.join("programs/init/index.ts");
-    let program = std::fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-    let path = path.to_str().expect("binary path is not valid UTF-8");
 
     let draw_commands = Rc::new(RefCell::new(Vec::new()));
     let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
     let input = Rc::new(Input::new(Rc::clone(&scale)));
-    let runtime = ElysiumRuntime::new(
+
+    let mut manager = ProcessManager::new(
         Rc::clone(&draw_commands),
         Rc::clone(&input),
         Rc::clone(&scale),
         userland_root,
-    )
-    .expect("failed to initialize Elysium runtime");
+    );
 
-    if let Err(err) = runtime.eval_module(path, &program) {
-        report_frame_error("module evaluation", err);
+    // The init process is spawned like any other — a fault in it drops it
+    // and empties the table, no different from a fault in a child.
+    if let Err(err) = manager.spawn_from_path("/programs/init/index.ts", None) {
+        eprintln!("failed to start the init process: {err:?}");
     }
-    if let Err(err) = runtime.run_post_init_handlers() {
-        report_frame_error("addPostInitHandler callback", err);
+    if manager.is_empty() {
+        eprintln!("no processes running; kernel exiting");
+        return;
     }
+
+    let manager = Rc::new(RefCell::new(manager));
+    let close_deadline: Rc<Cell<Option<Instant>>> = Rc::new(Cell::new(None));
 
     let mut framebuffer: Option<Framebuffer> = None;
 
     // Reflects whatever `scale` was set to by the time evaluation/post-init
     // handlers finished, so a program that calls `setScale` during startup
-    // gets a window created at the right size from the start, rather than
-    // opening at DEFAULT_SCALE and immediately resizing.
+    // gets a window created at the right size from the start.
     ElysiumWindow::new(
         "Elysium",
         framebuffer::FRAMEBUFFER_WIDTH * scale.get(),
@@ -63,34 +67,42 @@ fn main() {
             let input = Rc::clone(&input);
             move |event| input.handle_window_event(event)
         },
-        |window, _dt| {
-            let framebuffer = framebuffer
-                .get_or_insert_with(|| Framebuffer::new(window.clone(), Rc::clone(&scale)));
+        {
+            let manager = Rc::clone(&manager);
+            let draw_commands = Rc::clone(&draw_commands);
+            let scale = Rc::clone(&scale);
+            let input = Rc::clone(&input);
+            move |window, _dt| {
+                let framebuffer = framebuffer
+                    .get_or_insert_with(|| Framebuffer::new(window.clone(), Rc::clone(&scale)));
 
-            if let Err(err) = runtime.run_due_timers() {
-                report_frame_error("timer", err);
+                manager.borrow_mut().tick(Instant::now());
+
+                framebuffer.render(&draw_commands.borrow());
+                draw_commands.borrow_mut().clear();
+                input.end_frame();
             }
-
-            framebuffer.render(&draw_commands.borrow());
-            draw_commands.borrow_mut().clear();
-            input.end_frame();
+        },
+        {
+            let manager = Rc::clone(&manager);
+            let close_deadline = Rc::clone(&close_deadline);
+            move || {
+                if close_deadline.get().is_none() {
+                    let now = Instant::now();
+                    manager.borrow_mut().broadcast_exit(now);
+                    close_deadline.set(Some(now + GRACE));
+                }
+            }
+        },
+        {
+            let manager = Rc::clone(&manager);
+            let close_deadline = Rc::clone(&close_deadline);
+            move || {
+                manager.borrow().is_empty()
+                    || close_deadline
+                        .get()
+                        .is_some_and(|deadline| Instant::now() >= deadline)
+            }
         },
     );
-}
-
-/// A call into the VM timing out or throwing doesn't have a second program
-/// to fall back to yet (Elysium runs one program per kernel today), so —
-/// per the "VM is destroyed, but Elysium soldiers on" contract — this
-/// reports the failure and exits, rather than silently continuing to call
-/// into a VM a timeout may have already poisoned.
-fn report_frame_error(callback: &str, err: GuardedError) {
-    match err {
-        GuardedError::Timeout => {
-            eprintln!("program timed out inside {callback}()");
-        }
-        GuardedError::Exception(err) => {
-            eprintln!("uncaught exception in {callback}(): {err}");
-        }
-    }
-    std::process::exit(1);
 }
