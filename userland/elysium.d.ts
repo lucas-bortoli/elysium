@@ -1,7 +1,7 @@
 // Ambient declarations for the Elysium host API: globals (print, timers,
 // the JSX factory), the ambient `JSX` namespace, and the `ely:framebuffer`/
-// `ely:lifecycle`/`ely:math`/`ely:input`/`ely:image`/`ely:filesystem`
-// namespaces.
+// `ely:lifecycle`/`ely:math`/`ely:input`/`ely:image`/`ely:filesystem`/
+// `ely:container`/`ely:process` namespaces.
 
 /** A module's own location, expressed as an absolute path rooted at the
  * userland tree.
@@ -411,7 +411,8 @@ declare module "ely:framebuffer" {
   /** Sets how many physical pixels the window draws each logical pixel as
    * — an integer of at least 1. Takes effect on the next frame; unlike
    * `clearScreen`/`fillRectangle`, can be called from anywhere, not just
-   * from inside a draw handler. */
+   * from inside a draw handler. There is one window shared by every
+   * process, so this is a global, last-writer-wins setting. */
   export function setScale(scale: number): void;
 
   /** The palette entry closest to the RGB triplet `(r, g, b)` (each `0-255`). */
@@ -1067,6 +1068,92 @@ declare module "ely:image" {
    * loaded for the lifetime of the program, not until nothing references
    * it anymore — dropping every reference to an `Image` does not free it. */
   export function unloadImage(image: Image | ImageId): void;
+}
+
+declare module "ely:process" {
+  import type { Option } from "ely:container";
+
+  /** A process's identity in the kernel's table. Just a number — there is
+   * no wrapper object. `0` is the kernel. */
+  export type ProcessHandle = number;
+
+  /** A message as it arrives at `onMessage`: the sender's `kind` and
+   * payload, plus who it came `from` and who it was addressed `to`. A
+   * `kind` starting with `ely:` was sent by the kernel itself (today only
+   * `"ely:exit"`). */
+  export interface Envelope {
+    kind: string;
+    from: ProcessHandle;
+    to: ProcessHandle;
+    data: Option<unknown>;
+  }
+
+  /** What a caller passes to `postMessage`: a `kind` label and an optional
+   * payload (anything `JSON.stringify` accepts; `Option`'s absent value
+   * arrives as `null`). */
+  export interface Message {
+    kind: string;
+    data: Option<unknown>;
+  }
+
+  /** Thrown by `postMessage` when given a `kind` starting with `ely:`. */
+  export class ReservedMessageKindError extends Error {
+    constructor(kind: string);
+  }
+
+  /** Thrown by `postMessage`/`requestExit`/`terminate` when the target id
+   * is not a live process. */
+  export class ProcessNotFoundError extends Error {
+    constructor(id: number);
+  }
+
+  /** This process's own id. */
+  export function currentProcessId(): ProcessHandle;
+
+  /** The argument passed to the `spawn` that started this process, or
+   * absent for the init process. */
+  export function currentArguments(): Option<unknown>;
+
+  /** Starts a new process from the userland-virtual entry path `path`,
+   * passing `args` (JSON-serialized) as its `currentArguments()`. Returns
+   * the new id; it joins the schedule on the next frame. */
+  export function spawn(path: string, args: Option<unknown>): ProcessHandle;
+
+  /** Queues `message` for `target`, delivered at `target`'s next turn.
+   * @throws {ReservedMessageKindError} if `message.kind` starts with `ely:`.
+   * @throws {ProcessNotFoundError} if `target` is not a live process. */
+  export function postMessage(target: ProcessHandle, message: Message): void;
+
+  /** An id returned by `addMessageHandler`, for `removeMessageHandler`. */
+  export type MessageHandlerId = number;
+
+  /** Registers `handler` for messages sent to this process, returning an
+   * id for `removeMessageHandler`. Handlers all fire, in registration
+   * order. Messages that arrive before the first handler is added are
+   * queued, not lost. While at least one handler is registered the
+   * process is kept alive; remove them all (or call `exit()`) to let it
+   * be reaped. */
+  export function addMessageHandler(
+    handler: (envelope: Envelope) => void,
+  ): MessageHandlerId;
+
+  /** Unregisters a handler added by `addMessageHandler`. */
+  export function removeMessageHandler(id: MessageHandlerId): void;
+
+  /** Asks `target` to exit: delivers `{ kind: "ely:exit" }` and starts a
+   * grace period after which the kernel force-reaps it. Cooperative
+   * programs respond by clearing their handlers (or calling `exit()`).
+   * @throws {ProcessNotFoundError} if `target` is not a live process. */
+  export function requestExit(target: ProcessHandle): void;
+
+  /** Drops `target` at the end of the current frame, no grace period. Its
+   * `finally` blocks do not run.
+   * @throws {ProcessNotFoundError} if `target` is not a live process. */
+  export function terminate(target: ProcessHandle): void;
+
+  /** Ends this process: the kernel reaps it at the end of this turn,
+   * whatever work is still pending. */
+  export function exit(): void;
 }
 
 /** What a JSX expression's `type`/`h`'s first argument can be: a tag name,

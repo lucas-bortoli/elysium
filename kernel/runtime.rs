@@ -15,6 +15,7 @@ use crate::filesystem;
 use crate::framebuffer::{self, DrawCommand};
 use crate::image::{self, ImageTable};
 use crate::input::{self, Input};
+use crate::process::{self, ProcessChannel, ProcessId};
 use crate::timers::{TimerArgs, TimerQueue, bootstrap_timers};
 use crate::transform;
 
@@ -73,6 +74,11 @@ pub struct ElysiumRuntime {
     /// Callbacks registered by `ely:lifecycle`'s `addPostInitHandler`, run
     /// once by [`Self::run_post_init_handlers`].
     post_init_handlers: Rc<RefCell<Vec<Persistent<Function<'static>>>>>,
+    /// The single dispatch callback `ely:process`'s `addMessageHandler` installs,
+    /// invoked by [`Self::deliver_message`] for each queued envelope. Holds
+    /// a `Persistent`, so it belongs with the fields above that must drop
+    /// before `context`/`js_runtime`.
+    message_handler: Rc<RefCell<Option<Persistent<Function<'static>>>>>,
     /// Images loaded by `ely:image`'s `loadImage`, keyed by id. Holds no
     /// `Persistent` JS values (unlike the three fields above), so it's not
     /// subject to the same GC-sweep-ordering hazard — grouped with them in
@@ -86,6 +92,8 @@ pub struct ElysiumRuntime {
     /// own `import.meta.directoryName`/`fileName` a virtual identity, the same
     /// way [`CompilingLoader`] does for every module it loads afterward).
     userland_root: PathBuf,
+    /// Set by `ely:process`'s `exit()`; read by the manager's reap check.
+    exit_requested: Rc<Cell<bool>>,
     context: Context,
     js_runtime: JsRuntime,
 }
@@ -110,6 +118,9 @@ impl ElysiumRuntime {
         input: Rc<Input>,
         scale: Rc<Cell<u32>>,
         userland_root: PathBuf,
+        self_id: ProcessId,
+        channel: ProcessChannel,
+        arguments_json: Option<String>,
     ) -> Result<Self> {
         let userland_root = std::fs::canonicalize(&userland_root).unwrap_or_else(|err| {
             panic!(
@@ -119,6 +130,10 @@ impl ElysiumRuntime {
         });
 
         let js_runtime = JsRuntime::new()?;
+        // Every process is capped at 16 MB of QuickJS heap; a program that
+        // blows past it fails allocation, surfaces as an ordinary uncaught
+        // exception, and the manager drops just that process.
+        js_runtime.set_memory_limit(16 * 1024 * 1024);
 
         let guard = Rc::new(GuardState::default());
         {
@@ -146,6 +161,8 @@ impl ElysiumRuntime {
         let timers = Rc::new(TimerQueue::new());
         let microtasks = Rc::new(RefCell::new(Vec::new()));
         let post_init_handlers = Rc::new(RefCell::new(Vec::new()));
+        let message_handler = Rc::new(RefCell::new(None));
+        let exit_requested = Rc::new(Cell::new(false));
         let images = Rc::new(ImageTable::new());
 
         context.with(|ctx| -> Result<()> {
@@ -163,6 +180,14 @@ impl ElysiumRuntime {
             bootstrap_post_init_handlers(&ctx, Rc::clone(&post_init_handlers))?;
             image::bootstrap_image_bindings(&ctx, Rc::clone(&images), userland_root.clone())?;
             filesystem::bootstrap_filesystem_bindings(&ctx, userland_root.clone())?;
+            process::bootstrap_process_bindings(
+                &ctx,
+                self_id,
+                channel,
+                Rc::clone(&message_handler),
+                Rc::clone(&exit_requested),
+                arguments_json,
+            )?;
             Ok(())
         })?;
 
@@ -173,7 +198,9 @@ impl ElysiumRuntime {
             timers,
             microtasks,
             post_init_handlers,
+            message_handler,
             userland_root,
+            exit_requested,
             images,
         })
     }
@@ -263,6 +290,49 @@ impl ElysiumRuntime {
         Ok(())
     }
 
+    /// Whether `ely:process`'s `exit()` has been called from inside this
+    /// process. The manager reaps a process the turn after it sets this.
+    pub fn exit_requested(&self) -> bool {
+        self.exit_requested.get()
+    }
+
+    /// Whether `ely:process`'s `addMessageHandler` has registered a dispatch
+    /// callback yet. The manager holds a process's mailbox undrained until
+    /// it has, so messages sent before a handler is added aren't lost.
+    pub fn has_message_handler(&self) -> bool {
+        self.message_handler.borrow().is_some()
+    }
+
+    /// Whether this process has nothing left to do: no pending timers, no
+    /// queued microtasks, and no unsettled Promise jobs. A process in this
+    /// state (with an empty mailbox) is reaped. A Promise that never
+    /// resolves leaves no pending job, so a process blocked only on one is
+    /// considered idle — see `Documentation/Multitasking.md`.
+    pub fn has_no_pending_work(&self) -> bool {
+        self.timers.is_empty()
+            && self.microtasks.borrow().is_empty()
+            && !self.js_runtime.is_job_pending()
+    }
+
+    /// Delivers one message envelope (already serialized by
+    /// [`crate::process::Envelope::to_json`]) to this process's registered
+    /// message dispatch callback, draining microtasks after — the same
+    /// discipline [`Self::run_due_timers`] follows. A no-op if no handler
+    /// is registered; callers gate on [`Self::has_message_handler`] so that
+    /// case leaves the message queued instead.
+    pub fn deliver_message(&self, envelope_json: &str) -> std::result::Result<(), GuardedError> {
+        let result = self.run_guarded(FRAME_BUDGET, |ctx| {
+            let Some(handler) = self.message_handler.borrow().clone() else {
+                return Ok(());
+            };
+            let handler = handler.restore(ctx)?;
+            let envelope = ctx.json_parse(envelope_json.as_bytes().to_vec())?;
+            handler.call::<_, ()>((envelope,))
+        });
+        self.drain_microtasks();
+        result
+    }
+
     /// Runs every callback queued by `queueMicrotask` (including any that
     /// queue further callbacks of their own), then drains rquickjs's own
     /// Promise job queue. Called after every timer callback so a program's
@@ -330,6 +400,18 @@ impl ElysiumRuntime {
     }
 }
 
+#[cfg(test)]
+impl ElysiumRuntime {
+    /// Evaluates `source` as a plain (non-module) script in this VM and
+    /// converts the result. Test-only inspection hook.
+    pub(crate) fn eval_in<T>(&self, source: &str) -> Result<T>
+    where
+        T: for<'js> rquickjs::FromJs<'js>,
+    {
+        self.context.with(|ctx| ctx.eval::<T, _>(source))
+    }
+}
+
 impl Drop for ElysiumRuntime {
     /// Releases every `Persistent` value this VM's timer/microtask
     /// machinery is still holding, deterministically, before the natural
@@ -346,6 +428,7 @@ impl Drop for ElysiumRuntime {
         self.context.with(|_ctx| {
             self.timers.clear_all();
             self.microtasks.borrow_mut().clear();
+            *self.message_handler.borrow_mut() = None;
             self.images.clear_all();
         });
     }
@@ -461,6 +544,9 @@ mod tests {
             Rc::clone(&input),
             scale,
             test_userland_root(),
+            0,
+            ProcessChannel::detached(),
+            None,
         )
         .expect("failed to construct runtime");
         runtime
@@ -509,6 +595,9 @@ mod tests {
             Rc::clone(&input),
             scale,
             root,
+            0,
+            ProcessChannel::detached(),
+            None,
         )
         .expect("failed to construct runtime");
         runtime
@@ -1369,6 +1458,9 @@ mod tests {
             Rc::clone(&input),
             scale,
             test_userland_root(),
+            0,
+            ProcessChannel::detached(),
+            None,
         )
         .expect("failed to construct runtime");
         let result =
@@ -1386,6 +1478,57 @@ mod tests {
         );
         assert_eq!(global::<String>(&runtime, "directoryName"), "/");
         assert_eq!(global::<String>(&runtime, "fileName"), "/meta_module.ts");
+    }
+
+    #[test]
+    fn process_surface_reports_defaults_for_a_detached_runtime() {
+        let runtime = eval(
+            "import { currentProcessId, currentArguments } from 'ely:process'; \
+             globalThis.id = currentProcessId(); \
+             globalThis.hasArgs = currentArguments() !== undefined;",
+        );
+        assert_eq!(global::<f64>(&runtime, "id"), 0.0);
+        assert!(!global::<bool>(&runtime, "hasArgs"));
+        assert!(!runtime.has_message_handler());
+        assert!(!runtime.exit_requested());
+    }
+
+    #[test]
+    fn on_message_registration_is_visible_to_the_host() {
+        let runtime =
+            eval("import { addMessageHandler } from 'ely:process'; addMessageHandler(() => {});");
+        assert!(runtime.has_message_handler());
+    }
+
+    #[test]
+    fn exit_binding_sets_the_flag_the_manager_reads() {
+        let runtime = eval("import { exit } from 'ely:process'; exit();");
+        assert!(runtime.exit_requested());
+    }
+
+    #[test]
+    fn has_no_pending_work_reflects_a_live_timer() {
+        let runtime = eval("globalThis.id = setInterval(() => {}, 1000);");
+        assert!(!runtime.has_no_pending_work());
+        let id: f64 = global(&runtime, "id");
+        runtime
+            .context
+            .with(|ctx| ctx.eval::<(), _>(format!("clearInterval({id});")))
+            .unwrap();
+        assert!(runtime.has_no_pending_work());
+    }
+
+    #[test]
+    fn deliver_message_invokes_the_registered_handler() {
+        let runtime = eval(
+            "import { addMessageHandler } from 'ely:process'; \
+             globalThis.seen = null; \
+             addMessageHandler((env) => { globalThis.seen = env.kind + ':' + env.data; });",
+        );
+        runtime
+            .deliver_message(r#"{"kind":"greet","from":2,"to":0,"data":"hi"}"#)
+            .unwrap();
+        assert_eq!(global::<String>(&runtime, "seen"), "greet:hi");
     }
 
     #[test]

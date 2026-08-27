@@ -165,6 +165,13 @@ impl TimerQueue {
         self.start.elapsed().as_secs_f64()
     }
 
+    /// Whether any timer is still pending. Part of the signal
+    /// [`crate::process_manager::ProcessManager`] uses to decide a process
+    /// has run out of work and can be reaped.
+    pub fn is_empty(&self) -> bool {
+        self.timers.borrow().is_empty()
+    }
+
     /// Drops every pending timer, releasing the `Persistent` callbacks (and
     /// any `Persistent` args) they hold. Used by `ElysiumRuntime`'s `Drop`
     /// impl to release these deterministically, through an explicit call
@@ -284,4 +291,29 @@ pub fn bootstrap_timers<'js>(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use rquickjs::{Context, Runtime};
+
+    use super::*;
+
+    #[test]
+    fn is_empty_tracks_pending_timers() {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+        let queue = TimerQueue::new();
+
+        assert!(queue.is_empty(), "fresh queue");
+
+        let id = context.with(|ctx| {
+            let noop = Function::new(ctx.clone(), || {}).unwrap();
+            queue.schedule(&ctx, noop, 0.0, Vec::new(), None).unwrap()
+        });
+        assert!(!queue.is_empty(), "one pending timer");
+
+        queue.clear(id);
+        assert!(queue.is_empty(), "cleared");
+    }
 }

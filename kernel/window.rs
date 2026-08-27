@@ -36,18 +36,23 @@ impl ElysiumWindow {
         }
     }
 
-    /// Runs the OS event loop until the window is closed. `on_window_event`
-    /// is called for every raw `WindowEvent` before this loop's own
-    /// handling of it — the generic seam an Input device attaches to,
-    /// without this module ever needing to know it exists. `on_frame` is
-    /// called once per tick with the window and the time elapsed since the
-    /// previous tick; nothing about its signature is Framebuffer-specific —
-    /// it's the generic per-tick seam `main.rs` wires `Framebuffer` and
-    /// `ElysiumRuntime` into.
+    /// Runs the OS event loop until [`should_exit`](Self::run) reports the
+    /// kernel is done. `on_window_event` is called for every raw
+    /// `WindowEvent` before this loop's own handling of it — the generic
+    /// seam an Input device attaches to, without this module ever needing
+    /// to know it exists. `on_frame` is called once per tick with the
+    /// window and the time elapsed since the previous tick. `on_close` is
+    /// called when the OS requests the window be closed — instead of
+    /// exiting immediately, the loop keeps ticking until `should_exit`
+    /// returns true, giving `on_close` a chance to wind processes down
+    /// first. `should_exit` is polled after every frame and close request,
+    /// and before going idle.
     pub fn run(
         self,
         on_window_event: impl FnMut(&WindowEvent),
         on_frame: impl FnMut(&Arc<Window>, Duration),
+        on_close: impl FnMut(),
+        should_exit: impl FnMut() -> bool,
     ) {
         let event_loop = EventLoop::new().expect("failed to create the OS event loop");
         event_loop.set_control_flow(ControlFlow::Wait);
@@ -60,6 +65,8 @@ impl ElysiumWindow {
             last_frame: None,
             on_window_event,
             on_frame,
+            on_close,
+            should_exit,
         };
         event_loop
             .run_app(&mut app)
@@ -67,7 +74,7 @@ impl ElysiumWindow {
     }
 }
 
-struct App<E, F> {
+struct App<E, F, C, X> {
     title: String,
     width: u32,
     height: u32,
@@ -75,9 +82,13 @@ struct App<E, F> {
     last_frame: Option<Instant>,
     on_window_event: E,
     on_frame: F,
+    on_close: C,
+    should_exit: X,
 }
 
-impl<E: FnMut(&WindowEvent), F: FnMut(&Arc<Window>, Duration)> ApplicationHandler for App<E, F> {
+impl<E: FnMut(&WindowEvent), F: FnMut(&Arc<Window>, Duration), C: FnMut(), X: FnMut() -> bool>
+    ApplicationHandler for App<E, F, C, X>
+{
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         // Window creation can only happen once the platform has signaled
         // it's ready (see `ApplicationHandler::resumed`'s docs) — it can't
@@ -102,7 +113,12 @@ impl<E: FnMut(&WindowEvent), F: FnMut(&Arc<Window>, Duration)> ApplicationHandle
         (self.on_window_event)(&event);
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                (self.on_close)();
+                if (self.should_exit)() {
+                    event_loop.exit();
+                }
+            }
             WindowEvent::RedrawRequested => {
                 let Some(window) = self.window.clone() else {
                     return;
@@ -112,6 +128,9 @@ impl<E: FnMut(&WindowEvent), F: FnMut(&Arc<Window>, Duration)> ApplicationHandle
                 self.last_frame = Some(now);
 
                 (self.on_frame)(&window, dt);
+                if (self.should_exit)() {
+                    event_loop.exit();
+                }
                 // The next redraw is scheduled from `about_to_wait`, paced to
                 // `TARGET_FPS`, rather than requested again immediately here.
             }
@@ -126,6 +145,10 @@ impl<E: FnMut(&WindowEvent), F: FnMut(&Arc<Window>, Duration)> ApplicationHandle
     /// the redraw that `window_event` uses to update `last_frame` and
     /// schedule the frame after that.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if (self.should_exit)() {
+            event_loop.exit();
+            return;
+        }
         let Some(window) = &self.window else {
             return;
         };
