@@ -70,9 +70,17 @@ exception text.
 ## A process's turn
 
 Each frame, the manager walks its table in order and gives every process a
-turn made of three steps.
+turn.
 
-First it drains the process's mailbox. Messages are queued, not delivered
+On a process's very first turn, before anything else, it starts: the
+manager resolves its entry path, evaluates its module, and runs its
+post-init handlers. Nothing about a process runs when it is spawned — a
+`spawn` only allocates the VM and puts an un-started entry in the table, so
+the frame that does the spawning pays nothing for the new program's code.
+Starting failures — a missing entry file, a top-level throw, a post-init
+throw — drop the process through the same path as any other fault (below).
+
+Then it drains the process's mailbox. Messages are queued, not delivered
 synchronously at send time, so a `postMessage` from one process lands in the
 recipient's mailbox and is handed to its message handler here, on the
 recipient's own turn, under the same guarded call a timer callback gets. A
@@ -81,7 +89,7 @@ process that hasn't yet registered a message handler (via
 arrive before the first handler is added wait there and are delivered once
 one is, rather than being dropped.
 
-Then it runs the timers that process has due — its `setTimeout`s and
+Next it runs the timers that process has due — its `setTimeout`s and
 `setInterval`s, and the `requestAnimationFrame` callbacks that update
 tickers and draw handlers ride on.
 
@@ -105,9 +113,12 @@ interrupt hook fired. It can throw an ordinary uncaught error. Or it can
 fail an allocation against the process's 16 MB heap cap, which surfaces as
 an ordinary exception. In every case the manager drops that one process —
 logging a line saying which process and why — and moves on to the next. The
-kernel and every other process keep running. This applies to the init
-process too: a fault in init drops init, which may leave the table empty, no
-differently from a fault in anything else.
+kernel and every other process keep running. A failure while a process is
+starting up — its entry file missing, its module throwing at top level, a
+post-init handler throwing — is the same: the process is already in the
+table, so it goes through this exact drop path rather than a separate one.
+This applies to the init process too: a fault in init drops init, which may
+leave the table empty, no differently from a fault in anything else.
 
 A timed-out process must never be called into again, but since the manager
 removes it from the table in the same pass, nothing ever gets the chance.
@@ -153,14 +164,20 @@ throws rather than silently vanishing.
 
 ## Spawning
 
-`spawn(path, args)` starts a process from a userland-virtual entry path and
-returns its id. The `args` value is delivered synchronously — the child
-reads it with `currentArguments()` during its own top-level code, not as a
-first message. The child's module evaluation and post-init handlers run
-right away, but it doesn't take a turn in the frame loop until the next
-frame. A process spawned by another process mid-frame — and any message sent
-to it in that same frame — is resolved before the frame ends, so a spawn
-immediately followed by a `postMessage` to the new child works.
+`spawn(path, args)` allocates a process from a userland-virtual entry path
+and returns its id. That is all it does synchronously — the id is usable
+immediately (you can `postMessage` it right away), but the child's entry
+path isn't resolved and its module isn't evaluated until its first turn on
+the next frame. The `args` value is not sent as a message; it's stashed for
+the child to read with `currentArguments()` during that first-turn
+evaluation. A message sent to a just-spawned child before it has run simply
+waits in its mailbox and is delivered on that first turn, right after the
+child registers its handler. Because `spawn` runs no program code, a
+runaway `spawn` chain can add at most one process per frame.
+
+The process table is capped at 128 live processes. A `spawn` past the cap
+is rejected and logged; the returned id is dead on arrival. The cap bounds
+both a fork chain and total worst-case memory (128 processes × 16 MB).
 
 ## The shared screen and input
 
