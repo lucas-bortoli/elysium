@@ -15,6 +15,7 @@ import {
 } from "ely:input";
 import { addPostInitHandler, addUpdateTicker, delay } from "ely:lifecycle";
 import { loadImage } from "ely:image";
+import * as fs from "ely:filesystem";
 
 let x = 0;
 const speed = 1000; // pixels per second
@@ -50,6 +51,20 @@ addDrawHandler(() => {
 });
 
 addPostInitHandler(async () => {
+  function recurse(path: string, depth: number = 0) {
+    for (const entry of fs.listDirectory(path)) {
+      const icon = entry.kind === "Directory" ? "📁" : "📄";
+      print("   ".repeat(depth) + icon + " " + fs.extractBaseName(entry.path));
+      if (entry.kind === "Directory") {
+        recurse(entry.path, depth + 1);
+      }
+    }
+  }
+
   print("Welcome to Elysium!");
+  print("--- userland directory information ---");
+  recurse("/", 1);
+  print("--- userland directory information ---");
+
   await delay(100);
 });
