@@ -231,10 +231,10 @@ impl ElysiumRuntime {
     /// Runs every callback registered by `ely:lifecycle`'s
     /// `addPostInitHandler` exactly once, in registration order, draining
     /// microtasks after each — the same discipline [`Self::run_due_timers`]
-    /// follows. Called once, right after [`Self::eval_module`] succeeds and
-    /// before the frame loop (and therefore timers) starts running, so a
-    /// handler can safely do timer-dependent work a top-level `await`
-    /// cannot.
+    /// follows. Called once, right after [`Self::eval_module`] succeeds, on
+    /// the process's first frame and before that process's own timers are
+    /// serviced, so a handler can safely do timer-dependent work a
+    /// top-level `await` cannot.
     pub fn run_post_init_handlers(&self) -> std::result::Result<(), GuardedError> {
         let handlers = self.post_init_handlers.borrow_mut().split_off(0);
         for handler in handlers {
@@ -545,7 +545,7 @@ mod tests {
             scale,
             test_userland_root(),
             0,
-            ProcessChannel::detached(),
+            ProcessChannel::new(),
             None,
         )
         .expect("failed to construct runtime");
@@ -596,7 +596,7 @@ mod tests {
             scale,
             root,
             0,
-            ProcessChannel::detached(),
+            ProcessChannel::new(),
             None,
         )
         .expect("failed to construct runtime");
@@ -1459,7 +1459,7 @@ mod tests {
             scale,
             test_userland_root(),
             0,
-            ProcessChannel::detached(),
+            ProcessChannel::new(),
             None,
         )
         .expect("failed to construct runtime");
