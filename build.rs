@@ -1,9 +1,17 @@
 use std::path::{Path, PathBuf};
 
+#[path = "build/fonts.rs"]
+mod fonts;
+
 fn main() {
     println!("cargo:rerun-if-changed=userland");
+    println!("cargo:rerun-if-changed=build/fonts.rs");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+
+    // Parse the configured BDF fonts and emit `$OUT_DIR/fonts.rs`, which
+    // `kernel/text.rs` includes.
+    fonts::generate(&out_dir);
     // OUT_DIR is target/<profile>/build/<pkg>-<hash>/out; the binary lands
     // three levels up, in target/<profile>.
     let profile_dir = out_dir
