@@ -66,9 +66,10 @@ export function getScrollDelta(): number {
 // Every physical key the keyboard device recognizes, identified by its
 // position on the keyboard rather than the character it produces — e.g.
 // `KeyW` is the key in the "W" position on a US layout, whatever an AZERTY
-// keyboard prints on it. Generated together with the matching `Key` enum in
-// `kernel/input/keys.rs` so the two never drift — the numeric id here is
-// exactly the wire format `ely:input`'s functions pass to the kernel.
+// keyboard prints on it. The block below is generated from `build/keys.rs`'s
+// `KEYS` table (the same source as `kernel/input/keys.rs`'s `Key` enum), so
+// an entry's number is exactly the id the kernel expects.
+// GENERATED:keys:start
 export const Key = {
   Backquote: 0,
   Backslash: 1,
@@ -265,6 +266,7 @@ export const Key = {
   F34: 192,
   F35: 193,
 } as const;
+// GENERATED:keys:end
 
 /** A key from the keyboard device, as one of `Key`'s named entries (e.g.
  * `Key.KeyW`). The underlying numeric id has no meaning of its own outside

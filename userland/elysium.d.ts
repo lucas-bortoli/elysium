@@ -68,6 +68,7 @@ declare module "ely:framebuffer" {
   /** The kernel's fixed, curated color palette. Every color a program can
    * draw with is one of these named entries — never a raw, unconstrained
    * RGBA value. */
+  // GENERATED:palette:start
   export const Color: {
     readonly Red50: 0;
     readonly Red100: 1;
@@ -358,6 +359,7 @@ declare module "ely:framebuffer" {
     readonly Black: 286;
     readonly White: 287;
   };
+  // GENERATED:palette:end
 
   /** A color from the kernel's fixed palette, as one of `Color`'s named
    * entries (e.g. `Color.Slate900`). */
@@ -611,6 +613,7 @@ declare module "ely:input" {
    * position on the keyboard rather than the character it produces — e.g.
    * `KeyW` is the key in the "W" position on a US layout, whatever an
    * AZERTY keyboard prints on it. */
+  // GENERATED:keys:start
   export const Key: {
     readonly Backquote: 0;
     readonly Backslash: 1;
@@ -807,6 +810,7 @@ declare module "ely:input" {
     readonly F34: 192;
     readonly F35: 193;
   };
+  // GENERATED:keys:end
 
   /** A key from the keyboard device, as one of `Key`'s named entries (e.g.
    * `Key.KeyW`). */

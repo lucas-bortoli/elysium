@@ -37,10 +37,12 @@ declare function __framebuffer_nearest_color(
 ): Color;
 declare function __framebuffer_set_scale(scale: number): void;
 
-// The kernel's fixed, curated color palette. Every color a program can
-// draw with is one of these named entries — never a raw, unconstrained
-// RGBA value — generated together with kernel/framebuffer/colors.rs's
-// `Color` enum so the ids the two sides agree on never drift.
+// The kernel's fixed, curated color palette. Every color a program can draw
+// with is one of these named entries — never a raw, unconstrained RGBA
+// value. The block below is generated from `build/palette.rs`'s `PALETTE`
+// table (the same source as `kernel/framebuffer/colors.rs`'s `Color` enum),
+// so an entry's number is exactly the id the kernel expects.
+// GENERATED:palette:start
 export const Color = {
   Red50: 0,
   Red100: 1,
@@ -331,6 +333,7 @@ export const Color = {
   Black: 286,
   White: 287,
 } as const;
+// GENERATED:palette:end
 
 // A color from the kernel's fixed palette, as one of `Color`'s named
 // entries (e.g. `Color.Slate900`). The underlying numeric id has no

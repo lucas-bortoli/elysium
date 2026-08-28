@@ -1,17 +1,33 @@
 use std::path::{Path, PathBuf};
 
+#[path = "build/splice.rs"]
+mod splice;
+
 #[path = "build/fonts.rs"]
 mod fonts;
+#[path = "build/keys.rs"]
+mod keys;
+#[path = "build/palette.rs"]
+mod palette;
 
 fn main() {
     println!("cargo:rerun-if-changed=userland");
     println!("cargo:rerun-if-changed=build/fonts.rs");
+    println!("cargo:rerun-if-changed=build/keys.rs");
+    println!("cargo:rerun-if-changed=build/palette.rs");
+    println!("cargo:rerun-if-changed=build/splice.rs");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
     // Parse the configured BDF fonts and emit `$OUT_DIR/fonts.rs`, which
     // `kernel/text.rs` includes.
     fonts::generate(&out_dir);
+    // From the `PALETTE`/`KEYS` tables: emit `$OUT_DIR/palette.rs` /
+    // `$OUT_DIR/keys.rs` (included by `kernel/framebuffer/colors.rs` and
+    // `kernel/input/keys.rs`) and refresh the generated `Color`/`Key`
+    // blocks in the `ely:framebuffer`/`ely:input` TS and `elysium.d.ts`.
+    palette::generate(&out_dir);
+    keys::generate(&out_dir);
     // OUT_DIR is target/<profile>/build/<pkg>-<hash>/out; the binary lands
     // three levels up, in target/<profile>.
     let profile_dir = out_dir
