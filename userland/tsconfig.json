@@ -12,6 +12,11 @@
     "module": "preserve",
     "moduleDetection": "force",
 
+    // Programs import their siblings by the real on-disk path, extension
+    // included (`../../lib/text-layout.ts`), since nothing is rewritten
+    // before the host resolves it.
+    "allowImportingTsExtensions": true,
+
     // JSX is rewritten into calls to the `h`/`Fragment` factory (see
     // elysium.d.ts for the ambient `JSX` namespace this pairs with, and for
     // `h`/`Fragment` themselves, available as globals so a program never
