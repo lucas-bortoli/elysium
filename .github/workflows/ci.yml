@@ -28,9 +28,25 @@ jobs:
       - run: npx --yes -p typescript@5.9.3 tsc -p userland --noEmit
       - run: npx --yes -p typescript@5.9.3 tsc -p kernel/runtime_modules --noEmit
 
+  generated:
+    name: generated tables in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install X11 dev headers (softbuffer's x11 feature)
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libx11-dev libx11-xcb-dev
+      # `touch` forces the build script's `rerun-if-changed` triggers so the
+      # palette/keycode tables are regenerated from `build/{palette,keys}.rs`
+      # even on a warm cache; the diff then fails if a committed copy is stale
+      # (or was hand-edited).
+      - run: touch build/palette.rs build/keys.rs build/splice.rs && cargo build
+      - run: git diff --exit-code -- kernel/runtime_modules/framebuffer.ts kernel/runtime_modules/input.ts userland/elysium.d.ts
+
   package:
     name: package (${{ matrix.os }})
-    needs: [test, typecheck]
+    needs: [test, typecheck, generated]
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     strategy:
       matrix:
