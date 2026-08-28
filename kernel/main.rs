@@ -6,6 +6,7 @@ mod input;
 mod process;
 mod process_manager;
 mod runtime;
+mod text;
 mod timers;
 mod window;
 

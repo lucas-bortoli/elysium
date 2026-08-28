@@ -363,8 +363,17 @@ declare module "ely:framebuffer" {
    * entries (e.g. `Color.Slate900`). */
   export type Color = (typeof Color)[keyof typeof Color];
 
-  /** Thrown by `clearScreen`/`fillRectangle`/`drawImage` when called from
-   * outside a currently running draw handler (see `addDrawHandler`). */
+  /** The kernel's set of built-in bitmap fonts. */
+  export const Font: {
+    readonly Cozette: 0;
+  };
+
+  /** One of `Font`'s named entries (e.g. `Font.Cozette`). */
+  export type Font = (typeof Font)[keyof typeof Font];
+
+  /** Thrown by `clearScreen`/`fillRectangle`/`drawText`/`drawImage` when
+   * called from outside a currently running draw handler (see
+   * `addDrawHandler`). */
   export class DrawOutsideHandlerError extends Error {
     constructor();
   }
@@ -407,6 +416,26 @@ declare module "ely:framebuffer" {
     x: number,
     y: number,
   ): void;
+
+  /** Draws `text` with its top-left corner at `(x, y)`, in `color`, using
+   * one of the kernel's built-in bitmap fonts. Only takes effect from
+   * inside a running draw handler. */
+  export function drawText(
+    x: number,
+    y: number,
+    text: string,
+    color: Color,
+    font?: Font,
+  ): void;
+
+  /** The pixel box `text` would occupy if drawn with `font` — its total
+   * advance width and the font's line height. A query, not a draw call:
+   * usable from anywhere to lay text out without assuming the font's
+   * size. */
+  export function measureText(
+    text: string,
+    font?: Font,
+  ): import("ely:math").Size2d;
 
   /** Sets how many physical pixels the window draws each logical pixel as
    * — an integer of at least 1. Takes effect on the next frame; unlike
@@ -894,7 +923,10 @@ declare module "ely:filesystem" {
   export type WriteFileError = NotFoundError | IsADirectoryError | UnknownError;
 
   /** Every case `writeTextFile` can actually throw natively. */
-  export type WriteTextFileError = NotFoundError | IsADirectoryError | UnknownError;
+  export type WriteTextFileError =
+    | NotFoundError
+    | IsADirectoryError
+    | UnknownError;
 
   /** Every case `remove` can actually throw natively. */
   export type DeleteError = NotFoundError | UnknownError;
@@ -903,7 +935,10 @@ declare module "ely:filesystem" {
   export type CreateDirectoryError = NotADirectoryError | UnknownError;
 
   /** Every case `listDirectory` can actually throw natively. */
-  export type ListDirectoryError = NotFoundError | NotADirectoryError | UnknownError;
+  export type ListDirectoryError =
+    | NotFoundError
+    | NotADirectoryError
+    | UnknownError;
 
   /** Every case `stat` can actually throw natively. */
   export type StatError = NotFoundError | UnknownError;

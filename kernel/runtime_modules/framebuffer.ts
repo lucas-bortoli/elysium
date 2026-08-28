@@ -19,6 +19,17 @@ declare function __framebuffer_draw_image(
   x: number,
   y: number,
 ): void;
+declare function __framebuffer_draw_text(
+  x: number,
+  y: number,
+  text: string,
+  font: number,
+  color: Color,
+): void;
+declare function __framebuffer_measure_text(
+  text: string,
+  font: number,
+): [number, number];
 declare function __framebuffer_nearest_color(
   r: number,
   g: number,
@@ -327,10 +338,21 @@ export const Color = {
 // `Color` enum.
 export type Color = (typeof Color)[keyof typeof Color];
 
+// The kernel's set of built-in bitmap fonts.
+// Generated from the font list in build/fonts.rs, so an entry's value is
+// exactly the font id the kernel expects; kept in sync by hand the same way
+// `Color` and `FRAMEBUFFER_WIDTH` are.
+export const Font = {
+  Cozette: 0,
+} as const;
+
+// One of `Font`'s named entries (e.g. `Font.Cozette`).
+export type Font = (typeof Font)[keyof typeof Font];
+
 export class DrawOutsideHandlerError extends Error {
   constructor() {
     super(
-      "clearScreen/fillRectangle/drawImage can only be called from inside a registered draw handler",
+      "clearScreen/fillRectangle/drawText/drawImage can only be called from inside a registered draw handler",
     );
     this.name = "DrawOutsideHandlerError";
   }
@@ -418,6 +440,28 @@ export function fillRectangle(
 export function drawImage(image: Image | ImageId, x: number, y: number): void {
   if (!insideDrawHandler) throw new DrawOutsideHandlerError();
   __framebuffer_draw_image(typeof image === "number" ? image : image.id, x, y);
+}
+
+/** Draws `text` with its top-left corner at `(x, y)`, in `color`, using one
+ * of the kernel's built-in bitmap fonts. Like the other draw calls, only
+ * takes effect from inside a running draw handler. */
+export function drawText(
+  x: number,
+  y: number,
+  text: string,
+  color: Color,
+  font: Font = Font.Cozette,
+): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_draw_text(x, y, text, font, color);
+}
+
+/** The pixel box `text` would occupy if drawn with `font` — its total
+ * advance width and the font's line height. A query, not a draw call: can
+ * be used from anywhere to lay text out without assuming the font's size. */
+export function measureText(text: string, font: Font = Font.Cozette): Size2d {
+  const [width, height] = __framebuffer_measure_text(text, font);
+  return { width, height };
 }
 
 /** The palette entry closest to the RGB triplet `(r, g, b)` (each `0-255`). */

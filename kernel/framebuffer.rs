@@ -25,6 +25,8 @@ use winit::window::Window;
 mod colors;
 pub use colors::Color;
 
+use crate::text;
+
 /// One drawing instruction accumulated during a program's `draw()` call.
 /// Colors are always a [`Color`] from the fixed palette, never raw,
 /// program-supplied RGBA channels. Not `Copy` — `DrawImage` carries an
@@ -50,14 +52,24 @@ pub enum DrawCommand {
         x: f32,
         y: f32,
     },
+    DrawText {
+        x: f32,
+        y: f32,
+        text: String,
+        /// A built-in font id, already checked valid at the binding
+        /// boundary the same way `color` is resolved there.
+        font: text::FontId,
+        color: Color,
+    },
 }
 
 /// Binds the *hidden* globals `ely:framebuffer`'s embedded module wraps
 /// (`__framebuffer_clear_screen`, `__framebuffer_fill_rectangle`,
+/// `__framebuffer_draw_text`, `__framebuffer_measure_text`,
 /// `__framebuffer_draw_image`, `__framebuffer_nearest_color`,
 /// `__framebuffer_set_scale`) — never called by a program directly, only
 /// through `ely:framebuffer`'s exported
-/// `clearScreen`/`fillRectangle`/`drawImage`/`nearestColor`/`setScale`.
+/// `clearScreen`/`fillRectangle`/`drawText`/`measureText`/`drawImage`/`nearestColor`/`setScale`.
 pub fn bootstrap_framebuffer_bindings(
     ctx: &Ctx<'_>,
     draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
@@ -100,6 +112,53 @@ pub fn bootstrap_framebuffer_bindings(
             )?,
         )?;
     }
+
+    {
+        let draw_commands = Rc::clone(&draw_commands);
+        global.set(
+            "__framebuffer_draw_text",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'_>,
+                      x: f32,
+                      y: f32,
+                      text: String,
+                      font: u16,
+                      color: u16|
+                      -> Result<()> {
+                    let color = resolve_color(&ctx, color)?;
+                    if crate::text::font_from_id(font).is_none() {
+                        return Err(rquickjs::Exception::throw_type(
+                            &ctx,
+                            &format!("{font} is not a valid font"),
+                        ));
+                    }
+                    draw_commands.borrow_mut().push(DrawCommand::DrawText {
+                        x,
+                        y,
+                        text,
+                        font,
+                        color,
+                    });
+                    Ok(())
+                },
+            )?,
+        )?;
+    }
+
+    global.set(
+        "__framebuffer_measure_text",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'_>, text: String, font: u16| -> Result<Vec<u32>> {
+                let font = crate::text::font_from_id(font).ok_or_else(|| {
+                    rquickjs::Exception::throw_type(&ctx, &format!("{font} is not a valid font"))
+                })?;
+                let (width, height) = crate::text::measure(font, &text);
+                Ok(vec![width, height])
+            },
+        )?,
+    )?;
 
     global.set(
         "__framebuffer_draw_image",
@@ -303,6 +362,43 @@ impl Framebuffer {
                         if *opaque { &copy_paint } else { &blend_paint },
                         tiny_skia::Transform::identity(),
                         None,
+                    );
+                }
+                DrawCommand::DrawText {
+                    x,
+                    y,
+                    text: string,
+                    font,
+                    color,
+                } => {
+                    let Some(font) = text::font_from_id(*font) else {
+                        continue; // font id validated at the binding, but stay total
+                    };
+                    // Every lit pixel is one fully opaque palette color
+                    // written straight into the pixmap — no per-glyph
+                    // `fill_rect`, and the destination stays opaque, so
+                    // `present`'s "every frame is opaque" assumption holds.
+                    let hex = color.hex();
+                    let solid = tiny_skia::ColorU8::from_rgba(
+                        ((hex >> 16) & 0xff) as u8,
+                        ((hex >> 8) & 0xff) as u8,
+                        (hex & 0xff) as u8,
+                        255,
+                    )
+                    .premultiply();
+                    let width = self.pixmap.width() as i32;
+                    let height = self.pixmap.height() as i32;
+                    let pixels = self.pixmap.pixels_mut();
+                    text::for_each_lit_pixel(
+                        font,
+                        string,
+                        x.round() as i32,
+                        y.round() as i32,
+                        |px, py| {
+                            if px >= 0 && py >= 0 && px < width && py < height {
+                                pixels[(py * width + px) as usize] = solid;
+                            }
+                        },
                     );
                 }
             }

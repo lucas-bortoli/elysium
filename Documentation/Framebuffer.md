@@ -19,7 +19,13 @@ registered through `ely:lifecycle` ([1])) throws a `DrawOutsideHandlerError`
 rather than silently doing nothing.
 
 ```ts
-import { Color, addDrawHandler, clearScreen, fillRectangle, getWidth } from "ely:framebuffer";
+import {
+  Color,
+  addDrawHandler,
+  clearScreen,
+  fillRectangle,
+  getWidth,
+} from "ely:framebuffer";
 import { addUpdateTicker } from "ely:lifecycle";
 
 let x = 0;
@@ -45,6 +51,32 @@ from.
 Draw calls are batched. What a program draws during a draw handler doesn't
 appear on screen call by call. That means later calls draw over earlier
 ones where they overlap.
+
+## Text
+
+Elysium draws text with bitmap fonts that belong to the system, not to the
+program. Just as every color is a named palette entry, every font is one of
+a small fixed set the kernel carries — `Font`, exported from
+`ely:framebuffer`, with `Font.Cozette` as the default a program gets
+when it names none. A program can't load or embed a font of its own; more
+built-in fonts may be added over time, and a program selects one the same
+way it selects a color.
+
+`drawText(x, y, text, color)` draws a string with its top-left corner at
+`(x, y)` in a palette color, and like the other drawing calls it only takes
+effect from inside a running draw handler. Text is placed by its box, not
+its baseline: the kernel positions each glyph from the chosen font's own
+metrics, so a program never has to know a font's height or where its
+baseline sits. A character the font has no glyph for still advances the
+cursor by the font's default width, leaving a blank cell rather than
+collapsing the layout.
+
+Because the fonts are fixed but their sizes aren't something a program
+should assume, `measureText(text)` reports the pixel box a string will
+occupy — its total width and the font's line height — as a `Size2d`. Unlike
+the drawing calls, this is a plain query and can be called from anywhere, so
+a program can lay out a line, right-align it, or size a background rectangle
+before it ever enters a draw handler.
 
 # References
 
