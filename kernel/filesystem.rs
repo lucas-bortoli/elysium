@@ -100,68 +100,52 @@ fn throw_read_to_string_io(ctx: &Ctx<'_>, path: &str, err: std::io::Error) -> rq
 /// its real path, requiring every component (including the leaf) to already
 /// exist and none of them to be a symlink. `canonical_userland_root` must
 /// already be canonicalized (as [`crate::runtime::ElysiumRuntime::new`]
-/// does once for the whole VM); by construction the walk below never
-/// produces a path outside it, since `..` is clamped at the root exactly
-/// like `ely:filesystem`'s own `normalize()`.
+/// does once for the whole VM); by construction the walk never produces a
+/// path outside it, since `..` is clamped at the root exactly like
+/// `ely:filesystem`'s own `normalize()`.
 pub fn resolve_userland_path(
     canonical_userland_root: &Path,
     requested: &str,
 ) -> std::result::Result<PathBuf, PathResolutionError> {
-    let Some(relative) = requested.strip_prefix('/') else {
-        return Err(PathResolutionError::NotAbsolute(format!(
-            "{requested} is not an absolute path"
-        )));
-    };
-
-    let mut current = canonical_userland_root.to_path_buf();
-    for component in Path::new(relative).components() {
-        match component {
-            Component::Normal(part) => {
-                current.push(part);
-                let metadata = std::fs::symlink_metadata(&current).map_err(|_| {
-                    PathResolutionError::NotFound(format!("{requested}: no such file or directory"))
-                })?;
-                if metadata.file_type().is_symlink() {
-                    return Err(PathResolutionError::NotFound(format!(
-                        "{requested}: no such file or directory"
-                    )));
-                }
-            }
-            Component::ParentDir => {
-                if current != canonical_userland_root {
-                    current.pop();
-                }
-            }
-            Component::CurDir | Component::RootDir => {}
-            _ => {
-                return Err(PathResolutionError::Invalid(format!(
-                    "{requested} is not a valid path"
-                )));
-            }
-        }
-    }
-
-    Ok(current)
+    walk_userland_path(canonical_userland_root, requested, false)
 }
 
 /// Like [`resolve_userland_path`], but tolerates `requested`'s leaf (and any
 /// number of trailing components) not existing yet — needed by
 /// `createDirectory` (which may need to create several missing levels) and
-/// by a `writeFile` targeting a not-yet-existing file. Walks from the root
-/// exactly like [`resolve_userland_path`] until it hits the first missing
-/// component, then lexically appends everything remaining (still clamping
-/// `..` at the root) without touching the filesystem again — a component
-/// that doesn't exist yet can't itself be a symlink, so no further check is
-/// needed past that point.
+/// by a `writeFile` targeting a not-yet-existing file.
 pub fn resolve_userland_path_for_write(
     canonical_userland_root: &Path,
     requested: &str,
+) -> std::result::Result<PathBuf, PathResolutionError> {
+    walk_userland_path(canonical_userland_root, requested, true)
+}
+
+/// Shared walk behind [`resolve_userland_path`] and
+/// [`resolve_userland_path_for_write`]. Advances component by component from
+/// `canonical_userland_root`, checking `symlink_metadata` at every step and
+/// treating any symlink component as though it didn't exist, and clamps
+/// `..` at the root so the result can never escape it.
+///
+/// When a component doesn't exist: if `allow_missing_tail` is false the
+/// whole path is rejected as not found; if it is true, that component and
+/// everything after it is appended lexically (still clamping `..`) without
+/// touching the filesystem again — a component that doesn't exist yet can't
+/// itself be a symlink, so no further check is needed past that point.
+fn walk_userland_path(
+    canonical_userland_root: &Path,
+    requested: &str,
+    allow_missing_tail: bool,
 ) -> std::result::Result<PathBuf, PathResolutionError> {
     let Some(relative) = requested.strip_prefix('/') else {
         return Err(PathResolutionError::NotAbsolute(format!(
             "{requested} is not an absolute path"
         )));
     };
+
+    let not_found =
+        || PathResolutionError::NotFound(format!("{requested}: no such file or directory"));
+    let invalid = || PathResolutionError::Invalid(format!("{requested} is not a valid path"));
 
     let mut current = canonical_userland_root.to_path_buf();
     let mut components = Path::new(relative).components();
@@ -173,13 +157,11 @@ pub fn resolve_userland_path_for_write(
                 match std::fs::symlink_metadata(&candidate) {
                     Ok(metadata) => {
                         if metadata.file_type().is_symlink() {
-                            return Err(PathResolutionError::NotFound(format!(
-                                "{requested}: no such file or directory"
-                            )));
+                            return Err(not_found());
                         }
                         current = candidate;
                     }
-                    Err(_) => {
+                    Err(_) if allow_missing_tail => {
                         current.push(part);
                         for remaining in components {
                             match remaining {
@@ -190,15 +172,12 @@ pub fn resolve_userland_path_for_write(
                                     }
                                 }
                                 Component::CurDir | Component::RootDir => {}
-                                _ => {
-                                    return Err(PathResolutionError::Invalid(format!(
-                                        "{requested} is not a valid path"
-                                    )));
-                                }
+                                _ => return Err(invalid()),
                             }
                         }
                         return Ok(current);
                     }
+                    Err(_) => return Err(not_found()),
                 }
             }
             Component::ParentDir => {
@@ -207,11 +186,7 @@ pub fn resolve_userland_path_for_write(
                 }
             }
             Component::CurDir | Component::RootDir => {}
-            _ => {
-                return Err(PathResolutionError::Invalid(format!(
-                    "{requested} is not a valid path"
-                )));
-            }
+            _ => return Err(invalid()),
         }
     }
 
