@@ -8,12 +8,11 @@
 //! [`resolve_userland_path`] and [`resolve_userland_path_for_write`] walk a
 //! requested path component by component from the userland root, checking
 //! `std::fs::symlink_metadata` at every step, and treat any symlink
-//! component as though the path didn't exist at all. This is stricter than
-//! `kernel/image.rs`'s own `resolve_userland_path` (which follows symlinks
-//! via `canonicalize`, then only checks the final target stays inside the
-//! root) — that one is untouched for now, but the two functions here are
-//! `pub` so other modules can adopt this stricter walk later instead of
-//! duplicating path-sandboxing logic.
+//! component as though the path didn't exist at all. Both are `pub`: they
+//! are the one place userland-path sandboxing is implemented, and every
+//! other native surface that resolves a virtual path — `ely:image`'s
+//! `loadImage`, the process manager's program loading — goes through them
+//! rather than rolling its own `canonicalize`-based check.
 //!
 //! Every thrown message is tagged with a machine-readable prefix
 //! (`"NOT_FOUND: ..."`, `"IS_A_DIRECTORY: ..."`, ...) that `ely:filesystem`
@@ -62,6 +61,15 @@ impl PathResolutionError {
             | PathResolutionError::NotFound(message)
             | PathResolutionError::Invalid(message) => message,
         }
+    }
+}
+
+impl std::fmt::Display for PathResolutionError {
+    /// The rich message without the machine-readable tag — for callers
+    /// outside `ely:filesystem` (e.g. `ely:image`, program loading) that
+    /// surface a plain error rather than parsing tags.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
     }
 }
 
