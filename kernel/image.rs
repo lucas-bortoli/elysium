@@ -81,13 +81,11 @@ impl ImageTable {
         self.images.borrow_mut().retain(|entry| entry.id != id);
     }
 
-    /// Drops every loaded image. Used by `ElysiumRuntime`'s `Drop` impl,
-    /// alongside `timers.clear_all()`/`microtasks.borrow_mut().clear()`, so
-    /// a VM never leaks loaded images past its own teardown. Unlike those
-    /// two, no entry here holds a `Persistent` JS value, so nothing here
-    /// actually needs to run inside `context.with` for GC-safety — it's
-    /// grouped with them purely so VM teardown has one obvious place every
-    /// resource gets released, not because of the same hazard.
+    /// Drops every loaded image, so a VM never leaks loaded images past its
+    /// own teardown. Called from `ElysiumRuntime`'s `Drop` impl, whose doc
+    /// comment explains why the image table is released there alongside the
+    /// timer and microtask queues even though it holds no `Persistent` JS
+    /// values and so isn't subject to their GC-sweep-ordering hazard.
     pub fn clear_all(&self) {
         self.images.borrow_mut().clear();
     }

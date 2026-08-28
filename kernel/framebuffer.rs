@@ -221,10 +221,10 @@ fn resolve_color(ctx: &Ctx<'_>, id: u16) -> Result<Color> {
 pub const FRAMEBUFFER_WIDTH: u32 = 720;
 pub const FRAMEBUFFER_HEIGHT: u32 = 360;
 
-/// The scale a `Framebuffer` starts at before any `setScale` call — not a
-/// fixed factor: the physical-pixels-per-logical-pixel ratio now lives in
-/// a runtime `Cell<u32>`, shared with `ely:framebuffer`'s `setScale`
-/// binding, so a program can change it while Elysium is running.
+/// The physical-pixels-per-logical-pixel ratio a `Framebuffer` starts at
+/// before any `setScale` call. The live ratio is held in a runtime
+/// `Cell<u32>` shared with `ely:framebuffer`'s `setScale` binding, so a
+/// program can change it while Elysium is running.
 pub const DEFAULT_SCALE: u32 = 2;
 
 pub struct Framebuffer {
@@ -248,8 +248,8 @@ pub struct Framebuffer {
     // rather than redoing that work on every frame regardless.
     applied_scale: u32,
     // Needed to resize the OS window itself when the scale changes — see
-    // `apply_scale`. `Framebuffer` still never touches the event loop,
-    // only this handle, same as before.
+    // `apply_scale`. `Framebuffer` never touches the event loop, only this
+    // window handle.
     window: Arc<Window>,
     // Never read after construction, but must outlive `surface`: some
     // softbuffer backends (X11 in particular) hold a live connection this
@@ -324,8 +324,8 @@ impl Framebuffer {
             self.pixmap.fill(color.to_skia());
         }
 
-        // anti_alias: false matches the old backend's hard rectangle edges
-        // (no MSAA).
+        // anti_alias: false — rectangle edges are hard, pixel-aligned, no
+        // MSAA.
         let mut paint = tiny_skia::Paint {
             anti_alias: false,
             ..Default::default()
