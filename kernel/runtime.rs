@@ -283,9 +283,7 @@ impl ElysiumRuntime {
 
             self.drain_microtasks();
 
-            if let Err(err) = result {
-                return Err(err);
-            }
+            result?;
         }
         Ok(())
     }
