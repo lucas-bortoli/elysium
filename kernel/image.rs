@@ -12,11 +12,12 @@
 //! nothing else in this codebase relies on that pattern.
 
 use std::cell::{Cell, RefCell};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use rquickjs::{Ctx, Function, Result};
 
+use crate::filesystem;
 use crate::framebuffer::Color;
 
 struct ImageEntry {
@@ -102,34 +103,6 @@ pub fn resolve_image(ctx: &Ctx<'_>, images: &ImageTable, id: u32) -> Result<Load
         .ok_or_else(|| rquickjs::Exception::throw_type(ctx, &format!("{id} is not a loaded image")))
 }
 
-/// Resolves `requested` — a virtual, userland-rooted path (e.g.
-/// `/programs/init/sprite.png`) — against `canonical_userland_root`, and
-/// verifies it doesn't escape it. `requested` must start with `/`: this
-/// isn't itself the security boundary (a program can't reach this binding
-/// except through `ely:image`'s `loadImage`, which already rejects a
-/// non-absolute path as a `RelativePathError` before ever calling here) but
-/// it keeps a caller that does reach this directly from silently getting a
-/// path resolved relative to `canonical_userland_root` by accident.
-/// Escaping the root — via `../` traversal or a symlink that resolves
-/// outside it — is caught by canonicalizing the joined path and checking
-/// `starts_with`, rather than string-matching `..`, which a symlink could
-/// still get around.
-fn resolve_userland_path(
-    canonical_userland_root: &Path,
-    requested: &str,
-) -> std::result::Result<PathBuf, String> {
-    let Some(relative) = requested.strip_prefix('/') else {
-        return Err(format!("{requested} is not an absolute path"));
-    };
-    let candidate = canonical_userland_root.join(relative);
-    let canonical_candidate =
-        std::fs::canonicalize(&candidate).map_err(|err| format!("{requested}: {err}"))?;
-    if !canonical_candidate.starts_with(canonical_userland_root) {
-        return Err(format!("{requested} is outside the userland directory"));
-    }
-    Ok(canonical_candidate)
-}
-
 /// Snaps every pixel's straight (un-premultiplied) RGB to its nearest
 /// palette entry via `Color::nearest`, then re-premultiplies by that
 /// pixel's original alpha — alpha itself is never touched, so transparency
@@ -204,8 +177,10 @@ pub fn bootstrap_image_bindings(
             Function::new(
                 ctx.clone(),
                 move |ctx: Ctx<'_>, path: String| -> Result<u32> {
-                    let resolved = resolve_userland_path(&userland_root, &path)
-                        .map_err(|err| rquickjs::Exception::throw_message(&ctx, &err))?;
+                    let resolved = filesystem::resolve_userland_path(&userland_root, &path)
+                        .map_err(|err| {
+                            rquickjs::Exception::throw_message(&ctx, &err.to_string())
+                        })?;
                     let bytes = std::fs::read(&resolved).map_err(|err| {
                         rquickjs::Exception::throw_message(&ctx, &format!("{path}: {err}"))
                     })?;

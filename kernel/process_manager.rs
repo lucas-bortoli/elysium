@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use crate::filesystem;
 use crate::framebuffer::DrawCommand;
 use crate::input::Input;
 use crate::process::{Control, Envelope, ProcessChannel, ProcessId, SpawnRequest};
@@ -65,6 +66,12 @@ impl ProcessManager {
         scale: Rc<Cell<u32>>,
         userland_root: PathBuf,
     ) -> Self {
+        // Canonicalized once here so `resolve_program`'s sandbox walk (and
+        // every VM's, since each `ElysiumRuntime` canonicalizes its own
+        // copy too) starts from a real, symlink-free root.
+        let userland_root = std::fs::canonicalize(&userland_root).unwrap_or_else(|err| {
+            panic!("userland root {} is invalid: {err}", userland_root.display())
+        });
         Self {
             entries: Vec::new(),
             draw_commands,
@@ -295,26 +302,20 @@ impl ProcessManager {
         Ok(())
     }
 
-    /// Resolves a userland-virtual path to `(real absolute path, source)`,
-    /// rejecting anything that escapes the userland root — the same
-    /// sandbox boundary `ely:image`'s `loadImage` enforces. The real path
-    /// is what `eval_module` needs as the module name so its relative
-    /// imports and `import.meta` resolve.
+    /// Resolves a userland-virtual path to `(real absolute path, source)`
+    /// through the same symlink-invisible sandbox walk `ely:filesystem` and
+    /// `ely:image` use, so a program path can't escape the userland root or
+    /// reach through a symlink. The real path is what `eval_module` needs as
+    /// the module name so its relative imports and `import.meta` resolve.
     fn resolve_program(&self, virtual_path: &str) -> Result<(String, String), GuardedError> {
-        let relative = virtual_path.trim_start_matches('/');
-        let joined = self.userland_root.join(relative);
-        let canonical = std::fs::canonicalize(&joined).map_err(|err| {
-            GuardedError::Exception(format!("cannot resolve program {virtual_path}: {err}"))
-        })?;
-        if !canonical.starts_with(&self.userland_root) {
-            return Err(GuardedError::Exception(format!(
-                "program {virtual_path} resolves outside the userland root"
-            )));
-        }
-        let source = std::fs::read_to_string(&canonical).map_err(|err| {
+        let resolved = filesystem::resolve_userland_path(&self.userland_root, virtual_path)
+            .map_err(|err| {
+                GuardedError::Exception(format!("cannot resolve program {virtual_path}: {err}"))
+            })?;
+        let source = std::fs::read_to_string(&resolved).map_err(|err| {
             GuardedError::Exception(format!("cannot read program {virtual_path}: {err}"))
         })?;
-        let name = canonical
+        let name = resolved
             .to_str()
             .ok_or_else(|| GuardedError::Exception("program path is not valid UTF-8".to_string()))?
             .to_string();
