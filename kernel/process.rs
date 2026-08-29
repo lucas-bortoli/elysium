@@ -12,6 +12,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
+use crate::bindings::bind;
 use rquickjs::function::Opt;
 use rquickjs::{Ctx, Function, Persistent, Result};
 
@@ -134,119 +135,97 @@ pub fn bootstrap_process_bindings<'js>(
     exit_requested: Rc<Cell<bool>>,
     arguments_json: Option<String>,
 ) -> Result<()> {
-    let global = ctx.globals();
+    bind(ctx, "__process_self_id", move || self_id)?;
 
-    global.set(
-        "__process_self_id",
-        Function::new(ctx.clone(), move || self_id)?,
-    )?;
-
-    global.set(
-        "__process_raw_arguments",
-        Function::new(ctx.clone(), move || arguments_json.clone())?,
-    )?;
+    bind(ctx, "__process_raw_arguments", move || {
+        arguments_json.clone()
+    })?;
 
     {
         let channel = channel.clone();
-        global.set(
+        bind(
+            ctx,
             "__process_spawn",
-            Function::new(
-                ctx.clone(),
-                move |path: String, args_json: Opt<String>| -> ProcessId {
-                    let id = channel.allocate_id();
-                    channel.pending_spawns.borrow_mut().push(SpawnRequest {
-                        id,
-                        path,
-                        arguments_json: args_json.0,
-                    });
-                    id
-                },
-            )?,
-        )?;
-    }
-
-    {
-        let channel = channel.clone();
-        global.set(
-            "__process_post_message",
-            Function::new(
-                ctx.clone(),
-                move |target: ProcessId, kind: String, data_json: Opt<String>| {
-                    channel.pending_sends.borrow_mut().push(Envelope {
-                        kind,
-                        from: self_id,
-                        to: target,
-                        data: data_json.0,
-                    });
-                },
-            )?,
-        )?;
-    }
-
-    {
-        let channel = channel.clone();
-        global.set(
-            "__process_request_exit",
-            Function::new(ctx.clone(), move |target: ProcessId| {
-                channel.pending_sends.borrow_mut().push(Envelope {
-                    kind: "ely:exit".to_string(),
-                    from: 0,
-                    to: target,
-                    data: None,
+            move |path: String, args_json: Opt<String>| -> ProcessId {
+                let id = channel.allocate_id();
+                channel.pending_spawns.borrow_mut().push(SpawnRequest {
+                    id,
+                    path,
+                    arguments_json: args_json.0,
                 });
-                channel
-                    .pending_control
-                    .borrow_mut()
-                    .push(Control::ArmDraining {
-                        target,
-                        by: self_id,
-                    });
-            })?,
+                id
+            },
         )?;
     }
 
     {
         let channel = channel.clone();
-        global.set(
-            "__process_terminate",
-            Function::new(ctx.clone(), move |target: ProcessId| {
-                channel.pending_control.borrow_mut().push(Control::Kill {
+        bind(
+            ctx,
+            "__process_post_message",
+            move |target: ProcessId, kind: String, data_json: Opt<String>| {
+                channel.pending_sends.borrow_mut().push(Envelope {
+                    kind,
+                    from: self_id,
+                    to: target,
+                    data: data_json.0,
+                });
+            },
+        )?;
+    }
+
+    {
+        let channel = channel.clone();
+        bind(ctx, "__process_request_exit", move |target: ProcessId| {
+            channel.pending_sends.borrow_mut().push(Envelope {
+                kind: "ely:exit".to_string(),
+                from: 0,
+                to: target,
+                data: None,
+            });
+            channel
+                .pending_control
+                .borrow_mut()
+                .push(Control::ArmDraining {
                     target,
                     by: self_id,
                 });
-            })?,
-        )?;
+        })?;
     }
 
     {
         let channel = channel.clone();
-        global.set(
-            "__process_is_live",
-            Function::new(ctx.clone(), move |id: ProcessId| channel.is_live(id))?,
-        )?;
+        bind(ctx, "__process_terminate", move |target: ProcessId| {
+            channel.pending_control.borrow_mut().push(Control::Kill {
+                target,
+                by: self_id,
+            });
+        })?;
+    }
+
+    {
+        let channel = channel.clone();
+        bind(ctx, "__process_is_live", move |id: ProcessId| {
+            channel.is_live(id)
+        })?;
     }
 
     {
         let exit_requested = Rc::clone(&exit_requested);
-        global.set(
-            "__process_exit",
-            Function::new(ctx.clone(), move || exit_requested.set(true))?,
-        )?;
+        bind(ctx, "__process_exit", move || exit_requested.set(true))?;
     }
 
     // `ely:process` installs the dispatch function when its first message
     // handler is added and clears it (passing nothing) when the last is
     // removed, so `has_message_handler` tracks whether the process still
     // wants messages.
-    global.set(
+    bind(
+        ctx,
         "__process_set_message_handler",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'js>, handler: Opt<Function<'js>>| {
-                *message_handler.borrow_mut() =
-                    handler.0.map(|handler| Persistent::save(&ctx, handler));
-            },
-        )?,
+        move |ctx: Ctx<'js>, handler: Opt<Function<'js>>| {
+            *message_handler.borrow_mut() =
+                handler.0.map(|handler| Persistent::save(&ctx, handler));
+        },
     )?;
 
     Ok(())

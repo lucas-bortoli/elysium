@@ -18,7 +18,7 @@ use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use rquickjs::{Ctx, Function, Result};
+use rquickjs::{Ctx, Result};
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
@@ -30,6 +30,7 @@ pub use colors::Color;
 
 use state::DrawState;
 
+use crate::bindings::bind;
 use crate::text;
 
 /// One drawing instruction accumulated during a program's `draw()` call.
@@ -119,23 +120,17 @@ pub enum DrawCommand {
     PopClip,
 }
 
-/// Binds the *hidden* globals `ely:framebuffer`'s embedded module wraps
-/// (`__framebuffer_clear_screen`, `__framebuffer_fill_rectangle`,
-/// `__framebuffer_draw_text`, `__framebuffer_measure_text`,
-/// `__framebuffer_draw_image`, `__framebuffer_nearest_color`,
-/// `__framebuffer_set_scale`) — never called by a program directly, only
-/// through `ely:framebuffer`'s exported
-/// `clearScreen`/`fillRectangle`/`drawText`/`measureText`/`drawImage`/`nearestColor`/`setScale`.
+/// Binds the hidden globals `ely:framebuffer`'s embedded module wraps, path
+/// bindings included. A program never names one of these: it calls the
+/// module's exported `clearScreen`/`fillRectangle`/`drawText`/... , which
+/// calls the matching global, which appends a [`DrawCommand`] to the buffer
+/// the kernel renders once the guarded `draw()` call returns.
 pub fn bootstrap_framebuffer_bindings(
     ctx: &Ctx<'_>,
     draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
     scale: Rc<Cell<u32>>,
     images: Rc<crate::image::ImageTable>,
 ) -> Result<()> {
-    let global = ctx.globals();
-    let images_transformed = Rc::clone(&images);
-    let draw_commands_transformed = Rc::clone(&draw_commands);
-
     paths::bootstrap_path_bindings(
         ctx,
         Rc::clone(&draw_commands),
@@ -144,144 +139,129 @@ pub fn bootstrap_framebuffer_bindings(
 
     {
         let draw_commands = Rc::clone(&draw_commands);
-        global.set(
+        bind(ctx, "__framebuffer_pop_transform", move || {
+            draw_commands.borrow_mut().push(DrawCommand::PopTransform)
+        })?;
+    }
+
+    {
+        let draw_commands = Rc::clone(&draw_commands);
+        bind(
+            ctx,
             "__framebuffer_set_pixel",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>, x: f32, y: f32, color: u16| -> Result<()> {
-                    let color = resolve_color(&ctx, color)?;
-                    draw_commands
-                        .borrow_mut()
-                        .push(DrawCommand::SetPixel { x, y, color });
-                    Ok(())
-                },
-            )?,
+            move |ctx: Ctx<'_>, x: f32, y: f32, color: u16| -> Result<()> {
+                let color = resolve_color(&ctx, color)?;
+                draw_commands
+                    .borrow_mut()
+                    .push(DrawCommand::SetPixel { x, y, color });
+                Ok(())
+            },
         )?;
     }
 
     {
         let draw_commands = Rc::clone(&draw_commands);
-        global.set(
+        // The six numbers of a 2x3 matrix, composed on the JS side from
+        // whatever mix of shift, scale and rotation a program asked for.
+        bind(
+            ctx,
             "__framebuffer_push_transform",
-            Function::new(
-                ctx.clone(),
-                // The six numbers of a 2x3 matrix, composed on the JS side
-                // from whatever mix of shift, scale and rotation a program
-                // asked for.
-                move |sx: f32, ky: f32, kx: f32, sy: f32, tx: f32, ty: f32| {
-                    let transform = tiny_skia::Transform::from_row(sx, ky, kx, sy, tx, ty);
-                    draw_commands
-                        .borrow_mut()
-                        .push(DrawCommand::PushTransform { transform })
-                },
-            )?,
+            move |sx: f32, ky: f32, kx: f32, sy: f32, tx: f32, ty: f32| {
+                let transform = tiny_skia::Transform::from_row(sx, ky, kx, sy, tx, ty);
+                draw_commands
+                    .borrow_mut()
+                    .push(DrawCommand::PushTransform { transform })
+            },
         )?;
     }
 
     {
         let draw_commands = Rc::clone(&draw_commands);
-        global.set(
-            "__framebuffer_pop_transform",
-            Function::new(ctx.clone(), move || {
-                draw_commands.borrow_mut().push(DrawCommand::PopTransform)
-            })?,
-        )?;
-    }
-
-    {
-        let draw_commands = Rc::clone(&draw_commands);
-        global.set(
+        bind(
+            ctx,
             "__framebuffer_clear_screen",
-            Function::new(ctx.clone(), move |ctx: Ctx<'_>, color: u16| -> Result<()> {
+            move |ctx: Ctx<'_>, color: u16| -> Result<()> {
                 let color = resolve_color(&ctx, color)?;
                 draw_commands
                     .borrow_mut()
                     .push(DrawCommand::ClearScreen { color });
                 Ok(())
-            })?,
-        )?;
-    }
-
-    {
-        let draw_commands = Rc::clone(&draw_commands);
-        global.set(
-            "__framebuffer_fill_rectangle",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>, x: f32, y: f32, w: f32, h: f32, color: u16| -> Result<()> {
-                    let color = resolve_color(&ctx, color)?;
-                    draw_commands.borrow_mut().push(DrawCommand::FillRectangle {
-                        x,
-                        y,
-                        w,
-                        h,
-                        color,
-                    });
-                    Ok(())
-                },
-            )?,
-        )?;
-    }
-
-    {
-        let draw_commands = Rc::clone(&draw_commands);
-        global.set(
-            "__framebuffer_draw_text",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>,
-                      x: f32,
-                      y: f32,
-                      text: String,
-                      font: u16,
-                      scale: u32,
-                      color: u16|
-                      -> Result<()> {
-                    let color = resolve_color(&ctx, color)?;
-                    if crate::text::font_from_id(font).is_none() {
-                        return Err(rquickjs::Exception::throw_type(
-                            &ctx,
-                            &format!("{font} is not a valid font"),
-                        ));
-                    }
-                    if scale == 0 {
-                        return Err(rquickjs::Exception::throw_range(
-                            &ctx,
-                            "text scale must be at least 1",
-                        ));
-                    }
-                    draw_commands.borrow_mut().push(DrawCommand::DrawText {
-                        x,
-                        y,
-                        text,
-                        font,
-                        scale,
-                        color,
-                    });
-                    Ok(())
-                },
-            )?,
-        )?;
-    }
-
-    global.set(
-        "__framebuffer_measure_text",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, text: String, font: u16| -> Result<Vec<u32>> {
-                let font = crate::text::font_from_id(font).ok_or_else(|| {
-                    rquickjs::Exception::throw_type(&ctx, &format!("{font} is not a valid font"))
-                })?;
-                let (width, height) = crate::text::measure(font, &text);
-                Ok(vec![width, height])
             },
-        )?,
+        )?;
+    }
+
+    {
+        let draw_commands = Rc::clone(&draw_commands);
+        bind(
+            ctx,
+            "__framebuffer_fill_rectangle",
+            move |ctx: Ctx<'_>, x: f32, y: f32, w: f32, h: f32, color: u16| -> Result<()> {
+                let color = resolve_color(&ctx, color)?;
+                draw_commands
+                    .borrow_mut()
+                    .push(DrawCommand::FillRectangle { x, y, w, h, color });
+                Ok(())
+            },
+        )?;
+    }
+
+    {
+        let draw_commands = Rc::clone(&draw_commands);
+        bind(
+            ctx,
+            "__framebuffer_draw_text",
+            move |ctx: Ctx<'_>,
+                  x: f32,
+                  y: f32,
+                  text: String,
+                  font: u16,
+                  scale: u32,
+                  color: u16|
+                  -> Result<()> {
+                let color = resolve_color(&ctx, color)?;
+                if crate::text::font_from_id(font).is_none() {
+                    return Err(rquickjs::Exception::throw_type(
+                        &ctx,
+                        &format!("{font} is not a valid font"),
+                    ));
+                }
+                if scale == 0 {
+                    return Err(rquickjs::Exception::throw_range(
+                        &ctx,
+                        "text scale must be at least 1",
+                    ));
+                }
+                draw_commands.borrow_mut().push(DrawCommand::DrawText {
+                    x,
+                    y,
+                    text,
+                    font,
+                    scale,
+                    color,
+                });
+                Ok(())
+            },
+        )?;
+    }
+
+    bind(
+        ctx,
+        "__framebuffer_measure_text",
+        move |ctx: Ctx<'_>, text: String, font: u16| -> Result<Vec<u32>> {
+            let font = crate::text::font_from_id(font).ok_or_else(|| {
+                rquickjs::Exception::throw_type(&ctx, &format!("{font} is not a valid font"))
+            })?;
+            let (width, height) = crate::text::measure(font, &text);
+            Ok(vec![width, height])
+        },
     )?;
 
-    global.set(
-        "__framebuffer_draw_image",
-        Function::new(
-            ctx.clone(),
+    {
+        let draw_commands = Rc::clone(&draw_commands);
+        let images = Rc::clone(&images);
+        bind(
+            ctx,
+            "__framebuffer_draw_image",
             move |ctx: Ctx<'_>, id: u32, x: f32, y: f32| -> Result<()> {
                 let image = crate::image::resolve_image(&ctx, &images, id)?;
                 draw_commands.borrow_mut().push(DrawCommand::DrawImage {
@@ -292,62 +272,55 @@ pub fn bootstrap_framebuffer_bindings(
                 });
                 Ok(())
             },
-        )?,
-    )?;
+        )?;
+    }
 
-    global.set(
+    bind(
+        ctx,
         "__framebuffer_draw_image_transformed",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, id: u32, source: Vec<f32>, transform: Vec<f32>| -> Result<()> {
-                let image = crate::image::resolve_image(&ctx, &images_transformed, id)?;
-                // `[x, y, w, h]` and the six numbers of a 2x3 matrix, both
-                // assembled on the JS side — too many to pass one by one.
-                let ([sx, sy, sw, sh], [a, b, c, d, e, f]) = (
-                    <[f32; 4]>::try_from(source.as_slice()).map_err(|_| {
-                        rquickjs::Exception::throw_type(&ctx, "a source rect needs four numbers")
-                    })?,
-                    <[f32; 6]>::try_from(transform.as_slice()).map_err(|_| {
-                        rquickjs::Exception::throw_type(&ctx, "a transform needs six numbers")
-                    })?,
-                );
-                let Some(source) = tiny_skia::Rect::from_xywh(sx, sy, sw, sh) else {
-                    return Ok(()); // nothing of the image asked for
-                };
-                draw_commands_transformed
-                    .borrow_mut()
-                    .push(DrawCommand::DrawImageTransformed {
-                        pixmap: image.pixmap,
-                        source,
-                        transform: tiny_skia::Transform::from_row(a, b, c, d, e, f),
-                    });
-                Ok(())
-            },
-        )?,
+        move |ctx: Ctx<'_>, id: u32, source: Vec<f32>, transform: Vec<f32>| -> Result<()> {
+            let image = crate::image::resolve_image(&ctx, &images, id)?;
+            // `[x, y, w, h]` and the six numbers of a 2x3 matrix, both
+            // assembled on the JS side — too many to pass one by one.
+            let ([sx, sy, sw, sh], [a, b, c, d, e, f]) = (
+                <[f32; 4]>::try_from(source.as_slice()).map_err(|_| {
+                    rquickjs::Exception::throw_type(&ctx, "a source rect needs four numbers")
+                })?,
+                <[f32; 6]>::try_from(transform.as_slice()).map_err(|_| {
+                    rquickjs::Exception::throw_type(&ctx, "a transform needs six numbers")
+                })?,
+            );
+            let Some(source) = tiny_skia::Rect::from_xywh(sx, sy, sw, sh) else {
+                return Ok(()); // nothing of the image asked for
+            };
+            draw_commands
+                .borrow_mut()
+                .push(DrawCommand::DrawImageTransformed {
+                    pixmap: image.pixmap,
+                    source,
+                    transform: tiny_skia::Transform::from_row(a, b, c, d, e, f),
+                });
+            Ok(())
+        },
     )?;
 
-    global.set(
-        "__framebuffer_nearest_color",
-        Function::new(ctx.clone(), move |r: u8, g: u8, b: u8| -> u16 {
-            Color::nearest(r, g, b) as u16
-        })?,
-    )?;
+    bind(ctx, "__framebuffer_nearest_color", |r: u8, g: u8, b: u8| {
+        Color::nearest(r, g, b) as u16
+    })?;
 
-    global.set(
+    bind(
+        ctx,
         "__framebuffer_set_scale",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, new_scale: u32| -> Result<()> {
-                if new_scale == 0 {
-                    return Err(rquickjs::Exception::throw_range(
-                        &ctx,
-                        "scale must be at least 1",
-                    ));
-                }
-                scale.set(new_scale);
-                Ok(())
-            },
-        )?,
+        move |ctx: Ctx<'_>, new_scale: u32| -> Result<()> {
+            if new_scale == 0 {
+                return Err(rquickjs::Exception::throw_range(
+                    &ctx,
+                    "scale must be at least 1",
+                ));
+            }
+            scale.set(new_scale);
+            Ok(())
+        },
     )?;
 
     Ok(())

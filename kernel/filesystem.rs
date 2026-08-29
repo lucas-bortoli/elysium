@@ -25,7 +25,8 @@
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
-use rquickjs::{Ctx, Function, Object, Result, TypedArray};
+use crate::bindings::bind;
+use rquickjs::{Ctx, Object, Result, TypedArray};
 
 /// Why [`resolve_userland_path`]/[`resolve_userland_path_for_write`] failed
 /// to resolve a requested path, carrying enough to build both a tag and a
@@ -245,210 +246,193 @@ fn write_range(resolved: &Path, data: &[u8], offset: i64, truncate: bool) -> std
     file.write_all(data)
 }
 
+/// Resolves `path` for reading, throwing the tagged JS exception on failure —
+/// the opening move of every binding below that requires its target to exist.
+fn resolve_for_read(ctx: &Ctx<'_>, root: &Path, path: &str) -> Result<PathBuf> {
+    resolve_userland_path(root, path).map_err(|err| throw_resolution(ctx, err))
+}
+
+/// Like [`resolve_for_read`], but for the bindings that may be naming
+/// something not created yet.
+fn resolve_for_write(ctx: &Ctx<'_>, root: &Path, path: &str) -> Result<PathBuf> {
+    resolve_userland_path_for_write(root, path).map_err(|err| throw_resolution(ctx, err))
+}
+
 /// Binds the *hidden* globals `ely:filesystem`'s embedded module wraps
 /// (`__fs_read_file`, `__fs_write_file`, ...) — never called by a program
 /// directly, only through `ely:filesystem`'s exported functions.
 /// `userland_root` is already canonicalized by the caller
 /// ([`crate::runtime::ElysiumRuntime::new`]).
 pub fn bootstrap_filesystem_bindings<'js>(ctx: &Ctx<'js>, userland_root: PathBuf) -> Result<()> {
-    let global = ctx.globals();
-
     {
         let userland_root = userland_root.clone();
-        global.set(
+        bind(
+            ctx,
             "__fs_read_file",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'js>,
-                      path: String,
-                      offset: i64,
-                      length: i64|
-                      -> Result<TypedArray<'js, u8>> {
-                    let resolved = resolve_userland_path(&userland_root, &path)
-                        .map_err(|err| throw_resolution(&ctx, err))?;
-                    let bytes = read_range(&resolved, offset, length)
-                        .map_err(|err| throw_io(&ctx, "read", &path, err))?;
-                    TypedArray::new_copy(ctx.clone(), bytes)
-                },
-            )?,
-        )?;
-    }
-
-    {
-        let userland_root = userland_root.clone();
-        global.set(
-            "__fs_write_file",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>,
-                      path: String,
-                      data: TypedArray<'_, u8>,
-                      offset: i64,
-                      truncate: bool|
-                      -> Result<()> {
-                    let resolved = resolve_userland_path_for_write(&userland_root, &path)
-                        .map_err(|err| throw_resolution(&ctx, err))?;
-                    let bytes = data.as_bytes().ok_or_else(|| {
-                        rquickjs::Exception::throw_message(
-                            &ctx,
-                            &format!(
-                                "IO_ERROR: write {path}: data is not backed by an ArrayBuffer"
-                            ),
-                        )
-                    })?;
-                    write_range(&resolved, bytes, offset, truncate)
-                        .map_err(|err| throw_io(&ctx, "write", &path, err))
-                },
-            )?,
-        )?;
-    }
-
-    {
-        let userland_root = userland_root.clone();
-        global.set(
-            "__fs_read_text_file",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>, path: String| -> Result<String> {
-                    let resolved = resolve_userland_path(&userland_root, &path)
-                        .map_err(|err| throw_resolution(&ctx, err))?;
-                    std::fs::read_to_string(&resolved)
-                        .map_err(|err| throw_read_to_string_io(&ctx, &path, err))
-                },
-            )?,
-        )?;
-    }
-
-    {
-        let userland_root = userland_root.clone();
-        global.set(
-            "__fs_write_text_file",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>, path: String, text: String| -> Result<()> {
-                    let resolved = resolve_userland_path_for_write(&userland_root, &path)
-                        .map_err(|err| throw_resolution(&ctx, err))?;
-                    std::fs::write(&resolved, text)
-                        .map_err(|err| throw_io(&ctx, "write", &path, err))
-                },
-            )?,
-        )?;
-    }
-
-    {
-        let userland_root = userland_root.clone();
-        global.set(
-            "__fs_remove",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>, path: String| -> Result<()> {
-                    let resolved = resolve_userland_path(&userland_root, &path)
-                        .map_err(|err| throw_resolution(&ctx, err))?;
-                    let metadata = std::fs::metadata(&resolved)
-                        .map_err(|err| throw_io(&ctx, "remove", &path, err))?;
-                    let result = if metadata.is_dir() {
-                        std::fs::remove_dir_all(&resolved)
-                    } else {
-                        std::fs::remove_file(&resolved)
-                    };
-                    result.map_err(|err| throw_io(&ctx, "remove", &path, err))
-                },
-            )?,
-        )?;
-    }
-
-    {
-        let userland_root = userland_root.clone();
-        global.set(
-            "__fs_create_directory",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>, path: String| -> Result<()> {
-                    let resolved = resolve_userland_path_for_write(&userland_root, &path)
-                        .map_err(|err| throw_resolution(&ctx, err))?;
-                    std::fs::create_dir_all(&resolved)
-                        .map_err(|err| throw_io(&ctx, "create directory", &path, err))
-                },
-            )?,
-        )?;
-    }
-
-    {
-        let userland_root = userland_root.clone();
-        global.set(
-            "__fs_list_directory",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'js>, path: String| -> Result<Vec<Object<'js>>> {
-                    let resolved = resolve_userland_path(&userland_root, &path)
-                        .map_err(|err| throw_resolution(&ctx, err))?;
-                    let entries = std::fs::read_dir(&resolved)
-                        .map_err(|err| throw_io(&ctx, "list directory", &path, err))?;
-
-                    let mut result = Vec::new();
-                    for entry in entries {
-                        let entry =
-                            entry.map_err(|err| throw_io(&ctx, "list directory", &path, err))?;
-                        let file_type = entry
-                            .file_type()
-                            .map_err(|err| throw_io(&ctx, "list directory", &path, err))?;
-                        // Only files and directories are userland-visible —
-                        // symlinks are invisible (see the module doc
-                        // comment) and anything else (sockets, devices,
-                        // ...) is out of scope for a files-and-directories
-                        // filesystem API.
-                        if !file_type.is_file() && !file_type.is_dir() {
-                            continue;
-                        }
-
-                        let entry_path = virtual_path(&userland_root, &entry.path());
-                        let object = Object::new(ctx.clone())?;
-                        if file_type.is_dir() {
-                            object.set("kind", "Directory")?;
-                        } else {
-                            let metadata = entry
-                                .metadata()
-                                .map_err(|err| throw_io(&ctx, "list directory", &path, err))?;
-                            object.set("kind", "File")?;
-                            object.set("size", metadata.len() as f64)?;
-                        }
-                        object.set("path", entry_path)?;
-                        result.push(object);
-                    }
-                    Ok(result)
-                },
-            )?,
-        )?;
-    }
-
-    global.set(
-        "__fs_stat",
-        Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'js>, path: String| -> Result<Object<'js>> {
-                let resolved = resolve_userland_path(&userland_root, &path)
-                    .map_err(|err| throw_resolution(&ctx, err))?;
-                let metadata = std::fs::metadata(&resolved)
-                    .map_err(|err| throw_io(&ctx, "stat", &path, err))?;
-
-                let object = Object::new(ctx.clone())?;
-                if metadata.is_dir() {
-                    object.set("kind", "Directory")?;
-                } else if metadata.is_file() {
-                    object.set("kind", "File")?;
-                    object.set("size", metadata.len() as f64)?;
-                } else {
-                    // Sockets, devices, etc. — outside the files-and-directories
-                    // scope `ely:filesystem` covers.
-                    return Err(rquickjs::Exception::throw_message(
-                        &ctx,
-                        &format!("IO_ERROR: stat {path}: not a file or directory"),
-                    ));
-                }
-                object.set("path", virtual_path(&userland_root, &resolved))?;
-                Ok(object)
+            move |ctx: Ctx<'js>,
+                  path: String,
+                  offset: i64,
+                  length: i64|
+                  -> Result<TypedArray<'js, u8>> {
+                let resolved = resolve_for_read(&ctx, &userland_root, &path)?;
+                let bytes = read_range(&resolved, offset, length)
+                    .map_err(|err| throw_io(&ctx, "read", &path, err))?;
+                TypedArray::new_copy(ctx.clone(), bytes)
             },
-        )?,
+        )?;
+    }
+
+    {
+        let userland_root = userland_root.clone();
+        bind(
+            ctx,
+            "__fs_write_file",
+            move |ctx: Ctx<'_>,
+                  path: String,
+                  data: TypedArray<'_, u8>,
+                  offset: i64,
+                  truncate: bool|
+                  -> Result<()> {
+                let resolved = resolve_for_write(&ctx, &userland_root, &path)?;
+                let bytes = data.as_bytes().ok_or_else(|| {
+                    rquickjs::Exception::throw_message(
+                        &ctx,
+                        &format!("IO_ERROR: write {path}: data is not backed by an ArrayBuffer"),
+                    )
+                })?;
+                write_range(&resolved, bytes, offset, truncate)
+                    .map_err(|err| throw_io(&ctx, "write", &path, err))
+            },
+        )?;
+    }
+
+    {
+        let userland_root = userland_root.clone();
+        bind(
+            ctx,
+            "__fs_read_text_file",
+            move |ctx: Ctx<'_>, path: String| -> Result<String> {
+                let resolved = resolve_for_read(&ctx, &userland_root, &path)?;
+                std::fs::read_to_string(&resolved)
+                    .map_err(|err| throw_read_to_string_io(&ctx, &path, err))
+            },
+        )?;
+    }
+
+    {
+        let userland_root = userland_root.clone();
+        bind(
+            ctx,
+            "__fs_write_text_file",
+            move |ctx: Ctx<'_>, path: String, text: String| -> Result<()> {
+                let resolved = resolve_for_write(&ctx, &userland_root, &path)?;
+                std::fs::write(&resolved, text).map_err(|err| throw_io(&ctx, "write", &path, err))
+            },
+        )?;
+    }
+
+    {
+        let userland_root = userland_root.clone();
+        bind(
+            ctx,
+            "__fs_remove",
+            move |ctx: Ctx<'_>, path: String| -> Result<()> {
+                let resolved = resolve_for_read(&ctx, &userland_root, &path)?;
+                let metadata = std::fs::metadata(&resolved)
+                    .map_err(|err| throw_io(&ctx, "remove", &path, err))?;
+                let result = if metadata.is_dir() {
+                    std::fs::remove_dir_all(&resolved)
+                } else {
+                    std::fs::remove_file(&resolved)
+                };
+                result.map_err(|err| throw_io(&ctx, "remove", &path, err))
+            },
+        )?;
+    }
+
+    {
+        let userland_root = userland_root.clone();
+        bind(
+            ctx,
+            "__fs_create_directory",
+            move |ctx: Ctx<'_>, path: String| -> Result<()> {
+                let resolved = resolve_for_write(&ctx, &userland_root, &path)?;
+                std::fs::create_dir_all(&resolved)
+                    .map_err(|err| throw_io(&ctx, "create directory", &path, err))
+            },
+        )?;
+    }
+
+    {
+        let userland_root = userland_root.clone();
+        bind(
+            ctx,
+            "__fs_list_directory",
+            move |ctx: Ctx<'js>, path: String| -> Result<Vec<Object<'js>>> {
+                let resolved = resolve_for_read(&ctx, &userland_root, &path)?;
+                let entries = std::fs::read_dir(&resolved)
+                    .map_err(|err| throw_io(&ctx, "list directory", &path, err))?;
+
+                let mut result = Vec::new();
+                for entry in entries {
+                    let entry =
+                        entry.map_err(|err| throw_io(&ctx, "list directory", &path, err))?;
+                    let file_type = entry
+                        .file_type()
+                        .map_err(|err| throw_io(&ctx, "list directory", &path, err))?;
+                    // Only files and directories are userland-visible —
+                    // symlinks are invisible (see the module doc
+                    // comment) and anything else (sockets, devices,
+                    // ...) is out of scope for a files-and-directories
+                    // filesystem API.
+                    if !file_type.is_file() && !file_type.is_dir() {
+                        continue;
+                    }
+
+                    let entry_path = virtual_path(&userland_root, &entry.path());
+                    let object = Object::new(ctx.clone())?;
+                    if file_type.is_dir() {
+                        object.set("kind", "Directory")?;
+                    } else {
+                        let metadata = entry
+                            .metadata()
+                            .map_err(|err| throw_io(&ctx, "list directory", &path, err))?;
+                        object.set("kind", "File")?;
+                        object.set("size", metadata.len() as f64)?;
+                    }
+                    object.set("path", entry_path)?;
+                    result.push(object);
+                }
+                Ok(result)
+            },
+        )?;
+    }
+
+    bind(
+        ctx,
+        "__fs_stat",
+        move |ctx: Ctx<'js>, path: String| -> Result<Object<'js>> {
+            let resolved = resolve_for_read(&ctx, &userland_root, &path)?;
+            let metadata =
+                std::fs::metadata(&resolved).map_err(|err| throw_io(&ctx, "stat", &path, err))?;
+
+            let object = Object::new(ctx.clone())?;
+            if metadata.is_dir() {
+                object.set("kind", "Directory")?;
+            } else if metadata.is_file() {
+                object.set("kind", "File")?;
+                object.set("size", metadata.len() as f64)?;
+            } else {
+                // Sockets, devices, etc. — outside the files-and-directories
+                // scope `ely:filesystem` covers.
+                return Err(rquickjs::Exception::throw_message(
+                    &ctx,
+                    &format!("IO_ERROR: stat {path}: not a file or directory"),
+                ));
+            }
+            object.set("path", virtual_path(&userland_root, &resolved))?;
+            Ok(object)
+        },
     )?;
 
     Ok(())
