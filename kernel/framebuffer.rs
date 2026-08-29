@@ -366,8 +366,7 @@ pub struct Framebuffer {
     scale: Rc<Cell<u32>>,
     // The scale `pixmap`/`row_scratch`/`surface`/`window` are currently
     // configured for. Compared against `scale` each frame; `render`
-    // reconfigures everything through `apply_scale` when they differ,
-    // rather than redoing that work on every frame regardless.
+    // reconfigures everything through `apply_scale` when the two differ.
     applied_scale: u32,
     // Needed to resize the OS window itself when the scale changes — see
     // `apply_scale`. `Framebuffer` never touches the event loop, only this
@@ -471,9 +470,9 @@ impl Framebuffer {
             .expect("failed to acquire the softbuffer back buffer");
 
         // Pixmap::data() is tightly packed RGBA8, row-major, premultiplied,
-        // no row padding. Every frame that reaches here started from a
-        // fully opaque fill (see `render`), so nothing here needs to
-        // un-premultiply.
+        // no row padding. Every pixel the rasterizer writes is a fully
+        // opaque palette color, so premultiplied and straight bytes are the
+        // same bytes and nothing here needs to un-premultiply.
         let src = self.pixmap.data();
         let src_w = self.pixmap.width() as usize;
         let src_h = self.pixmap.height() as usize;
