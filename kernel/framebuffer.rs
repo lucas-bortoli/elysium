@@ -63,6 +63,10 @@ pub enum DrawCommand {
         /// A built-in font id, already checked valid at the binding
         /// boundary the same way `color` is resolved there.
         font: text::FontId,
+        /// How many pixels wide each of the font's own pixels is drawn.
+        /// Whole numbers only, so a bigger size is the same bitmap with
+        /// bigger pixels and stays as crisp as the font itself.
+        scale: u32,
         color: Color,
     },
     /// Fills the inside of a path — the shape behind every filled circle,
@@ -216,6 +220,7 @@ pub fn bootstrap_framebuffer_bindings(
                       y: f32,
                       text: String,
                       font: u16,
+                      scale: u32,
                       color: u16|
                       -> Result<()> {
                     let color = resolve_color(&ctx, color)?;
@@ -225,11 +230,18 @@ pub fn bootstrap_framebuffer_bindings(
                             &format!("{font} is not a valid font"),
                         ));
                     }
+                    if scale == 0 {
+                        return Err(rquickjs::Exception::throw_range(
+                            &ctx,
+                            "text scale must be at least 1",
+                        ));
+                    }
                     draw_commands.borrow_mut().push(DrawCommand::DrawText {
                         x,
                         y,
                         text,
                         font,
+                        scale,
                         color,
                     });
                     Ok(())
@@ -577,6 +589,7 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
                 y,
                 text: string,
                 font,
+                scale,
                 color,
             } => {
                 let Some(font) = text::font_from_id(*font) else {
@@ -596,25 +609,29 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
                 )
                 .premultiply();
                 let (ox, oy) = state.map_point(*x, *y);
+                let (ox, oy) = (ox.round() as i32, oy.round() as i32);
+                let scale = (*scale).max(1) as i32;
                 let width = pixmap.width() as i32;
                 let height = pixmap.height() as i32;
                 let pixels = pixmap.pixels_mut();
-                text::for_each_lit_pixel(
-                    font,
-                    string,
-                    ox.round() as i32,
-                    oy.round() as i32,
-                    |px, py| {
-                        if px >= 0
-                            && py >= 0
-                            && px < width
-                            && py < height
-                            && state.is_visible(px, py)
-                        {
-                            pixels[(py * width + px) as usize] = solid;
+                // Walked in the font's own pixels, so each one can be laid
+                // down as a `scale` x `scale` block.
+                text::for_each_lit_pixel(font, string, 0, 0, |gx, gy| {
+                    for dy in 0..scale {
+                        for dx in 0..scale {
+                            let px = ox + gx * scale + dx;
+                            let py = oy + gy * scale + dy;
+                            if px >= 0
+                                && py >= 0
+                                && px < width
+                                && py < height
+                                && state.is_visible(px, py)
+                            {
+                                pixels[(py * width + px) as usize] = solid;
+                            }
                         }
-                    },
-                );
+                    }
+                });
             }
         }
     }
@@ -889,6 +906,7 @@ mod tests {
                         y: 2.0,
                         text: "Hi".to_string(),
                         font: 0,
+                        scale: 1,
                         color: Color::Amber400,
                     },
                 ],
@@ -918,11 +936,41 @@ mod tests {
                     y: 2.0,
                     text: "Hi".to_string(),
                     font: 0,
+                    scale: 1,
                     color: Color::Amber400,
                 },
             ],
         );
         assert_eq!(lit_pixels(&pixmap, Color::Amber400), 0);
+    }
+
+    #[test]
+    fn scaled_text_lights_a_whole_block_per_font_pixel() {
+        // Bigger text is the same bitmap with bigger pixels, so tripling the
+        // scale lights exactly nine times as many.
+        let lit_at = |scale: u32| {
+            let mut pixmap = tiny_skia::Pixmap::new(256, 128).expect("test surface");
+            rasterize(
+                &mut pixmap,
+                &[
+                    DrawCommand::ClearScreen {
+                        color: Color::Slate900,
+                    },
+                    DrawCommand::DrawText {
+                        x: 2.0,
+                        y: 2.0,
+                        text: "Hi".to_string(),
+                        font: 0,
+                        scale,
+                        color: Color::Amber400,
+                    },
+                ],
+            );
+            lit_pixels(&pixmap, Color::Amber400)
+        };
+        let single = lit_at(1);
+        assert!(single > 0, "the text should have drawn something");
+        assert_eq!(lit_at(3), single * 9);
     }
 
     fn lit_pixels(pixmap: &tiny_skia::Pixmap, color: Color) -> usize {
