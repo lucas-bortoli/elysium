@@ -461,10 +461,15 @@ let frameScheduled = false;
 
 function frame() {
   frameScheduled = false;
-  resetStackDepths();
   insideDrawHandler = true;
   try {
-    for (const handler of [...drawHandlers.values()]) handler();
+    for (const handler of [...drawHandlers.values()]) {
+      try {
+        handler();
+      } finally {
+        balanceStacks();
+      }
+    }
   } finally {
     insideDrawHandler = false;
   }
@@ -687,12 +692,20 @@ export class UnbalancedStackError extends Error {
 let transformDepth = 0;
 let clipDepth = 0;
 
-// Reset at the top of every frame: a draw handler that throws part way
-// through leaves its stacks unbalanced, and the next frame starts from a
-// clean surface regardless, so its depth counters have to as well.
-function resetStackDepths(): void {
-  transformDepth = 0;
-  clipDepth = 0;
+// Closes whatever the handler that just ran left open. A handler can return
+// — or throw — without popping everything it pushed, and one frame is drawn
+// by every handler of every running program in turn, so anything left open
+// would go on confining or moving drawing that isn't the leaking program's
+// at all.
+function balanceStacks(): void {
+  while (clipDepth > 0) {
+    clipDepth--;
+    __framebuffer_pop_clip();
+  }
+  while (transformDepth > 0) {
+    transformDepth--;
+    __framebuffer_pop_transform();
+  }
 }
 
 /** Starts a new path, discarding whatever was being described before it.
