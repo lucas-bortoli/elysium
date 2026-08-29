@@ -21,12 +21,20 @@ on the Framebuffer is drawn with. Loading a PNG doesn't hand its colors to
 the screen unchanged: every pixel's color is snapped, once, to whichever
 palette shade is closest to it, the moment `loadImage` reads the file —
 never again after that, so drawing the same image every frame costs nothing
-extra for this. Transparency is untouched by this — only color is
-quantized, so a PNG's alpha channel comes through exactly as it was drawn.
-The practical effect is that a picture brought in from outside Elysium
-ends up looking like it was always drawn from the same palette every other
-program on the system uses, rather than introducing its own arbitrary
-colors.
+extra for this. Transparency is snapped at the same moment, to all or
+nothing: a pixel more than half transparent disappears entirely, and one
+less than half transparent becomes solid. So a picture never half-shows
+whatever sits behind it, and every pixel it does put on screen is an exact
+palette shade rather than a blend of one — the same hard-edged rule the
+rest of the Framebuffer draws by. The practical effect is that a picture
+brought in from outside Elysium ends up looking like it was always drawn
+from the same palette every other program on the system uses, rather than
+introducing its own arbitrary colors.
+
+A PNG that relies on soft, feathered edges will therefore come out with
+those edges made crisp. A picture meant for Elysium is best authored with
+hard-edged transparency to begin with, so what a program sees on screen is
+what it drew.
 
 `drawImage(image, x, y)` places `image`'s top-left corner at `(x, y)`, in
 the same logical coordinate space `fillRectangle` and the pointer both use,
