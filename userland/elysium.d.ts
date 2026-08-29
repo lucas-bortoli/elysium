@@ -544,6 +544,136 @@ declare module "ely:framebuffer" {
 
   /** Restores the region in effect before the matching `pushClip`. */
   export function popClip(): void;
+
+  /** Draws the outline of an axis-aligned rectangle at `(x, y)`. The
+   * outline straddles the rectangle's edge, so it doesn't cover exactly the
+   * pixels `fillRectangle` would. */
+  export function strokeRectangle(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    color: Color,
+    thickness?: number,
+  ): void;
+
+  /** Fills a rectangle at `(x, y)` whose corners are rounded off by
+   * `radius`, clamped to half the shorter side. */
+  export function fillRoundedRectangle(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    radius: number,
+    color: Color,
+  ): void;
+
+  /** Draws the outline of a rectangle at `(x, y)` with corners rounded off
+   * by `radius`. */
+  export function strokeRoundedRectangle(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    radius: number,
+    color: Color,
+    thickness?: number,
+  ): void;
+
+  /** Draws a straight line from `(x1, y1)` to `(x2, y2)`. A line straddles
+   * the coordinates it runs along, so run it down the middle of a pixel
+   * column — `x + 0.5` — for one crisp line. */
+  export function drawLine(
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    color: Color,
+    thickness?: number,
+  ): void;
+
+  /** Draws straight lines through `points` in order, leaving the two ends
+   * loose. Fewer than two points draws nothing. */
+  export function drawPolyline(
+    points: readonly import("ely:math").Vector2d[],
+    color: Color,
+    thickness?: number,
+  ): void;
+
+  /** Fills a circle of radius `r` centred on `(cx, cy)`. */
+  export function fillCircle(
+    cx: number,
+    cy: number,
+    r: number,
+    color: Color,
+  ): void;
+
+  /** Draws the outline of a circle of radius `r` centred on `(cx, cy)`. */
+  export function strokeCircle(
+    cx: number,
+    cy: number,
+    r: number,
+    color: Color,
+    thickness?: number,
+  ): void;
+
+  /** Fills an axis-aligned ellipse centred on `(cx, cy)`, reaching `rx` to
+   * either side and `ry` above and below. */
+  export function fillEllipse(
+    cx: number,
+    cy: number,
+    rx: number,
+    ry: number,
+    color: Color,
+  ): void;
+
+  /** Draws the outline of an axis-aligned ellipse centred on `(cx, cy)`. */
+  export function strokeEllipse(
+    cx: number,
+    cy: number,
+    rx: number,
+    ry: number,
+    color: Color,
+    thickness?: number,
+  ): void;
+
+  /** Draws the piece of a circle's rim running from `startRad` to `endRad`,
+   * in radians measured from `+x` and increasing clockwise on screen. The
+   * sweep follows which way round the two angles are named. */
+  export function drawArc(
+    cx: number,
+    cy: number,
+    r: number,
+    startRad: number,
+    endRad: number,
+    color: Color,
+    thickness?: number,
+  ): void;
+
+  /** Fills the triangle with corners `a`, `b` and `c`. */
+  export function fillTriangle(
+    a: import("ely:math").Vector2d,
+    b: import("ely:math").Vector2d,
+    c: import("ely:math").Vector2d,
+    color: Color,
+  ): void;
+
+  /** Fills the shape enclosed by `points`, joined in order and closed back
+   * to the first. Fewer than three points draws nothing. `rule` decides
+   * what counts as inside where the outline crosses itself. */
+  export function fillPolygon(
+    points: readonly import("ely:math").Vector2d[],
+    color: Color,
+    rule?: FillRule,
+  ): void;
+
+  /** Draws the outline of the shape enclosed by `points`, closed back to
+   * the first — unlike `drawPolyline`, which leaves its ends loose. */
+  export function strokePolygon(
+    points: readonly import("ely:math").Vector2d[],
+    color: Color,
+    thickness?: number,
+  ): void;
 }
 
 declare module "ely:math" {
