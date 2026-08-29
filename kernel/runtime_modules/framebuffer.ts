@@ -718,3 +718,214 @@ export function popClip(): void {
   clipDepth--;
   __framebuffer_pop_clip();
 }
+
+// The shapes below each describe a whole path of their own, so they all
+// start a new one and replace whatever was being built. They go through the
+// same fill and stroke the raw path calls do; nothing here is a special case
+// in the kernel.
+
+/** Draws the outline of an axis-aligned rectangle at `(x, y)`, `w` wide and
+ * `h` tall. The outline straddles the rectangle's edge, half its thickness
+ * to either side, so it doesn't cover exactly the same pixels `fillRectangle`
+ * would. */
+export function strokeRectangle(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  color: Color,
+  thickness: number = 1,
+): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_path_begin();
+  __framebuffer_path_rect(x, y, w, h);
+  __framebuffer_stroke_path(color, thickness, "butt", "miter");
+}
+
+/** Fills a rectangle at `(x, y)` whose corners are rounded off by `radius`,
+ * clamped to half the shorter side. */
+export function fillRoundedRectangle(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  radius: number,
+  color: Color,
+): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_path_begin();
+  __framebuffer_path_rounded_rect(x, y, w, h, radius);
+  __framebuffer_fill_path(color, "nonzero");
+}
+
+/** Draws the outline of a rectangle at `(x, y)` with corners rounded off by
+ * `radius`. */
+export function strokeRoundedRectangle(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  radius: number,
+  color: Color,
+  thickness: number = 1,
+): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_path_begin();
+  __framebuffer_path_rounded_rect(x, y, w, h, radius);
+  __framebuffer_stroke_path(color, thickness, "butt", "miter");
+}
+
+/** Draws a straight line from `(x1, y1)` to `(x2, y2)`.
+ *
+ * A line straddles the coordinates it runs along, so a thickness of 1 down a
+ * whole coordinate covers half of each neighbouring pixel column. Run it down
+ * the middle of a column — `x + 0.5` — for one crisp line. */
+export function drawLine(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  color: Color,
+  thickness: number = 1,
+): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_path_begin();
+  __framebuffer_path_move_to(x1, y1);
+  __framebuffer_path_line_to(x2, y2);
+  __framebuffer_stroke_path(color, thickness, "butt", "miter");
+}
+
+/** Draws straight lines through `points` in order, leaving the two ends
+ * loose. Fewer than two points draws nothing. */
+export function drawPolyline(
+  points: readonly Vector2d[],
+  color: Color,
+  thickness: number = 1,
+): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  if (points.length < 2) return;
+  tracePoints(points);
+  __framebuffer_stroke_path(color, thickness, "butt", "round");
+}
+
+/** Fills a circle of radius `r` centred on `(cx, cy)`. */
+export function fillCircle(
+  cx: number,
+  cy: number,
+  r: number,
+  color: Color,
+): void {
+  fillEllipse(cx, cy, r, r, color);
+}
+
+/** Draws the outline of a circle of radius `r` centred on `(cx, cy)`. The
+ * outline straddles the radius, half its thickness to either side. */
+export function strokeCircle(
+  cx: number,
+  cy: number,
+  r: number,
+  color: Color,
+  thickness: number = 1,
+): void {
+  strokeEllipse(cx, cy, r, r, color, thickness);
+}
+
+/** Fills an axis-aligned ellipse centred on `(cx, cy)`, reaching `rx` to
+ * either side and `ry` above and below. */
+export function fillEllipse(
+  cx: number,
+  cy: number,
+  rx: number,
+  ry: number,
+  color: Color,
+): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_path_begin();
+  __framebuffer_path_oval(cx, cy, rx, ry);
+  __framebuffer_fill_path(color, "nonzero");
+}
+
+/** Draws the outline of an axis-aligned ellipse centred on `(cx, cy)`. */
+export function strokeEllipse(
+  cx: number,
+  cy: number,
+  rx: number,
+  ry: number,
+  color: Color,
+  thickness: number = 1,
+): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_path_begin();
+  __framebuffer_path_oval(cx, cy, rx, ry);
+  __framebuffer_stroke_path(color, thickness, "butt", "miter");
+}
+
+/** Draws the piece of a circle's rim running from `startRad` to `endRad`,
+ * in radians measured from `+x` and increasing clockwise on screen. The
+ * sweep follows which way round the two angles are named, so naming them
+ * backwards sweeps the other way — which is how a meter winds down. */
+export function drawArc(
+  cx: number,
+  cy: number,
+  r: number,
+  startRad: number,
+  endRad: number,
+  color: Color,
+  thickness: number = 1,
+): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_path_begin();
+  __framebuffer_path_arc(cx, cy, r, startRad, endRad);
+  __framebuffer_stroke_path(color, thickness, "butt", "round");
+}
+
+/** Fills the triangle with corners `a`, `b` and `c`. */
+export function fillTriangle(
+  a: Vector2d,
+  b: Vector2d,
+  c: Vector2d,
+  color: Color,
+): void {
+  fillPolygon([a, b, c], color);
+}
+
+/** Fills the shape enclosed by `points`, joined in order and closed back to
+ * the first. Fewer than three points encloses nothing and draws nothing.
+ *
+ * The outline may cross over itself; `rule` decides what counts as inside
+ * where it does. */
+export function fillPolygon(
+  points: readonly Vector2d[],
+  color: Color,
+  rule: FillRule = "nonzero",
+): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  if (points.length < 3) return;
+  tracePoints(points);
+  __framebuffer_path_close();
+  __framebuffer_fill_path(color, rule);
+}
+
+/** Draws the outline of the shape enclosed by `points`, closed back to the
+ * first — unlike `drawPolyline`, which leaves its ends loose. */
+export function strokePolygon(
+  points: readonly Vector2d[],
+  color: Color,
+  thickness: number = 1,
+): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  if (points.length < 3) return;
+  tracePoints(points);
+  __framebuffer_path_close();
+  __framebuffer_stroke_path(color, thickness, "butt", "miter");
+}
+
+/** Starts a fresh path running through `points` in order, leaving it open
+ * for the caller to close, fill or stroke. */
+function tracePoints(points: readonly Vector2d[]): void {
+  __framebuffer_path_begin();
+  __framebuffer_path_move_to(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) {
+    __framebuffer_path_line_to(points[i].x, points[i].y);
+  }
+}

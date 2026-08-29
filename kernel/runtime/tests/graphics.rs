@@ -263,3 +263,79 @@ fn a_handler_that_leaves_its_stacks_unbalanced_starts_the_next_frame_clean() {
         "the second frame's clip stack should have started empty"
     );
 }
+
+#[test]
+fn every_shape_call_draws_inside_a_handler() {
+    // Each of these describes a whole path and hands it to the same fill or
+    // stroke the raw path calls use, so a wrong argument reaches the kernel
+    // as a bad fill rule, cap or join and throws.
+    let runtime = eval(
+        "import { addDrawHandler, Color, strokeRectangle, fillRoundedRectangle, \
+                   strokeRoundedRectangle, drawLine, drawPolyline, fillCircle, \
+                   strokeCircle, fillEllipse, strokeEllipse, drawArc, fillTriangle, \
+                   fillPolygon, strokePolygon } from 'ely:framebuffer'; \
+         globalThis.error = ''; \
+         const square = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }, { x: 0, y: 10 }]; \
+         addDrawHandler(() => { \
+             try { \
+                 strokeRectangle(1, 1, 20, 10, Color.Amber400); \
+                 fillRoundedRectangle(1, 1, 20, 10, 3, Color.Amber400); \
+                 strokeRoundedRectangle(1, 1, 20, 10, 3, Color.Amber400, 2); \
+                 drawLine(0, 0, 30, 30, Color.Teal300, 2); \
+                 drawPolyline(square, Color.Teal300, 2); \
+                 fillCircle(20, 20, 8, Color.Rose500); \
+                 strokeCircle(20, 20, 8, Color.Rose500, 2); \
+                 fillEllipse(20, 20, 10, 5, Color.Rose500); \
+                 strokeEllipse(20, 20, 10, 5, Color.Rose500, 2); \
+                 drawArc(20, 20, 10, 0, 1.5, Color.Amber400, 3); \
+                 fillTriangle(square[0], square[1], square[2], Color.Teal300); \
+                 fillPolygon(square, Color.Teal300, 'evenodd'); \
+                 strokePolygon(square, Color.Teal300, 2); \
+                 globalThis.error = 'none'; \
+             } catch (err) { globalThis.error = String(err); } \
+         });",
+    );
+    runtime.run_due_timers().unwrap();
+    assert_eq!(global::<String>(&runtime, "error"), "none");
+}
+
+#[test]
+fn a_polygon_or_polyline_too_short_to_enclose_anything_draws_nothing() {
+    let runtime = eval(
+        "import { addDrawHandler, Color, drawPolyline, fillPolygon, strokePolygon } \
+             from 'ely:framebuffer'; \
+         globalThis.error = ''; \
+         addDrawHandler(() => { \
+             try { \
+                 drawPolyline([], Color.Amber400); \
+                 drawPolyline([{ x: 1, y: 1 }], Color.Amber400); \
+                 fillPolygon([{ x: 1, y: 1 }, { x: 2, y: 2 }], Color.Amber400); \
+                 strokePolygon([], Color.Amber400); \
+                 globalThis.error = 'none'; \
+             } catch (err) { globalThis.error = String(err); } \
+         });",
+    );
+    runtime.run_due_timers().unwrap();
+    assert_eq!(global::<String>(&runtime, "error"), "none");
+}
+
+#[test]
+fn shape_calls_outside_a_handler_throw_draw_outside_handler_error() {
+    let runtime = eval(
+        "import { fillCircle, strokeRectangle, drawArc, fillPolygon, \
+                   DrawOutsideHandlerError } from 'ely:framebuffer'; \
+         globalThis.threw = []; \
+         for (const call of [ \
+             () => fillCircle(0, 0, 5, 0), \
+             () => strokeRectangle(0, 0, 5, 5, 0), \
+             () => drawArc(0, 0, 5, 0, 1, 0), \
+             () => fillPolygon([{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }], 0), \
+         ]) { \
+             try { call(); globalThis.threw.push(false); } \
+             catch (err) { globalThis.threw.push(err instanceof DrawOutsideHandlerError); } \
+         }",
+    );
+    let threw = global::<Vec<bool>>(&runtime, "threw");
+    assert_eq!(threw.len(), 4);
+    assert!(threw.iter().all(|&t| t));
+}
