@@ -18,6 +18,7 @@ use std::time::Instant;
 use framebuffer::Framebuffer;
 use input::Input;
 use process_manager::{GRACE, ProcessManager};
+use runtime::Devices;
 use window::ElysiumWindow;
 
 pub mod transform;
@@ -34,12 +35,13 @@ fn main() {
     let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
     let input = Rc::new(Input::new(Rc::clone(&scale)));
 
-    let mut manager = ProcessManager::new(
+    let devices = Devices::new(
         Rc::clone(&draw_commands),
         Rc::clone(&input),
         Rc::clone(&scale),
         userland_root,
     );
+    let mut manager = ProcessManager::new(devices);
 
     // The init process is spawned like any other — a fault in it drops it
     // and empties the table, no different from a fault in a child.

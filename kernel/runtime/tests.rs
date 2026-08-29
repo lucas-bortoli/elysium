@@ -12,7 +12,7 @@ use crate::framebuffer;
 use crate::input::Input;
 use crate::process::ProcessChannel;
 
-pub(super) use super::{ElysiumRuntime, GuardedError, remap_deadlock_error};
+pub(super) use super::{Devices, ElysiumRuntime, GuardedError, remap_deadlock_error};
 
 mod container;
 mod filesystem;
@@ -25,21 +25,18 @@ mod timers;
 
 /// Builds an `ElysiumRuntime` against `root` with a fresh scale cell and
 /// `Input`, detached from any process (id 0, a throwaway channel, no
-/// arguments). The one place the seven-argument `ElysiumRuntime::new` is
-/// spelled out.
+/// arguments).
 fn build_runtime(root: PathBuf) -> (ElysiumRuntime, Rc<Input>) {
     let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
     let input = Rc::new(Input::new(Rc::clone(&scale)));
-    let runtime = ElysiumRuntime::new(
+    let devices = Devices::new(
         Rc::new(RefCell::new(Vec::new())),
         Rc::clone(&input),
         scale,
         root,
-        0,
-        ProcessChannel::new(),
-        None,
-    )
-    .expect("failed to construct runtime");
+    );
+    let runtime = ElysiumRuntime::new(&devices, 0, ProcessChannel::new(), None)
+        .expect("failed to construct runtime");
     (runtime, input)
 }
 

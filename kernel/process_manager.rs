@@ -4,17 +4,12 @@
 //! is dropped without taking the kernel down; the kernel exits once the
 //! table is empty.
 
-use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::path::PathBuf;
-use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::filesystem;
-use crate::framebuffer::DrawCommand;
-use crate::input::Input;
 use crate::process::{Control, Envelope, ProcessChannel, ProcessId, SpawnRequest};
-use crate::runtime::{ElysiumRuntime, GuardedError};
+use crate::runtime::{Devices, ElysiumRuntime, GuardedError};
 
 /// How long a process has to wind itself down after `requestExit()` (or the
 /// window-close broadcast) before the kernel force-reaps it.
@@ -52,35 +47,15 @@ struct ProcessEntry {
 
 pub struct ProcessManager {
     entries: Vec<ProcessEntry>,
-    draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
-    input: Rc<Input>,
-    scale: Rc<Cell<u32>>,
-    userland_root: PathBuf,
+    devices: Devices,
     channel: ProcessChannel,
 }
 
 impl ProcessManager {
-    pub fn new(
-        draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
-        input: Rc<Input>,
-        scale: Rc<Cell<u32>>,
-        userland_root: PathBuf,
-    ) -> Self {
-        // Canonicalized once here so `resolve_program`'s sandbox walk (and
-        // every VM's, since each `ElysiumRuntime` canonicalizes its own
-        // copy too) starts from a real, symlink-free root.
-        let userland_root = std::fs::canonicalize(&userland_root).unwrap_or_else(|err| {
-            panic!(
-                "userland root {} is invalid: {err}",
-                userland_root.display()
-            )
-        });
+    pub fn new(devices: Devices) -> Self {
         Self {
             entries: Vec::new(),
-            draw_commands,
-            input,
-            scale,
-            userland_root,
+            devices,
             channel: ProcessChannel::new(),
         }
     }
@@ -280,16 +255,8 @@ impl ProcessManager {
         virtual_path: &str,
         arguments_json: Option<String>,
     ) -> Result<(), GuardedError> {
-        let runtime = ElysiumRuntime::new(
-            Rc::clone(&self.draw_commands),
-            Rc::clone(&self.input),
-            Rc::clone(&self.scale),
-            self.userland_root.clone(),
-            id,
-            self.channel.clone(),
-            arguments_json,
-        )
-        .map_err(|err| GuardedError::Exception(format!("runtime init failed: {err}")))?;
+        let runtime = ElysiumRuntime::new(&self.devices, id, self.channel.clone(), arguments_json)
+            .map_err(|err| GuardedError::Exception(format!("runtime init failed: {err}")))?;
 
         self.channel.register(id);
         self.entries.push(ProcessEntry {
@@ -311,7 +278,7 @@ impl ProcessManager {
     /// reach through a symlink. The real path is what `eval_module` needs as
     /// the module name so its relative imports and `import.meta` resolve.
     fn resolve_program(&self, virtual_path: &str) -> Result<(String, String), GuardedError> {
-        let resolved = filesystem::resolve_userland_path(&self.userland_root, virtual_path)
+        let resolved = filesystem::resolve_userland_path(&self.devices.userland_root, virtual_path)
             .map_err(|err| {
                 GuardedError::Exception(format!("cannot resolve program {virtual_path}: {err}"))
             })?;
@@ -394,10 +361,14 @@ impl ProcessManager {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::path::PathBuf;
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
     use crate::framebuffer::DEFAULT_SCALE;
+    use crate::input::Input;
 
     /// A private userland root seeded with `programs`, each entry a
     /// `(relative path, source)` pair written to disk.
@@ -418,7 +389,12 @@ mod tests {
     fn manager(root: PathBuf) -> ProcessManager {
         let scale = Rc::new(Cell::new(DEFAULT_SCALE));
         let input = Rc::new(Input::new(Rc::clone(&scale)));
-        ProcessManager::new(Rc::new(RefCell::new(Vec::new())), input, scale, root)
+        ProcessManager::new(Devices::new(
+            Rc::new(RefCell::new(Vec::new())),
+            input,
+            scale,
+            root,
+        ))
     }
 
     #[test]
