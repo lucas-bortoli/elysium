@@ -2,7 +2,7 @@
 // Colors are always one of `Color`'s named entries (the kernel's fixed
 // palette), never raw RGBA channels a program could get wrong.
 
-import type { Size2d } from "ely:math";
+import type { Size2d, Vector2d } from "ely:math";
 import type { DrawTickerId } from "ely:framebuffer";
 import type { Image, ImageId } from "ely:image";
 
@@ -36,6 +36,68 @@ declare function __framebuffer_nearest_color(
   b: number,
 ): Color;
 declare function __framebuffer_set_scale(scale: number): void;
+declare function __framebuffer_path_begin(): void;
+declare function __framebuffer_path_move_to(x: number, y: number): void;
+declare function __framebuffer_path_line_to(x: number, y: number): void;
+declare function __framebuffer_path_quad_to(
+  cx: number,
+  cy: number,
+  x: number,
+  y: number,
+): void;
+declare function __framebuffer_path_cubic_to(
+  c1x: number,
+  c1y: number,
+  c2x: number,
+  c2y: number,
+  x: number,
+  y: number,
+): void;
+declare function __framebuffer_path_close(): void;
+declare function __framebuffer_path_rect(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): void;
+declare function __framebuffer_path_oval(
+  cx: number,
+  cy: number,
+  rx: number,
+  ry: number,
+): void;
+declare function __framebuffer_path_rounded_rect(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  radius: number,
+): void;
+declare function __framebuffer_path_arc(
+  cx: number,
+  cy: number,
+  r: number,
+  start: number,
+  end: number,
+): void;
+declare function __framebuffer_fill_path(color: Color, rule: FillRule): void;
+declare function __framebuffer_stroke_path(
+  color: Color,
+  thickness: number,
+  cap: LineCap,
+  join: LineJoin,
+): void;
+declare function __framebuffer_push_transform(
+  sx: number,
+  ky: number,
+  kx: number,
+  sy: number,
+  tx: number,
+  ty: number,
+): void;
+declare function __framebuffer_pop_transform(): void;
+declare function __framebuffer_push_clip(rule: FillRule): void;
+declare function __framebuffer_pop_clip(): void;
 
 // The kernel's fixed, curated color palette. Every color a program can
 // draw with is one of these named entries — never a raw, unconstrained
@@ -352,7 +414,7 @@ export type Font = (typeof Font)[keyof typeof Font];
 export class DrawOutsideHandlerError extends Error {
   constructor() {
     super(
-      "clearScreen/fillRectangle/drawText/drawImage can only be called from inside a registered draw handler",
+      "drawing calls can only be made from inside a registered draw handler",
     );
     this.name = "DrawOutsideHandlerError";
   }
@@ -386,6 +448,7 @@ let frameScheduled = false;
 
 function frame() {
   frameScheduled = false;
+  resetStackDepths();
   insideDrawHandler = true;
   try {
     for (const handler of [...drawHandlers.values()]) handler();
@@ -475,4 +538,183 @@ export function nearestColor(r: number, g: number, b: number): Color {
  * from inside a draw handler. */
 export function setScale(scale: number): void {
   __framebuffer_set_scale(scale);
+}
+
+/** How a path decides which of its regions count as inside, where its
+ * outline crosses over itself. `"nonzero"` counts a region inside when the
+ * outline winds around it at all; `"evenodd"` alternates, so a shape drawn
+ * inside another punches a hole in it. */
+export type FillRule = "nonzero" | "evenodd";
+
+/** How a stroke finishes at the two loose ends of an open path. */
+export type LineCap = "butt" | "round" | "square";
+
+/** How a stroke turns a corner where two segments meet. */
+export type LineJoin = "miter" | "round" | "bevel";
+
+export class UnbalancedStackError extends Error {
+  constructor(what: string) {
+    super(`popped ${what} that was never pushed`);
+    this.name = "UnbalancedStackError";
+  }
+}
+
+let transformDepth = 0;
+let clipDepth = 0;
+
+// Reset at the top of every frame: a draw handler that throws part way
+// through leaves its stacks unbalanced, and the next frame starts from a
+// clean surface regardless, so its depth counters have to as well.
+function resetStackDepths(): void {
+  transformDepth = 0;
+  clipDepth = 0;
+}
+
+/** Starts a new path, discarding whatever was being described before it.
+ *
+ * There is one path under construction at a time. The shape calls that
+ * describe a whole path of their own — `fillCircle`, `pushClip` and the
+ * rest — each start a new one, so they replace a path in progress rather
+ * than adding to it. */
+export function beginPath(): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_path_begin();
+}
+
+/** Starts a new contour of the current path at `(x, y)`, without drawing
+ * anything on the way there. */
+export function moveTo(x: number, y: number): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_path_move_to(x, y);
+}
+
+/** Extends the current path with a straight segment to `(x, y)`. */
+export function lineTo(x: number, y: number): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_path_line_to(x, y);
+}
+
+/** Extends the current path with a curve to `(x, y)` that bends toward the
+ * single control point `(cx, cy)` without passing through it. */
+export function quadraticTo(
+  cx: number,
+  cy: number,
+  x: number,
+  y: number,
+): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_path_quad_to(cx, cy, x, y);
+}
+
+/** Extends the current path with a curve to `(x, y)` that leaves along
+ * `(c1x, c1y)` and arrives along `(c2x, c2y)` — the two-control-point curve
+ * that can bend in an S. */
+export function cubicTo(
+  c1x: number,
+  c1y: number,
+  c2x: number,
+  c2y: number,
+  x: number,
+  y: number,
+): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_path_cubic_to(c1x, c1y, c2x, c2y, x, y);
+}
+
+/** Closes the current contour with a straight segment back to where it
+ * started. A path is filled as though every contour were closed, so this
+ * matters to `strokePath`, which would otherwise leave the loop open. */
+export function closePath(): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_path_close();
+}
+
+/** Fills the inside of the current path with `color`. Leaves the path in
+ * place, so it can be stroked afterwards without describing it again. */
+export function fillPath(color: Color, rule: FillRule = "nonzero"): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_fill_path(color, rule);
+}
+
+/** Draws a line of `thickness` along the current path in `color`. The line
+ * straddles the path, half its thickness to either side. Leaves the path in
+ * place. */
+export function strokePath(
+  color: Color,
+  thickness: number = 1,
+  cap: LineCap = "butt",
+  join: LineJoin = "miter",
+): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_stroke_path(color, thickness, cap, join);
+}
+
+/** How `pushTransform` should move the coordinate space. Applied in the
+ * order written: a shape is scaled, then rotated, then shifted. */
+export interface Transform {
+  /** Shifts by this much, in the coordinates outside the transform. */
+  translate?: Vector2d;
+  /** Scales about the origin. A single number scales both axes alike. */
+  scale?: Vector2d | number;
+  /** Turns about the origin, in radians — clockwise on screen, since `y`
+   * grows downward. */
+  rotate?: number;
+}
+
+/** Moves the coordinate space everything drawn afterwards is placed in,
+ * until the matching `popTransform`. Transforms nest: pushing a second one
+ * applies inside the first rather than replacing it. */
+export function pushTransform(transform: Transform): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  const { translate, scale, rotate = 0 } = transform;
+  const sx = typeof scale === "number" ? scale : (scale?.x ?? 1);
+  const sy = typeof scale === "number" ? scale : (scale?.y ?? 1);
+  const cos = Math.cos(rotate);
+  const sin = Math.sin(rotate);
+  transformDepth++;
+  // The 2x3 matrix for shift * turn * scale, column by column.
+  __framebuffer_push_transform(
+    cos * sx,
+    sin * sx,
+    -sin * sy,
+    cos * sy,
+    translate?.x ?? 0,
+    translate?.y ?? 0,
+  );
+}
+
+/** Restores the coordinate space in effect before the matching
+ * `pushTransform`. */
+export function popTransform(): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  if (transformDepth === 0) throw new UnbalancedStackError("a transform");
+  transformDepth--;
+  __framebuffer_pop_transform();
+}
+
+/** Confines everything drawn afterwards to the rectangle at `(x, y)`, until
+ * the matching `popClip`. Clips nest by narrowing: drawing can never escape
+ * a region an enclosing clip already confined it to. Starts a new path. */
+export function pushClip(x: number, y: number, w: number, h: number): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_path_begin();
+  __framebuffer_path_rect(x, y, w, h);
+  clipDepth++;
+  __framebuffer_push_clip("nonzero");
+}
+
+/** Confines everything drawn afterwards to the inside of the current path,
+ * until the matching `popClip` — the arbitrary-shape form of `pushClip`. */
+export function pushClipPath(rule: FillRule = "nonzero"): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  clipDepth++;
+  __framebuffer_push_clip(rule);
+}
+
+/** Restores the region in effect before the matching `pushClip`. */
+export function popClip(): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  if (clipDepth === 0) throw new UnbalancedStackError("a clip");
+  clipDepth--;
+  __framebuffer_pop_clip();
 }

@@ -23,7 +23,11 @@ use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 mod colors;
+mod paths;
+mod state;
 pub use colors::Color;
+
+use state::DrawState;
 
 use crate::text;
 
@@ -61,6 +65,35 @@ pub enum DrawCommand {
         font: text::FontId,
         color: Color,
     },
+    /// Fills the inside of a path — the shape behind every filled circle,
+    /// polygon, rounded rectangle and arc a program can draw. The path is
+    /// built at the binding boundary, so an unfinishable one never becomes
+    /// a command at all.
+    FillPath {
+        path: tiny_skia::Path,
+        rule: tiny_skia::FillRule,
+        color: Color,
+    },
+    /// Draws a line along a path, straddling it with the stroke's own
+    /// width — the shape behind every outline.
+    StrokePath {
+        path: tiny_skia::Path,
+        stroke: tiny_skia::Stroke,
+        color: Color,
+    },
+    /// Nests a transform inside whatever is already in effect, until the
+    /// matching `PopTransform`. See `state.rs` for how the two stacks nest.
+    PushTransform {
+        transform: tiny_skia::Transform,
+    },
+    PopTransform,
+    /// Narrows the region drawing is confined to, until the matching
+    /// `PopClip`. `None` confines it to nothing.
+    PushClip {
+        path: Option<tiny_skia::Path>,
+        rule: tiny_skia::FillRule,
+    },
+    PopClip,
 }
 
 /// Binds the *hidden* globals `ely:framebuffer`'s embedded module wraps
@@ -77,6 +110,41 @@ pub fn bootstrap_framebuffer_bindings(
     images: Rc<crate::image::ImageTable>,
 ) -> Result<()> {
     let global = ctx.globals();
+
+    paths::bootstrap_path_bindings(
+        ctx,
+        Rc::clone(&draw_commands),
+        Rc::new(RefCell::new(tiny_skia::PathBuilder::new())),
+    )?;
+
+    {
+        let draw_commands = Rc::clone(&draw_commands);
+        global.set(
+            "__framebuffer_push_transform",
+            Function::new(
+                ctx.clone(),
+                // The six numbers of a 2x3 matrix, composed on the JS side
+                // from whatever mix of shift, scale and rotation a program
+                // asked for.
+                move |sx: f32, ky: f32, kx: f32, sy: f32, tx: f32, ty: f32| {
+                    let transform = tiny_skia::Transform::from_row(sx, ky, kx, sy, tx, ty);
+                    draw_commands
+                        .borrow_mut()
+                        .push(DrawCommand::PushTransform { transform })
+                },
+            )?,
+        )?;
+    }
+
+    {
+        let draw_commands = Rc::clone(&draw_commands);
+        global.set(
+            "__framebuffer_pop_transform",
+            Function::new(ctx.clone(), move || {
+                draw_commands.borrow_mut().push(DrawCommand::PopTransform)
+            })?,
+        )?;
+    }
 
     {
         let draw_commands = Rc::clone(&draw_commands);
@@ -297,113 +365,17 @@ impl Framebuffer {
         }
     }
 
-    /// Rasterizes one frame's worth of accumulated [`DrawCommand`]s onto
-    /// the logical `Pixmap` and presents it. Clearing is opt-in: a frame
-    /// with no `ClearScreen` command leaves the pixmap exactly as the
-    /// previous frame left it, rather than forcing a clear every frame —
-    /// so a program that never calls `clearScreen` sees each frame's
-    /// drawing accumulate rather than get erased first. The last
-    /// `ClearScreen` in `commands` wins, applied before any
-    /// `FillRectangle`/`DrawImage`, regardless of where in the command list
-    /// it falls. A `DrawImage` known to be fully opaque is copied straight
-    /// in (`BlendMode::Source`); one with any transparency composites with
-    /// `tiny_skia`'s default source-over blending. Either way the
-    /// destination stays fully opaque, keeping `present`'s "every frame is
-    /// fully opaque" assumption true without `present` needing to know
-    /// images exist.
+    /// Draws one frame's worth of accumulated [`DrawCommand`]s and presents
+    /// it. All the drawing itself happens in [`rasterize`]; what's left here
+    /// is picking up a scale a program asked for since the last frame, and
+    /// getting the finished pixels in front of the viewer.
     pub fn render(&mut self, commands: &[DrawCommand]) {
         let requested_scale = self.scale.get();
         if requested_scale != self.applied_scale {
             self.apply_scale(requested_scale);
         }
 
-        if let Some(color) = commands.iter().rev().find_map(|c| match c {
-            DrawCommand::ClearScreen { color } => Some(*color),
-            _ => None,
-        }) {
-            self.pixmap.fill(color.to_skia());
-        }
-
-        // anti_alias: false — rectangle edges are hard, pixel-aligned, no
-        // MSAA.
-        let mut paint = tiny_skia::Paint {
-            anti_alias: false,
-            ..Default::default()
-        };
-        let blend_paint = tiny_skia::PixmapPaint::default();
-        // An opaque image has nothing to composite, so copy its pixels
-        // straight in rather than running `source-over` per pixel.
-        let copy_paint = tiny_skia::PixmapPaint {
-            blend_mode: tiny_skia::BlendMode::Source,
-            ..tiny_skia::PixmapPaint::default()
-        };
-
-        for command in commands {
-            match command {
-                DrawCommand::ClearScreen { .. } => {}
-                DrawCommand::FillRectangle { x, y, w, h, color } => {
-                    let Some(rect) = tiny_skia::Rect::from_xywh(*x, *y, *w, *h) else {
-                        continue; // degenerate (zero/negative/non-finite) size
-                    };
-                    paint.set_color(color.to_skia());
-                    self.pixmap
-                        .fill_rect(rect, &paint, tiny_skia::Transform::identity(), None);
-                }
-                DrawCommand::DrawImage {
-                    pixmap,
-                    opaque,
-                    x,
-                    y,
-                } => {
-                    self.pixmap.draw_pixmap(
-                        x.round() as i32,
-                        y.round() as i32,
-                        (**pixmap).as_ref(),
-                        if *opaque { &copy_paint } else { &blend_paint },
-                        tiny_skia::Transform::identity(),
-                        None,
-                    );
-                }
-                DrawCommand::DrawText {
-                    x,
-                    y,
-                    text: string,
-                    font,
-                    color,
-                } => {
-                    let Some(font) = text::font_from_id(*font) else {
-                        continue; // font id validated at the binding, but stay total
-                    };
-                    // Every lit pixel is one fully opaque palette color
-                    // written straight into the pixmap — no per-glyph
-                    // `fill_rect`, and the destination stays opaque, so
-                    // `present`'s "every frame is opaque" assumption holds.
-                    let hex = color.hex();
-                    let solid = tiny_skia::ColorU8::from_rgba(
-                        ((hex >> 16) & 0xff) as u8,
-                        ((hex >> 8) & 0xff) as u8,
-                        (hex & 0xff) as u8,
-                        255,
-                    )
-                    .premultiply();
-                    let width = self.pixmap.width() as i32;
-                    let height = self.pixmap.height() as i32;
-                    let pixels = self.pixmap.pixels_mut();
-                    text::for_each_lit_pixel(
-                        font,
-                        string,
-                        x.round() as i32,
-                        y.round() as i32,
-                        |px, py| {
-                            if px >= 0 && py >= 0 && px < width && py < height {
-                                pixels[(py * width + px) as usize] = solid;
-                            }
-                        },
-                    );
-                }
-            }
-        }
-
+        rasterize(&mut self.pixmap, commands);
         self.present();
     }
 
@@ -468,5 +440,389 @@ impl Framebuffer {
         }
 
         buffer.present().expect("failed to present the frame");
+    }
+}
+
+/// Draws `commands` onto `pixmap`, in order.
+///
+/// Clearing is opt-in: a frame with no `ClearScreen` command leaves the
+/// pixmap exactly as the previous frame left it, so a program that never
+/// calls `clearScreen` sees each frame's drawing accumulate. The last
+/// `ClearScreen` in `commands` wins, applied before any drawing, regardless
+/// of where in the list it falls.
+///
+/// Nothing here anti-aliases. Every pixel written is one whole palette
+/// color, never a blend of one with what was underneath, which is what lets
+/// a program rely on the screen only ever holding colors it could have
+/// named. Images are the one thing that composites at all, and their
+/// transparency was already snapped to all-or-nothing when they were loaded;
+/// one known fully opaque is copied straight in.
+///
+/// Separate from [`Framebuffer::render`] so that a frame can be drawn onto
+/// any pixmap, with no window and no presentation — which is how the palette
+/// promise above is tested.
+pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
+    if let Some(color) = commands.iter().rev().find_map(|c| match c {
+        DrawCommand::ClearScreen { color } => Some(*color),
+        _ => None,
+    }) {
+        pixmap.fill(color.to_skia());
+    }
+
+    let mut paint = tiny_skia::Paint {
+        anti_alias: false,
+        ..Default::default()
+    };
+    let blend_paint = tiny_skia::PixmapPaint::default();
+    // An opaque image has nothing to composite, so copy its pixels straight
+    // in rather than running `source-over` per pixel.
+    let copy_paint = tiny_skia::PixmapPaint {
+        blend_mode: tiny_skia::BlendMode::Source,
+        ..tiny_skia::PixmapPaint::default()
+    };
+
+    let mut state = DrawState::new(pixmap.width(), pixmap.height());
+
+    for command in commands {
+        match command {
+            DrawCommand::ClearScreen { .. } => {}
+            DrawCommand::FillRectangle { x, y, w, h, color } => {
+                let Some(rect) = tiny_skia::Rect::from_xywh(*x, *y, *w, *h) else {
+                    continue; // negative or non-finite size
+                };
+                paint.set_color(color.to_skia());
+                pixmap.fill_rect(rect, &paint, state.transform(), state.clip());
+            }
+            DrawCommand::FillPath { path, rule, color } => {
+                paint.set_color(color.to_skia());
+                pixmap.fill_path(path, &paint, *rule, state.transform(), state.clip());
+            }
+            DrawCommand::StrokePath {
+                path,
+                stroke,
+                color,
+            } => {
+                paint.set_color(color.to_skia());
+                pixmap.stroke_path(path, &paint, stroke, state.transform(), state.clip());
+            }
+            DrawCommand::PushTransform { transform } => state.push_transform(*transform),
+            DrawCommand::PopTransform => state.pop_transform(),
+            DrawCommand::PushClip { path, rule } => state.push_clip(path.as_ref(), *rule),
+            DrawCommand::PopClip => state.pop_clip(),
+            DrawCommand::DrawImage {
+                pixmap: image,
+                opaque,
+                x,
+                y,
+            } => {
+                // draw_pixmap places by whole pixels, so the transform's
+                // shift has to be folded into the position itself.
+                let (dx, dy) = state.map_point(*x, *y);
+                pixmap.draw_pixmap(
+                    dx.round() as i32,
+                    dy.round() as i32,
+                    (**image).as_ref(),
+                    if *opaque { &copy_paint } else { &blend_paint },
+                    tiny_skia::Transform::identity(),
+                    state.clip(),
+                );
+            }
+            DrawCommand::DrawText {
+                x,
+                y,
+                text: string,
+                font,
+                color,
+            } => {
+                let Some(font) = text::font_from_id(*font) else {
+                    continue; // font id validated at the binding, but stay total
+                };
+                // Every lit pixel is one fully opaque palette color written
+                // straight into the pixmap — no per-glyph `fill_rect`. Where
+                // the text sits moves with the transform, but the glyphs
+                // themselves are never turned or resized: they come from
+                // fixed bitmaps and stay upright and pixel-crisp.
+                let hex = color.hex();
+                let solid = tiny_skia::ColorU8::from_rgba(
+                    ((hex >> 16) & 0xff) as u8,
+                    ((hex >> 8) & 0xff) as u8,
+                    (hex & 0xff) as u8,
+                    255,
+                )
+                .premultiply();
+                let (ox, oy) = state.map_point(*x, *y);
+                let width = pixmap.width() as i32;
+                let height = pixmap.height() as i32;
+                let pixels = pixmap.pixels_mut();
+                text::for_each_lit_pixel(
+                    font,
+                    string,
+                    ox.round() as i32,
+                    oy.round() as i32,
+                    |px, py| {
+                        if px >= 0
+                            && py >= 0
+                            && px < width
+                            && py < height
+                            && state.is_visible(px, py)
+                        {
+                            pixels[(py * width + px) as usize] = solid;
+                        }
+                    },
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Color, DrawCommand, rasterize};
+
+    fn surface() -> tiny_skia::Pixmap {
+        tiny_skia::Pixmap::new(64, 64).expect("failed to allocate a test surface")
+    }
+
+    /// The color at `(x, y)` as `0xRRGGBB`, the same packing `Color::hex`
+    /// uses.
+    fn pixel_at(pixmap: &tiny_skia::Pixmap, x: u32, y: u32) -> u32 {
+        let p = pixmap.pixels()[(y * pixmap.width() + x) as usize].demultiply();
+        ((p.red() as u32) << 16) | ((p.green() as u32) << 8) | p.blue() as u32
+    }
+
+    fn circle(cx: f32, cy: f32, r: f32) -> tiny_skia::Path {
+        let mut builder = tiny_skia::PathBuilder::new();
+        builder.push_circle(cx, cy, r);
+        builder.finish().expect("a circle should be finishable")
+    }
+
+    fn rect_path(x: f32, y: f32, w: f32, h: f32) -> tiny_skia::Path {
+        tiny_skia::PathBuilder::from_rect(
+            tiny_skia::Rect::from_xywh(x, y, w, h).expect("valid rect"),
+        )
+    }
+
+    fn fill(path: tiny_skia::Path, color: Color) -> DrawCommand {
+        DrawCommand::FillPath {
+            path,
+            rule: tiny_skia::FillRule::Winding,
+            color,
+        }
+    }
+
+    #[test]
+    fn every_pixel_a_frame_leaves_behind_is_a_palette_color() {
+        // The promise the whole device rests on: a program can only name
+        // palette colors, so the screen can only ever hold palette colors.
+        // Curves and outlines are where that would break if anything
+        // anti-aliased or blended, so this draws the shapes most likely to.
+        let mut pixmap = surface();
+        rasterize(
+            &mut pixmap,
+            &[
+                DrawCommand::ClearScreen {
+                    color: Color::Slate900,
+                },
+                fill(circle(20.0, 20.0, 15.0), Color::Amber400),
+                DrawCommand::StrokePath {
+                    path: circle(40.0, 40.0, 18.0),
+                    stroke: tiny_skia::Stroke {
+                        width: 3.0,
+                        ..Default::default()
+                    },
+                    color: Color::Teal300,
+                },
+                DrawCommand::StrokePath {
+                    path: rect_path(4.0, 44.0, 25.0, 15.0),
+                    stroke: tiny_skia::Stroke {
+                        width: 1.0,
+                        ..Default::default()
+                    },
+                    color: Color::Rose500,
+                },
+            ],
+        );
+
+        for y in 0..pixmap.height() {
+            for x in 0..pixmap.width() {
+                let found = pixel_at(&pixmap, x, y);
+                let nearest = Color::nearest(
+                    ((found >> 16) & 0xff) as u8,
+                    ((found >> 8) & 0xff) as u8,
+                    (found & 0xff) as u8,
+                );
+                assert_eq!(
+                    found,
+                    nearest.hex(),
+                    "pixel at ({x}, {y}) is {found:#08x}, which is not a palette color"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_filled_path_paints_the_color_it_was_given() {
+        let mut pixmap = surface();
+        rasterize(
+            &mut pixmap,
+            &[
+                DrawCommand::ClearScreen {
+                    color: Color::Slate900,
+                },
+                fill(circle(32.0, 32.0, 20.0), Color::Amber400),
+            ],
+        );
+        assert_eq!(pixel_at(&pixmap, 32, 32), Color::Amber400.hex());
+        assert_eq!(pixel_at(&pixmap, 0, 0), Color::Slate900.hex());
+    }
+
+    #[test]
+    fn a_clip_confines_what_is_drawn_under_it() {
+        let mut pixmap = surface();
+        rasterize(
+            &mut pixmap,
+            &[
+                DrawCommand::ClearScreen {
+                    color: Color::Slate900,
+                },
+                DrawCommand::PushClip {
+                    path: Some(rect_path(0.0, 0.0, 32.0, 64.0)),
+                    rule: tiny_skia::FillRule::Winding,
+                },
+                fill(rect_path(0.0, 0.0, 64.0, 64.0), Color::Amber400),
+                DrawCommand::PopClip,
+            ],
+        );
+        assert_eq!(pixel_at(&pixmap, 10, 10), Color::Amber400.hex());
+        assert_eq!(pixel_at(&pixmap, 50, 10), Color::Slate900.hex());
+    }
+
+    #[test]
+    fn drawing_after_a_clip_is_popped_is_unconfined_again() {
+        let mut pixmap = surface();
+        rasterize(
+            &mut pixmap,
+            &[
+                DrawCommand::ClearScreen {
+                    color: Color::Slate900,
+                },
+                DrawCommand::PushClip {
+                    path: Some(rect_path(0.0, 0.0, 32.0, 64.0)),
+                    rule: tiny_skia::FillRule::Winding,
+                },
+                DrawCommand::PopClip,
+                fill(rect_path(0.0, 0.0, 64.0, 64.0), Color::Amber400),
+            ],
+        );
+        assert_eq!(pixel_at(&pixmap, 50, 10), Color::Amber400.hex());
+    }
+
+    #[test]
+    fn a_transform_moves_what_is_drawn_under_it() {
+        let mut pixmap = surface();
+        rasterize(
+            &mut pixmap,
+            &[
+                DrawCommand::ClearScreen {
+                    color: Color::Slate900,
+                },
+                DrawCommand::PushTransform {
+                    transform: tiny_skia::Transform::from_translate(40.0, 0.0),
+                },
+                fill(rect_path(0.0, 0.0, 10.0, 10.0), Color::Amber400),
+                DrawCommand::PopTransform,
+                // The same rectangle again, now that the shift is popped.
+                fill(rect_path(0.0, 20.0, 10.0, 10.0), Color::Teal300),
+            ],
+        );
+        assert_eq!(pixel_at(&pixmap, 45, 5), Color::Amber400.hex());
+        assert_eq!(pixel_at(&pixmap, 5, 5), Color::Slate900.hex());
+        assert_eq!(pixel_at(&pixmap, 5, 25), Color::Teal300.hex());
+    }
+
+    #[test]
+    fn a_rectangle_fill_lands_on_exactly_the_pixels_its_corners_name() {
+        // Coordinates name the corners of the pixel grid, so a rectangle at
+        // (10, 10) sized 5x5 covers pixels 10 through 14 and no others.
+        let mut pixmap = surface();
+        rasterize(
+            &mut pixmap,
+            &[
+                DrawCommand::ClearScreen {
+                    color: Color::Slate900,
+                },
+                DrawCommand::FillRectangle {
+                    x: 10.0,
+                    y: 10.0,
+                    w: 5.0,
+                    h: 5.0,
+                    color: Color::Amber400,
+                },
+            ],
+        );
+        assert_eq!(pixel_at(&pixmap, 10, 10), Color::Amber400.hex());
+        assert_eq!(pixel_at(&pixmap, 14, 14), Color::Amber400.hex());
+        assert_eq!(pixel_at(&pixmap, 15, 14), Color::Slate900.hex());
+        assert_eq!(pixel_at(&pixmap, 9, 10), Color::Slate900.hex());
+    }
+
+    #[test]
+    fn text_is_confined_by_a_clip_and_moved_by_a_transform() {
+        // Text writes pixels directly instead of going through the
+        // rasterizer, so it has to honour both stacks by itself.
+        let unclipped = {
+            let mut pixmap = surface();
+            rasterize(
+                &mut pixmap,
+                &[
+                    DrawCommand::ClearScreen {
+                        color: Color::Slate900,
+                    },
+                    DrawCommand::DrawText {
+                        x: 30.0,
+                        y: 2.0,
+                        text: "Hi".to_string(),
+                        font: 0,
+                        color: Color::Amber400,
+                    },
+                ],
+            );
+            lit_pixels(&pixmap, Color::Amber400)
+        };
+        assert!(unclipped > 0, "the text should have drawn something");
+
+        // Shifted right by 30 from the same origin, it starts past the clip
+        // and none of it survives.
+        let mut pixmap = surface();
+        rasterize(
+            &mut pixmap,
+            &[
+                DrawCommand::ClearScreen {
+                    color: Color::Slate900,
+                },
+                DrawCommand::PushClip {
+                    path: Some(rect_path(0.0, 0.0, 30.0, 64.0)),
+                    rule: tiny_skia::FillRule::Winding,
+                },
+                DrawCommand::PushTransform {
+                    transform: tiny_skia::Transform::from_translate(30.0, 0.0),
+                },
+                DrawCommand::DrawText {
+                    x: 30.0,
+                    y: 2.0,
+                    text: "Hi".to_string(),
+                    font: 0,
+                    color: Color::Amber400,
+                },
+            ],
+        );
+        assert_eq!(lit_pixels(&pixmap, Color::Amber400), 0);
+    }
+
+    fn lit_pixels(pixmap: &tiny_skia::Pixmap, color: Color) -> usize {
+        (0..pixmap.height())
+            .flat_map(|y| (0..pixmap.width()).map(move |x| (x, y)))
+            .filter(|&(x, y)| pixel_at(pixmap, x, y) == color.hex())
+            .count()
     }
 }
