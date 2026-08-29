@@ -1450,6 +1450,13 @@ declare module "ely:process" {
     constructor(id: number);
   }
 
+  /** Whether `target` is still running. The only way to notice a process
+   * ending, since a process is not told when another one goes. Sending it a
+   * message to find out is worse than useless — a message delivered to a
+   * process with no message handler sits in its mailbox and keeps it alive
+   * indefinitely. */
+  export function isLive(target: ProcessHandle): boolean;
+
   /** This process's own id. */
   export function currentProcessId(): ProcessHandle;
 
