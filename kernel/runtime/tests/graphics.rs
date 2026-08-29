@@ -449,3 +449,25 @@ fn a_text_scale_that_is_not_a_whole_number_of_at_least_one_throws() {
         vec![true, true, true]
     );
 }
+
+#[test]
+fn a_handler_that_leaves_a_clip_pushed_does_not_confine_the_next_one() {
+    // Every running program's handlers draw into one frame in turn, so a
+    // clip one of them leaves open would go on confining drawing that isn't
+    // its own.
+    let runtime = eval(
+        "import { addDrawHandler, pushClip, popClip, UnbalancedStackError } \
+             from 'ely:framebuffer'; \
+         globalThis.leakedIn = false; \
+         addDrawHandler(() => { pushClip(0, 0, 10, 10); }); \
+         addDrawHandler(() => { \
+             try { popClip(); } \
+             catch (err) { globalThis.leakedIn = !(err instanceof UnbalancedStackError); } \
+         });",
+    );
+    runtime.run_due_timers().unwrap();
+    assert!(
+        !global::<bool>(&runtime, "leakedIn"),
+        "the second handler should have started with an empty clip stack"
+    );
+}
