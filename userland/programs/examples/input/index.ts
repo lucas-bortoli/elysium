@@ -38,15 +38,26 @@ import {
 } from "ely:input";
 import { addUpdateTicker } from "ely:lifecycle";
 
+/** One key drawn as a cap on the little keyboard below. */
+interface WatchedKey {
+  key: Key;
+  label: string;
+  /** Position on the keyboard, in cap widths from its top-left. */
+  x: number;
+  y: number;
+  /** Drawn double width, for the one key that is. */
+  wide?: boolean;
+}
+
 /** The keys drawn as a little keyboard, so there is something to hold down
  * and something to tap. Escape is deliberately not among them. */
-const WATCHED = [
+const WATCHED: WatchedKey[] = [
   { key: Key.KeyW, label: "W", x: 1, y: 0 },
   { key: Key.KeyA, label: "A", x: 0, y: 1 },
   { key: Key.KeyS, label: "S", x: 1, y: 1 },
   { key: Key.KeyD, label: "D", x: 2, y: 1 },
   { key: Key.Space, label: "Space", x: 3.4, y: 1, wide: true },
-] as const;
+];
 
 const trail: Vector2d[] = [];
 let scrolled = 0;

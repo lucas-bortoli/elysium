@@ -40,13 +40,13 @@ addDrawHandler(() => {
   const pointer = getPointerPosition();
   let hovered = "";
 
-  for (let family = 0; family < FAMILIES.length; family++) {
+  for (const [family, name] of FAMILIES.entries()) {
     const y = GRID_Y + family * CELL_H;
-    drawText(GRID_X - 6, y + 1, FAMILIES[family], Color.Slate500, {
+    drawText(GRID_X - 6, y + 1, name, Color.Slate500, {
       align: "right",
     });
 
-    for (let shade = 0; shade < SHADES.length; shade++) {
+    for (const [shade, level] of SHADES.entries()) {
       const x = GRID_X + shade * CELL_W;
       // Ids run family by family, eleven shades each, in this same order —
       // so the id is just the position in the grid.
@@ -59,7 +59,7 @@ addDrawHandler(() => {
         pointer.y >= y &&
         pointer.y < y + CELL_H - 1
       ) {
-        hovered = `Color.${FAMILIES[family]}${SHADES[shade]}`;
+        hovered = `Color.${name}${level}`;
         strokeRectangle(x - 1, y - 1, CELL_W + 1, CELL_H + 1, Color.White, 1);
       }
     }
