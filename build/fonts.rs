@@ -151,7 +151,10 @@ fn parse_bdf(spec: &FontSpec, src: &str) -> ParsedFont {
             "FONT_DESCENT" => font_descent = it.next().and_then(|v| v.parse().ok()),
             "FONTBOUNDINGBOX" => {
                 let n: Vec<i32> = it.filter_map(|v| v.parse().ok()).collect();
-                assert!(n.len() == 4, "font {name}: malformed FONTBOUNDINGBOX: {line:?}");
+                assert!(
+                    n.len() == 4,
+                    "font {name}: malformed FONTBOUNDINGBOX: {line:?}"
+                );
                 bbox_w = Some(n[0]);
                 bbox_h = Some(n[1]);
                 bbox_yoff = Some(n[3]);
@@ -180,8 +183,8 @@ fn parse_bdf(spec: &FontSpec, src: &str) -> ParsedFont {
                 let rows = std::mem::take(&mut bitmap);
 
                 if encoding >= 0 && wanted(spec, encoding as u32) {
-                    let (w, h, x_off, y_off) = bbx
-                        .unwrap_or_else(|| panic!("font {name}: glyph {encoding} has no BBX"));
+                    let (w, h, x_off, y_off) =
+                        bbx.unwrap_or_else(|| panic!("font {name}: glyph {encoding} has no BBX"));
                     let advance = advance
                         .unwrap_or_else(|| panic!("font {name}: glyph {encoding} has no DWIDTH"));
                     let row_bytes = (w.max(0) as usize).div_ceil(8);

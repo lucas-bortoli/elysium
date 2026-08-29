@@ -14,9 +14,8 @@ fn set_timeout_fires_once_due() {
 
 #[test]
 fn set_timeout_does_not_fire_before_its_delay() {
-    let runtime = eval(
-        "globalThis.fired = false; setTimeout(() => { globalThis.fired = true; }, 60_000);",
-    );
+    let runtime =
+        eval("globalThis.fired = false; setTimeout(() => { globalThis.fired = true; }, 60_000);");
     runtime.run_due_timers().unwrap();
     assert!(!global::<bool>(&runtime, "fired"));
 }
