@@ -76,3 +76,20 @@ fn unrelated_exceptions_are_not_remapped() {
         GuardedError::Timeout => panic!("expected an Exception"),
     }
 }
+
+#[test]
+fn is_live_tells_a_spawned_process_from_one_that_never_existed() {
+    // `spawn` marks its new id live straight away, before the process is
+    // installed, so a program can use the id the moment it has it. Whether
+    // a *terminated* process reports dead is the ProcessManager's half of
+    // this — it owns the forget — and isn't reachable from a detached
+    // runtime.
+    let runtime = eval(
+        "import { spawn, isLive } from 'ely:process'; \
+         const child = spawn('/programs/whatever/index.ts', undefined); \
+         globalThis.spawnedIsLive = isLive(child); \
+         globalThis.strangerIsLive = isLive(999999);",
+    );
+    assert!(global::<bool>(&runtime, "spawnedIsLive"));
+    assert!(!global::<bool>(&runtime, "strangerIsLive"));
+}

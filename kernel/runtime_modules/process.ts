@@ -63,6 +63,15 @@ function requireLive(target: ProcessHandle): void {
   if (!__process_is_live(target)) throw new ProcessNotFoundError(target);
 }
 
+/** Whether `target` is still running. The only way to notice a process
+ * ending, since a process is not told when another one goes: there is no
+ * parent/child relationship and no exit signal. Sending it a message to
+ * find out is worse than useless — a message delivered to a process with no
+ * message handler sits in its mailbox and keeps it alive indefinitely. */
+export function isLive(target: ProcessHandle): boolean {
+  return __process_is_live(target);
+}
+
 /** This process's own id. */
 export function currentProcessId(): ProcessHandle {
   return __process_self_id();
