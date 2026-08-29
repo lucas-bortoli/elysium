@@ -48,6 +48,10 @@ plain `{ width, height }` shape exported from `ely:math`, the module
 Elysium's geometry-returning APIs share their point/size/rectangle types
 from.
 
+Where a coordinate falls on that surface, which corner or centre a shape is
+positioned by, and how angles are measured are all one shared set of rules
+every drawing call follows ([4]).
+
 Draw calls are batched. What a program draws during a draw handler doesn't
 appear on screen call by call. That means later calls draw over earlier
 ones where they overlap.
@@ -85,3 +89,5 @@ before it ever enters a draw handler.
 [2] [Input](Input.md)
 
 [3] [Loading images](Image.md)
+
+[4] [Coordinates](Coordinates.md)
