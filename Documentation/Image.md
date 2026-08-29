@@ -38,10 +38,23 @@ what it drew.
 
 `drawImage(image, x, y)` places `image`'s top-left corner at `(x, y)`, in
 the same logical coordinate space `fillRectangle` and the pointer both use
-([2]),
-at the image's natural pixel size — there's no scaling or rotation. Like
-`clearScreen`/`fillRectangle`, it only takes effect from inside a currently
-running draw handler.
+([2]), at the image's natural pixel size. Like `clearScreen`/`fillRectangle`,
+it only takes effect from inside a currently running draw handler.
+
+Given options it can draw less than the whole image, and place it more
+freely. Naming a rectangle within the image draws only that part, which is
+how a program keeps every frame of an animation, or every tile of a
+tileset, in one file and picks out the one it wants. It can also be drawn
+at a multiple of its natural size, mirrored left to right or top to bottom,
+and — with `drawImageRotated` — turned about a point within it, which is
+usually its middle.
+
+However an image is turned or resized, it's sampled without smoothing:
+every pixel drawn is one whole pixel of the original, never a blend of
+neighbouring ones, so a resized image is still made only of palette colors.
+Whole-number sizes keep it looking like the picture it started as; a
+fractional one lands the original's pixels unevenly, some drawn wider than
+others.
 
 `loadImage` reads an absolute path against the root of the whole userland
 tree — the same tree every program lives under — never the process's
