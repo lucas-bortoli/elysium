@@ -1,6 +1,17 @@
 //! Integration tests for the `ely:` device surfaces this runtime wires into
 //! each VM. Split by subject into the submodules below; the shared
 //! VM-construction and inspection helpers live here.
+//!
+//! A test belongs here when it exercises a surface as a program sees it —
+//! the JS is the input, and what it observes is the assertion. A test that
+//! exercises a device's own internals, with no JS involved, belongs in a
+//! `mod tests` inside that device's module instead: the clip and transform
+//! algebra in `framebuffer/state.rs`, path geometry in `framebuffer/paths.rs`,
+//! window-event folding in `input.rs`, glyph metrics in `text.rs`. The two
+//! layers are complementary, and a mechanism is usually worth covering at
+//! both: `ely:process`'s bindings are tested here against a detached runtime,
+//! while the scheduling they feed — spawning, mailboxes, reaping, faults — is
+//! tested against a real process table in `process_manager.rs`.
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -19,8 +30,11 @@ mod filesystem;
 mod graphics;
 mod image;
 mod input;
+mod lifecycle;
 mod modules;
+mod path_helpers;
 mod process;
+mod text;
 mod timers;
 
 /// Builds an `ElysiumRuntime` against `root` with a fresh scale cell and

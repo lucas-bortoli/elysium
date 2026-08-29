@@ -3,6 +3,10 @@
 //! reaped; one that faults (times out, throws, or exhausts its 16 MB heap)
 //! is dropped without taking the kernel down; the kernel exits once the
 //! table is empty.
+//!
+//! The tests at the bottom of this file drive a real process table. The
+//! `ely:process` bindings those processes call are tested separately, against
+//! a single detached runtime, in `kernel/runtime/tests/process.rs`.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};

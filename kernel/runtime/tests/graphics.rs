@@ -1,5 +1,8 @@
-//! The `ely:framebuffer` and `ely:lifecycle` surfaces: draw handlers, update
-//! tickers, and post-init handlers.
+//! `ely:framebuffer`'s drawing surface: the draw-handler gate every drawing
+//! call sits behind, paths and shapes, the transform and clip stacks, and
+//! individual pixels. Text lives in `text.rs`, and what a frame's commands
+//! actually rasterize to is tested against a bare pixmap in
+//! `kernel/framebuffer.rs`.
 
 use super::*;
 
@@ -32,72 +35,6 @@ fn draw_calls_inside_a_registered_handler_succeed() {
     );
     runtime.run_due_timers().unwrap();
     assert!(global::<bool>(&runtime, "drawn"));
-}
-
-#[test]
-fn update_ticker_fires_once_per_frame_with_a_delta_time() {
-    let runtime = eval(
-        "import { addUpdateTicker } from 'ely:lifecycle'; \
-         globalThis.calls = 0; \
-         globalThis.lastDt = -1; \
-         addUpdateTicker((dt) => { \
-             globalThis.calls += 1; \
-             globalThis.lastDt = dt; \
-         });",
-    );
-    for expected_calls in 1..=3 {
-        runtime.run_due_timers().unwrap();
-        assert_eq!(global::<f64>(&runtime, "calls"), expected_calls as f64);
-        assert!(global::<f64>(&runtime, "lastDt") >= 0.0);
-    }
-}
-
-#[test]
-fn remove_update_ticker_stops_further_calls() {
-    let runtime = eval(
-        "import { addUpdateTicker, removeUpdateTicker } from 'ely:lifecycle'; \
-         globalThis.calls = 0; \
-         const id = addUpdateTicker(() => { \
-             globalThis.calls += 1; \
-             removeUpdateTicker(id); \
-         });",
-    );
-    for _ in 0..3 {
-        runtime.run_due_timers().unwrap();
-    }
-    assert_eq!(global::<f64>(&runtime, "calls"), 1.0);
-}
-
-#[test]
-fn post_init_handler_runs_once_after_eval_and_sees_working_timers() {
-    let runtime = eval(
-        "import { addPostInitHandler, delay } from 'ely:lifecycle'; \
-         globalThis.ran = false; \
-         globalThis.timerFired = false; \
-         addPostInitHandler(async () => { \
-             globalThis.ran = true; \
-             await delay(0); \
-             globalThis.timerFired = true; \
-         });",
-    );
-    assert!(
-        !global::<bool>(&runtime, "ran"),
-        "must not run during eval_module itself"
-    );
-
-    runtime.run_post_init_handlers().unwrap();
-    assert!(global::<bool>(&runtime, "ran"));
-    assert!(
-        !global::<bool>(&runtime, "timerFired"),
-        "the delay(0) timer hasn't been serviced yet"
-    );
-
-    runtime.run_due_timers().unwrap();
-    assert!(global::<bool>(&runtime, "timerFired"));
-
-    // A second call must not re-run anything: the handler list was
-    // drained, not just iterated.
-    runtime.run_post_init_handlers().unwrap();
 }
 
 #[test]
@@ -370,84 +307,6 @@ fn setting_a_pixel_to_an_unknown_color_throws() {
     );
     runtime.run_due_timers().unwrap();
     assert!(global::<bool>(&runtime, "threw"));
-}
-
-#[test]
-fn measure_text_reports_one_line_as_the_fonts_own_line_height() {
-    let runtime = eval(
-        "import { measureText } from 'ely:framebuffer'; \
-         const plain = measureText('Hi'); \
-         globalThis.width = plain.width; \
-         globalThis.height = plain.height; \
-         globalThis.scaledWidth = measureText('Hi', { scale: 3 }).width; \
-         globalThis.scaledHeight = measureText('Hi', { scale: 3 }).height;",
-    );
-    let width = global::<u32>(&runtime, "width");
-    let height = global::<u32>(&runtime, "height");
-    assert!(width > 0 && height > 0);
-    // A scaled string is the same bitmap with bigger pixels, so both of its
-    // measurements scale exactly.
-    assert_eq!(global::<u32>(&runtime, "scaledWidth"), width * 3);
-    assert_eq!(global::<u32>(&runtime, "scaledHeight"), height * 3);
-}
-
-#[test]
-fn measure_text_counts_every_line_a_string_wraps_or_breaks_into() {
-    let runtime = eval(
-        "import { measureText } from 'ely:framebuffer'; \
-         const one = measureText('a').height; \
-         globalThis.one = one; \
-         globalThis.broken = measureText('a\\nb\\nc').height; \
-         const wide = measureText('aaa aaa aaa').width; \
-         globalThis.wrapped = measureText('aaa aaa aaa', { maxWidth: wide / 2 }).height; \
-         globalThis.wrappedFitsWidth = \
-             measureText('aaa aaa aaa', { maxWidth: wide / 2 }).width <= wide / 2;",
-    );
-    let one = global::<u32>(&runtime, "one");
-    assert_eq!(global::<u32>(&runtime, "broken"), one * 3);
-    assert!(
-        global::<u32>(&runtime, "wrapped") > one,
-        "should have wrapped"
-    );
-    assert!(global::<bool>(&runtime, "wrappedFitsWidth"));
-}
-
-#[test]
-fn drawing_text_with_options_inside_a_handler_succeeds() {
-    let runtime = eval(
-        "import { addDrawHandler, drawText, Color, Font } from 'ely:framebuffer'; \
-         globalThis.error = ''; \
-         addDrawHandler(() => { \
-             try { \
-                 drawText(10, 10, 'plain', Color.Amber400); \
-                 drawText(10, 20, 'a font', Color.Amber400, Font.Cozette); \
-                 drawText(60, 30, 'centred', Color.Amber400, { align: 'center' }); \
-                 drawText(60, 40, 'right', Color.Amber400, { align: 'right' }); \
-                 drawText(10, 50, 'big', Color.Amber400, { scale: 3 }); \
-                 drawText(10, 70, 'wrap me around', Color.Amber400, \
-                          { maxWidth: 40, lineSpacing: 1.5 }); \
-                 globalThis.error = 'none'; \
-             } catch (err) { globalThis.error = String(err); } \
-         });",
-    );
-    runtime.run_due_timers().unwrap();
-    assert_eq!(global::<String>(&runtime, "error"), "none");
-}
-
-#[test]
-fn a_text_scale_that_is_not_a_whole_number_of_at_least_one_throws() {
-    let runtime = eval(
-        "import { measureText } from 'ely:framebuffer'; \
-         globalThis.threw = []; \
-         for (const scale of [0, -1, 1.5]) { \
-             try { measureText('hi', { scale }); globalThis.threw.push(false); } \
-             catch (err) { globalThis.threw.push(err instanceof RangeError); } \
-         }",
-    );
-    assert_eq!(
-        global::<Vec<bool>>(&runtime, "threw"),
-        vec![true, true, true]
-    );
 }
 
 #[test]
