@@ -23,6 +23,7 @@ use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 mod colors;
+mod palette;
 mod paths;
 mod state;
 pub use colors::Color;
@@ -363,9 +364,9 @@ fn resolve_color(ctx: &Ctx<'_>, id: u16) -> Result<Color> {
 
 /// The logical resolution programs draw in — independent of the window's
 /// physical pixel size. Mirrored by hand in
-/// `kernel/runtime_modules/framebuffer.ts`'s `getWidth`/`getHeight`, the
-/// same way `kernel/framebuffer/colors.rs`'s `Color` enum is kept in sync
-/// with that file's `Color` constant.
+/// `kernel/runtime_modules/framebuffer.ts`'s `getWidth`/`getHeight`; unlike
+/// the color palette, which is generated from one table, nothing checks
+/// these two agree, so change them together.
 pub const FRAMEBUFFER_WIDTH: u32 = 720;
 pub const FRAMEBUFFER_HEIGHT: u32 = 360;
 

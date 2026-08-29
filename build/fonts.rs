@@ -27,11 +27,13 @@ struct FontSpec {
     ranges: &'static [RangeInclusive<u32>],
 }
 
-/// Fonts baked into the kernel. Kept in sync by hand with `Font` in
-/// `kernel/runtime_modules/framebuffer.ts` (and its mirror in
-/// `userland/elysium.d.ts`), the same way the color palette is: an entry's
-/// index in this slice is the font id that crosses the `ely:framebuffer`
-/// boundary.
+/// Fonts baked into the kernel. An entry's index in this slice is the font
+/// id that crosses the `ely:framebuffer` boundary. Kept in sync by hand with
+/// `Font` in `kernel/runtime_modules/framebuffer.ts` and its mirror in
+/// `userland/elysium.d.ts` — the palette solves the same problem by
+/// generating all three copies from one table
+/// (`kernel/framebuffer/palette.rs`), which is where this should go if the
+/// list ever grows past one font.
 const FONTS: &[FontSpec] = &[FontSpec {
     name: "cozette",
     path: "kernel/text/cozette.bdf",
