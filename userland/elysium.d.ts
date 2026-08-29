@@ -371,11 +371,15 @@ declare module "ely:framebuffer" {
   /** One of `Font`'s named entries (e.g. `Font.Cozette`). */
   export type Font = (typeof Font)[keyof typeof Font];
 
-  /** Thrown by `clearScreen`/`fillRectangle`/`drawText`/`drawImage` when
-   * called from outside a currently running draw handler (see
-   * `addDrawHandler`). */
+  /** Thrown by any drawing call made from outside a currently running draw
+   * handler (see `addDrawHandler`). */
   export class DrawOutsideHandlerError extends Error {
     constructor();
+  }
+
+  /** Thrown by `popTransform`/`popClip` when nothing is left to pop. */
+  export class UnbalancedStackError extends Error {
+    constructor(what: string);
   }
 
   export type DrawTickerId = number;
@@ -446,6 +450,100 @@ declare module "ely:framebuffer" {
 
   /** The palette entry closest to the RGB triplet `(r, g, b)` (each `0-255`). */
   export function nearestColor(r: number, g: number, b: number): Color;
+
+  /** How a path decides which of its regions count as inside, where its
+   * outline crosses over itself. `"nonzero"` counts a region inside when
+   * the outline winds around it at all; `"evenodd"` alternates, so a shape
+   * drawn inside another punches a hole in it. */
+  export type FillRule = "nonzero" | "evenodd";
+
+  /** How a stroke finishes at the two loose ends of an open path. */
+  export type LineCap = "butt" | "round" | "square";
+
+  /** How a stroke turns a corner where two segments meet. */
+  export type LineJoin = "miter" | "round" | "bevel";
+
+  /** Starts a new path, discarding whatever was being described before it.
+   * There is one path under construction at a time, and the shape calls
+   * that describe a whole path of their own start a new one. */
+  export function beginPath(): void;
+
+  /** Starts a new contour of the current path at `(x, y)`, without drawing
+   * anything on the way there. */
+  export function moveTo(x: number, y: number): void;
+
+  /** Extends the current path with a straight segment to `(x, y)`. */
+  export function lineTo(x: number, y: number): void;
+
+  /** Extends the current path with a curve to `(x, y)` that bends toward
+   * the single control point `(cx, cy)` without passing through it. */
+  export function quadraticTo(
+    cx: number,
+    cy: number,
+    x: number,
+    y: number,
+  ): void;
+
+  /** Extends the current path with a curve to `(x, y)` that leaves along
+   * `(c1x, c1y)` and arrives along `(c2x, c2y)`. */
+  export function cubicTo(
+    c1x: number,
+    c1y: number,
+    c2x: number,
+    c2y: number,
+    x: number,
+    y: number,
+  ): void;
+
+  /** Closes the current contour with a straight segment back to where it
+   * started. */
+  export function closePath(): void;
+
+  /** Fills the inside of the current path with `color`, leaving the path in
+   * place so it can be stroked afterwards. */
+  export function fillPath(color: Color, rule?: FillRule): void;
+
+  /** Draws a line of `thickness` along the current path in `color`,
+   * straddling the path with half its thickness to either side. */
+  export function strokePath(
+    color: Color,
+    thickness?: number,
+    cap?: LineCap,
+    join?: LineJoin,
+  ): void;
+
+  /** How `pushTransform` should move the coordinate space. Applied in the
+   * order written: a shape is scaled, then rotated, then shifted. */
+  export interface Transform {
+    /** Shifts by this much, in the coordinates outside the transform. */
+    translate?: import("ely:math").Vector2d;
+    /** Scales about the origin. A single number scales both axes alike. */
+    scale?: import("ely:math").Vector2d | number;
+    /** Turns about the origin, in radians — clockwise on screen, since `y`
+     * grows downward. */
+    rotate?: number;
+  }
+
+  /** Moves the coordinate space everything drawn afterwards is placed in,
+   * until the matching `popTransform`. Transforms nest: pushing a second
+   * one applies inside the first rather than replacing it. */
+  export function pushTransform(transform: Transform): void;
+
+  /** Restores the coordinate space in effect before the matching
+   * `pushTransform`. */
+  export function popTransform(): void;
+
+  /** Confines everything drawn afterwards to the rectangle at `(x, y)`,
+   * until the matching `popClip`. Clips nest by narrowing. Starts a new
+   * path. */
+  export function pushClip(x: number, y: number, w: number, h: number): void;
+
+  /** Confines everything drawn afterwards to the inside of the current
+   * path, until the matching `popClip`. */
+  export function pushClipPath(rule?: FillRule): void;
+
+  /** Restores the region in effect before the matching `pushClip`. */
+  export function popClip(): void;
 }
 
 declare module "ely:math" {
