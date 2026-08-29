@@ -1,0 +1,5 @@
+{
+  "title": "Image",
+  "description": "Loading a PNG, and drawing it scaled, cropped and flipped.",
+  "order": 8
+}
