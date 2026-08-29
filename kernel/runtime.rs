@@ -305,7 +305,7 @@ impl ElysiumRuntime {
     /// queued microtasks, and no unsettled Promise jobs. A process in this
     /// state (with an empty mailbox) is reaped. A Promise that never
     /// resolves leaves no pending job, so a process blocked only on one is
-    /// considered idle — see `Documentation/Multitasking.md`.
+    /// considered idle — see `documentation/Multitasking.md`.
     pub fn has_no_pending_work(&self) -> bool {
         self.timers.is_empty()
             && self.microtasks.borrow().is_empty()

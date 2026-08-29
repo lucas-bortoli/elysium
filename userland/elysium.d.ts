@@ -871,7 +871,7 @@ declare module "ely:lifecycle" {
 
   /** Resolves after `ms` milliseconds — `setTimeout` as an awaitable.
    * @warn Awaiting this from module top level deadlocks. See
-   * Documentation/Multitasking.md. */
+   * documentation/Multitasking.md. */
   export function delay(ms: number): Promise<void>;
 
   export type TickerId = number;

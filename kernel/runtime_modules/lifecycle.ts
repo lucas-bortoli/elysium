@@ -11,7 +11,7 @@ export function addPostInitHandler(handler: () => void): void {
 
 /** Resolves after `ms` milliseconds — `setTimeout` as an awaitable.
  * @warn Awaiting this from module top level deadlocks. See
- * Documentation/Multitasking.md. */
+ * documentation/Multitasking.md. */
 export function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
