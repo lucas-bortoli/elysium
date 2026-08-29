@@ -11,7 +11,7 @@ always gets the pointer's current state.
 
 `getPointerPosition()` (and its `getPointerX`/`getPointerY` halves) report
 the pointer's position in the same logical coordinate space the Framebuffer
-draws in ([2]), not the window's physical pixels — a program never has to
+draws in ([2], [3]), not the window's physical pixels — a program never has to
 think about the window's actual size or scale to line up what it draws with
 where the pointer is.
 
@@ -71,3 +71,5 @@ addUpdateTicker(() => {
 [1] [Per-frame ticking](Lifecycle.md)
 
 [2] [The Framebuffer](Framebuffer.md)
+
+[3] [Coordinates](Coordinates.md)

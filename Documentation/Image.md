@@ -37,7 +37,8 @@ hard-edged transparency to begin with, so what a program sees on screen is
 what it drew.
 
 `drawImage(image, x, y)` places `image`'s top-left corner at `(x, y)`, in
-the same logical coordinate space `fillRectangle` and the pointer both use,
+the same logical coordinate space `fillRectangle` and the pointer both use
+([2]),
 at the image's natural pixel size — there's no scaling or rotation. Like
 `clearScreen`/`fillRectangle`, it only takes effect from inside a currently
 running draw handler.
@@ -65,3 +66,5 @@ once the program itself exits.
 # References
 
 [1] [The Framebuffer](Framebuffer.md)
+
+[2] [Coordinates](Coordinates.md)
