@@ -10,7 +10,9 @@ process still has anything left to do. A process that has run out of work is
 reaped; a process that faults is dropped without disturbing the others; and
 when the table is finally empty, the kernel exits. The first process, the
 init program, is started by the kernel at boot and is otherwise no different
-from any process a program spawns later.
+from any process a program spawns later. The examples browser ([4]) is a
+worked instance of all this: it spawns a program, hands it the screen, and
+takes it back again.
 
 ## Bounding a single call into a process
 
@@ -214,3 +216,4 @@ forecloses it.
 [1] [Per-frame ticking](Lifecycle.md)
 [2] [The Framebuffer](Framebuffer.md)
 [3] Rich Harris, [Top-level `await` is a footgun](https://gist.github.com/Rich-Harris/0b6f317657f5167663b493c722647221) (2016; later edited to note TC39's revised design addressed the original concern for JS engines, which have a mitigation Elysium doesn't)
+[4] [The examples browser](Examples.md)

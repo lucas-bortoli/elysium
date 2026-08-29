@@ -52,6 +52,9 @@ Where a coordinate falls on that surface, which corner or centre a shape is
 positioned by, and how angles are measured are all one shared set of rules
 every drawing call follows ([4]).
 
+Elysium boots into a gallery of example programs, one per feature described
+here, which is the quickest way to see any of this working ([5]).
+
 Draw calls are batched. What a program draws during a draw handler doesn't
 appear on screen call by call. That means later calls draw over earlier
 ones where they overlap.
@@ -175,3 +178,5 @@ enters a draw handler.
 [3] [Loading images](Image.md)
 
 [4] [Coordinates](Coordinates.md)
+
+[5] [The examples browser](Examples.md)
