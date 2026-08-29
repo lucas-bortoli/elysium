@@ -133,9 +133,12 @@ function revealSelected(): void {
   scroll = Math.min(maxScroll(), Math.max(0, scroll));
 }
 
-/** Hands the screen to `example`. Dropping the draw handler is the whole
- * mechanism: the menu keeps ticking, but stops putting anything on screen. */
-function launch(example: Example): void {
+/** Hands the screen to the example on `row`. Dropping the draw handler is
+ * the whole mechanism: the menu keeps ticking, but stops putting anything
+ * on screen. */
+function launch(row: number): void {
+  const example = examples[row];
+  if (example === undefined) return;
   try {
     child = spawn(example.path, undefined);
   } catch (err) {
@@ -203,10 +206,10 @@ addUpdateTicker(() => {
   const delta = getPointerDelta();
   if (row !== -1 && (delta.x !== 0 || delta.y !== 0)) selected = row;
 
-  if (wasKeyPressed(Key.Enter)) launch(examples[selected]);
+  if (wasKeyPressed(Key.Enter)) launch(selected);
   else if (row !== -1 && wasPointerPressed()) {
     selected = row;
-    launch(examples[row]);
+    launch(row);
   }
 });
 
@@ -232,7 +235,7 @@ function draw(): void {
   // Every row is drawn against the same clip, so a row scrolled half out of
   // the viewport is cut off cleanly instead of spilling over the heading.
   pushClip(LIST_X, LIST_Y, LIST_WIDTH, LIST_HEIGHT);
-  for (let i = 0; i < examples.length; i++) {
+  for (const [i, example] of examples.entries()) {
     const top = LIST_Y + i * ROW_HEIGHT - scroll;
     if (top + ROW_HEIGHT < LIST_Y || top > LIST_Y + LIST_HEIGHT) continue;
 
@@ -243,13 +246,13 @@ function draw(): void {
     drawText(
       LIST_X + 10,
       top + 5,
-      examples[i].title,
+      example.title,
       chosen ? Color.Amber300 : Color.Slate200,
     );
     drawText(
       LIST_X + 10,
       top + 7 + lineHeight,
-      examples[i].description,
+      example.description,
       chosen ? Color.Slate300 : Color.Slate500,
       { maxWidth: LIST_WIDTH - 20 },
     );
