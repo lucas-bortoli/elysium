@@ -674,6 +674,17 @@ declare module "ely:framebuffer" {
     color: Color,
     thickness?: number,
   ): void;
+
+  /** Sets the single pixel that `(x, y)` falls inside. Coordinates name the
+   * corners of the pixel grid, so `(3, 4)` and `(3.5, 4.5)` both set the
+   * same pixel. */
+  export function setPixel(x: number, y: number, color: Color): void;
+
+  /** Sets every pixel in `points` to the same color. */
+  export function drawPixels(
+    points: readonly import("ely:math").Vector2d[],
+    color: Color,
+  ): void;
 }
 
 declare module "ely:math" {
