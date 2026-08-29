@@ -19,8 +19,10 @@ use crate::transform;
 ///
 /// The ambient types userland typechecks programs against (`elysium.d.ts`)
 /// describe this same surface independently, since it has no way to see
-/// these bindings directly — keep the two in sync by hand when this list,
-/// or any of these modules' exported signatures, changes.
+/// these bindings directly — keep the two in sync by hand when this list, or
+/// any of these modules' exported signatures, changes. The one part that is
+/// mechanized is the color palette, generated into both files from
+/// `kernel/framebuffer/palette.rs` and checked by its tests.
 const EMBEDDED_RUNTIME_MODULES: &[(&str, &str)] = &[
     ("jsx", include_str!("runtime_modules/jsx-runtime.ts")),
     (

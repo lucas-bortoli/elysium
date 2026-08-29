@@ -68,6 +68,7 @@ declare module "ely:framebuffer" {
   /** The kernel's fixed, curated color palette. Every color a program can
    * draw with is one of these named entries — never a raw, unconstrained
    * RGBA value. */
+  // <generated from kernel/framebuffer/palette.rs>
   export const Color: {
     readonly Red50: 0;
     readonly Red100: 1;
@@ -358,6 +359,7 @@ declare module "ely:framebuffer" {
     readonly Black: 286;
     readonly White: 287;
   };
+  // <end generated>
 
   /** A color from the kernel's fixed palette, as one of `Color`'s named
    * entries (e.g. `Color.Slate900`). */
