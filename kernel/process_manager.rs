@@ -70,7 +70,10 @@ impl ProcessManager {
         // every VM's, since each `ElysiumRuntime` canonicalizes its own
         // copy too) starts from a real, symlink-free root.
         let userland_root = std::fs::canonicalize(&userland_root).unwrap_or_else(|err| {
-            panic!("userland root {} is invalid: {err}", userland_root.display())
+            panic!(
+                "userland root {} is invalid: {err}",
+                userland_root.display()
+            )
         });
         Self {
             entries: Vec::new(),

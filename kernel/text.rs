@@ -98,7 +98,10 @@ mod tests {
     fn measure_sums_advances_and_reports_line_height() {
         let font = cozette();
         let (width, height) = measure(font, "Hi");
-        assert_eq!(width, font.advance_of('H' as u32) + font.advance_of('i' as u32));
+        assert_eq!(
+            width,
+            font.advance_of('H' as u32) + font.advance_of('i' as u32)
+        );
         assert_eq!(height, font.line_height);
     }
 
