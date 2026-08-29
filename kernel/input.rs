@@ -8,7 +8,8 @@ mod keys;
 use std::cell::Cell;
 use std::rc::Rc;
 
-use rquickjs::{Ctx, Function, Result};
+use crate::bindings::bind;
+use rquickjs::{Ctx, Result};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 
 use keys::Key;
@@ -151,90 +152,65 @@ impl Input {
 /// (`__input_get_pointer_x`, etc.) — never called by a program directly,
 /// only through `ely:input`'s exported functions.
 pub fn bootstrap_input_bindings(ctx: &Ctx<'_>, input: Rc<Input>) -> Result<()> {
-    let global = ctx.globals();
-
     {
         let input = Rc::clone(&input);
-        global.set(
-            "__input_get_pointer_x",
-            Function::new(ctx.clone(), move || input.position.get().0)?,
-        )?;
+        bind(ctx, "__input_get_pointer_x", move || input.position.get().0)?;
     }
     {
         let input = Rc::clone(&input);
-        global.set(
-            "__input_get_pointer_y",
-            Function::new(ctx.clone(), move || input.position.get().1)?,
-        )?;
+        bind(ctx, "__input_get_pointer_y", move || input.position.get().1)?;
     }
     {
         let input = Rc::clone(&input);
-        global.set(
-            "__input_is_pointer_down",
-            Function::new(ctx.clone(), move || input.is_down.get())?,
-        )?;
+        bind(ctx, "__input_is_pointer_down", move || input.is_down.get())?;
     }
     {
         let input = Rc::clone(&input);
-        global.set(
-            "__input_was_pointer_pressed",
-            Function::new(ctx.clone(), move || input.was_pressed.get())?,
-        )?;
+        bind(ctx, "__input_was_pointer_pressed", move || {
+            input.was_pressed.get()
+        })?;
     }
     {
         let input = Rc::clone(&input);
-        global.set(
-            "__input_was_pointer_released",
-            Function::new(ctx.clone(), move || input.was_released.get())?,
-        )?;
+        bind(ctx, "__input_was_pointer_released", move || {
+            input.was_released.get()
+        })?;
     }
     {
         let input = Rc::clone(&input);
-        global.set(
-            "__input_get_pointer_delta_x",
-            Function::new(ctx.clone(), move || input.delta.get().0)?,
-        )?;
+        bind(ctx, "__input_get_pointer_delta_x", move || {
+            input.delta.get().0
+        })?;
     }
     {
         let input = Rc::clone(&input);
-        global.set(
-            "__input_get_pointer_delta_y",
-            Function::new(ctx.clone(), move || input.delta.get().1)?,
-        )?;
+        bind(ctx, "__input_get_pointer_delta_y", move || {
+            input.delta.get().1
+        })?;
     }
     {
         let input = Rc::clone(&input);
-        global.set(
-            "__input_get_scroll_delta",
-            Function::new(ctx.clone(), move || input.scroll_delta.get())?,
-        )?;
+        bind(ctx, "__input_get_scroll_delta", move || {
+            input.scroll_delta.get()
+        })?;
     }
     {
         let input = Rc::clone(&input);
-        global.set(
-            "__input_is_key_down",
-            Function::new(ctx.clone(), move |id: u16| {
-                Key::from_id(id).is_some_and(|key| input.key_down[key as usize].get())
-            })?,
-        )?;
+        bind(ctx, "__input_is_key_down", move |id: u16| {
+            Key::from_id(id).is_some_and(|key| input.key_down[key as usize].get())
+        })?;
     }
     {
         let input = Rc::clone(&input);
-        global.set(
-            "__input_was_key_pressed",
-            Function::new(ctx.clone(), move |id: u16| {
-                Key::from_id(id).is_some_and(|key| input.key_pressed[key as usize].get())
-            })?,
-        )?;
+        bind(ctx, "__input_was_key_pressed", move |id: u16| {
+            Key::from_id(id).is_some_and(|key| input.key_pressed[key as usize].get())
+        })?;
     }
     {
         let input = Rc::clone(&input);
-        global.set(
-            "__input_was_key_released",
-            Function::new(ctx.clone(), move |id: u16| {
-                Key::from_id(id).is_some_and(|key| input.key_released[key as usize].get())
-            })?,
-        )?;
+        bind(ctx, "__input_was_key_released", move |id: u16| {
+            Key::from_id(id).is_some_and(|key| input.key_released[key as usize].get())
+        })?;
     }
 
     Ok(())

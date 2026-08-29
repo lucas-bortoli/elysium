@@ -16,7 +16,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use rquickjs::{Ctx, Function, Result};
+use crate::bindings::bind;
+use rquickjs::{Ctx, Result};
 
 use super::{DrawCommand, resolve_color};
 
@@ -183,212 +184,188 @@ pub fn bootstrap_path_bindings(
     draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
     path: PathScratch,
 ) -> Result<()> {
-    let global = ctx.globals();
-
     // Each of these appends to the path under construction and is a plain
     // mutation with nothing to reject, so none of them take a `Ctx` to throw
     // with. Coordinates that aren't finite are dropped by `finish` below.
     {
         let path = Rc::clone(&path);
-        global.set(
-            "__framebuffer_path_begin",
-            Function::new(ctx.clone(), move || path.borrow_mut().clear())?,
-        )?;
+        bind(ctx, "__framebuffer_path_begin", move || {
+            path.borrow_mut().clear()
+        })?;
     }
 
     {
         let path = Rc::clone(&path);
-        global.set(
-            "__framebuffer_path_move_to",
-            Function::new(ctx.clone(), move |x: f32, y: f32| {
-                path.borrow_mut().move_to(x, y)
-            })?,
-        )?;
+        bind(ctx, "__framebuffer_path_move_to", move |x: f32, y: f32| {
+            path.borrow_mut().move_to(x, y)
+        })?;
     }
 
     {
         let path = Rc::clone(&path);
-        global.set(
-            "__framebuffer_path_line_to",
-            Function::new(ctx.clone(), move |x: f32, y: f32| {
-                path.borrow_mut().line_to(x, y)
-            })?,
-        )?;
+        bind(ctx, "__framebuffer_path_line_to", move |x: f32, y: f32| {
+            path.borrow_mut().line_to(x, y)
+        })?;
     }
 
     {
         let path = Rc::clone(&path);
-        global.set(
+        bind(
+            ctx,
             "__framebuffer_path_quad_to",
-            Function::new(ctx.clone(), move |cx: f32, cy: f32, x: f32, y: f32| {
-                path.borrow_mut().quad_to(cx, cy, x, y)
-            })?,
+            move |cx: f32, cy: f32, x: f32, y: f32| path.borrow_mut().quad_to(cx, cy, x, y),
         )?;
     }
 
     {
         let path = Rc::clone(&path);
-        global.set(
+        bind(
+            ctx,
             "__framebuffer_path_cubic_to",
-            Function::new(
-                ctx.clone(),
-                move |c1x: f32, c1y: f32, c2x: f32, c2y: f32, x: f32, y: f32| {
-                    path.borrow_mut().cubic_to(c1x, c1y, c2x, c2y, x, y)
-                },
-            )?,
+            move |c1x: f32, c1y: f32, c2x: f32, c2y: f32, x: f32, y: f32| {
+                path.borrow_mut().cubic_to(c1x, c1y, c2x, c2y, x, y)
+            },
         )?;
     }
 
     {
         let path = Rc::clone(&path);
-        global.set(
-            "__framebuffer_path_close",
-            Function::new(ctx.clone(), move || path.borrow_mut().close())?,
-        )?;
+        bind(ctx, "__framebuffer_path_close", move || {
+            path.borrow_mut().close()
+        })?;
     }
 
     {
         let path = Rc::clone(&path);
-        global.set(
+        bind(
+            ctx,
             "__framebuffer_path_rect",
-            Function::new(ctx.clone(), move |x: f32, y: f32, w: f32, h: f32| {
+            move |x: f32, y: f32, w: f32, h: f32| {
                 if let Some(rect) = tiny_skia::Rect::from_xywh(x, y, w, h) {
                     path.borrow_mut().push_rect(rect);
                 }
-            })?,
+            },
         )?;
     }
 
     {
         let path = Rc::clone(&path);
-        global.set(
+        bind(
+            ctx,
             "__framebuffer_path_oval",
-            Function::new(ctx.clone(), move |cx: f32, cy: f32, rx: f32, ry: f32| {
+            move |cx: f32, cy: f32, rx: f32, ry: f32| {
                 if let Some(oval) = tiny_skia::Rect::from_ltrb(cx - rx, cy - ry, cx + rx, cy + ry) {
                     path.borrow_mut().push_oval(oval);
                 }
-            })?,
+            },
         )?;
     }
 
     {
         let path = Rc::clone(&path);
-        global.set(
+        bind(
+            ctx,
             "__framebuffer_path_rounded_rect",
-            Function::new(
-                ctx.clone(),
-                move |x: f32, y: f32, w: f32, h: f32, radius: f32| {
-                    append_rounded_rect(&mut path.borrow_mut(), x, y, w, h, radius)
-                },
-            )?,
+            move |x: f32, y: f32, w: f32, h: f32, radius: f32| {
+                append_rounded_rect(&mut path.borrow_mut(), x, y, w, h, radius)
+            },
         )?;
     }
 
     {
         let path = Rc::clone(&path);
-        global.set(
+        bind(
+            ctx,
             "__framebuffer_path_arc",
-            Function::new(
-                ctx.clone(),
-                move |cx: f32, cy: f32, r: f32, start: f32, end: f32| {
-                    append_arc(&mut path.borrow_mut(), cx, cy, r, start, end)
-                },
-            )?,
+            move |cx: f32, cy: f32, r: f32, start: f32, end: f32| {
+                append_arc(&mut path.borrow_mut(), cx, cy, r, start, end)
+            },
         )?;
     }
 
     {
         let path = Rc::clone(&path);
         let draw_commands = Rc::clone(&draw_commands);
-        global.set(
+        bind(
+            ctx,
             "__framebuffer_fill_path",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>, color: u16, rule: String| -> Result<()> {
-                    let color = resolve_color(&ctx, color)?;
-                    let rule = resolve_fill_rule(&ctx, &rule)?;
-                    // Clone rather than take: a program that fills a path
-                    // then strokes it describes that path once.
-                    let Some(path) = path.borrow().clone().finish() else {
-                        return Ok(()); // fewer than two points, or not finite
-                    };
-                    draw_commands
-                        .borrow_mut()
-                        .push(DrawCommand::FillPath { path, rule, color });
-                    Ok(())
-                },
-            )?,
+            move |ctx: Ctx<'_>, color: u16, rule: String| -> Result<()> {
+                let color = resolve_color(&ctx, color)?;
+                let rule = resolve_fill_rule(&ctx, &rule)?;
+                // Clone rather than take: a program that fills a path
+                // then strokes it describes that path once.
+                let Some(path) = path.borrow().clone().finish() else {
+                    return Ok(()); // fewer than two points, or not finite
+                };
+                draw_commands
+                    .borrow_mut()
+                    .push(DrawCommand::FillPath { path, rule, color });
+                Ok(())
+            },
         )?;
     }
 
     {
         let path = Rc::clone(&path);
         let draw_commands = Rc::clone(&draw_commands);
-        global.set(
+        bind(
+            ctx,
             "__framebuffer_stroke_path",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>,
-                      color: u16,
-                      thickness: f32,
-                      cap: String,
-                      join: String|
-                      -> Result<()> {
-                    let color = resolve_color(&ctx, color)?;
-                    if !thickness.is_finite() || thickness <= 0.0 {
-                        return Err(rquickjs::Exception::throw_range(
-                            &ctx,
-                            "stroke thickness must be greater than 0",
-                        ));
-                    }
-                    let stroke = tiny_skia::Stroke {
-                        width: thickness,
-                        line_cap: resolve_line_cap(&ctx, &cap)?,
-                        line_join: resolve_line_join(&ctx, &join)?,
-                        ..tiny_skia::Stroke::default()
-                    };
-                    let Some(path) = path.borrow().clone().finish() else {
-                        return Ok(());
-                    };
-                    draw_commands.borrow_mut().push(DrawCommand::StrokePath {
-                        path,
-                        stroke,
-                        color,
-                    });
-                    Ok(())
-                },
-            )?,
+            move |ctx: Ctx<'_>,
+                  color: u16,
+                  thickness: f32,
+                  cap: String,
+                  join: String|
+                  -> Result<()> {
+                let color = resolve_color(&ctx, color)?;
+                if !thickness.is_finite() || thickness <= 0.0 {
+                    return Err(rquickjs::Exception::throw_range(
+                        &ctx,
+                        "stroke thickness must be greater than 0",
+                    ));
+                }
+                let stroke = tiny_skia::Stroke {
+                    width: thickness,
+                    line_cap: resolve_line_cap(&ctx, &cap)?,
+                    line_join: resolve_line_join(&ctx, &join)?,
+                    ..tiny_skia::Stroke::default()
+                };
+                let Some(path) = path.borrow().clone().finish() else {
+                    return Ok(());
+                };
+                draw_commands.borrow_mut().push(DrawCommand::StrokePath {
+                    path,
+                    stroke,
+                    color,
+                });
+                Ok(())
+            },
         )?;
     }
 
     {
         let path = Rc::clone(&path);
         let draw_commands = Rc::clone(&draw_commands);
-        global.set(
+        bind(
+            ctx,
             "__framebuffer_push_clip",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>, rule: String| -> Result<()> {
-                    let rule = resolve_fill_rule(&ctx, &rule)?;
-                    // An unfinishable path confines drawing to nothing at
-                    // all, which is what an empty clip region means; still
-                    // push, so the matching pop stays balanced.
-                    let path = path.borrow().clone().finish();
-                    draw_commands
-                        .borrow_mut()
-                        .push(DrawCommand::PushClip { path, rule });
-                    Ok(())
-                },
-            )?,
+            move |ctx: Ctx<'_>, rule: String| -> Result<()> {
+                let rule = resolve_fill_rule(&ctx, &rule)?;
+                // An unfinishable path confines drawing to nothing at
+                // all, which is what an empty clip region means; still
+                // push, so the matching pop stays balanced.
+                let path = path.borrow().clone().finish();
+                draw_commands
+                    .borrow_mut()
+                    .push(DrawCommand::PushClip { path, rule });
+                Ok(())
+            },
         )?;
     }
 
-    global.set(
-        "__framebuffer_pop_clip",
-        Function::new(ctx.clone(), move || {
-            draw_commands.borrow_mut().push(DrawCommand::PopClip)
-        })?,
-    )?;
+    bind(ctx, "__framebuffer_pop_clip", move || {
+        draw_commands.borrow_mut().push(DrawCommand::PopClip)
+    })?;
 
     Ok(())
 }

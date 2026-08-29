@@ -15,7 +15,8 @@ use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use rquickjs::{Ctx, Function, Result};
+use crate::bindings::bind;
+use rquickjs::{Ctx, Result};
 
 use crate::filesystem;
 use crate::framebuffer::Color;
@@ -192,59 +193,52 @@ pub fn bootstrap_image_bindings(
     images: Rc<ImageTable>,
     userland_root: PathBuf,
 ) -> Result<()> {
-    let global = ctx.globals();
-
     {
         let images = Rc::clone(&images);
         let userland_root = userland_root.clone();
-        global.set(
+        bind(
+            ctx,
             "__image_load",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'_>, path: String| -> Result<u32> {
-                    let resolved = filesystem::resolve_userland_path(&userland_root, &path)
-                        .map_err(|err| {
-                            rquickjs::Exception::throw_message(&ctx, &err.to_string())
-                        })?;
-                    let bytes = std::fs::read(&resolved).map_err(|err| {
-                        rquickjs::Exception::throw_message(&ctx, &format!("{path}: {err}"))
-                    })?;
-                    let pixmap = tiny_skia::Pixmap::decode_png(&bytes).map_err(|err| {
-                        rquickjs::Exception::throw_message(&ctx, &format!("{path}: {err}"))
-                    })?;
-                    let (pixmap, opaque) = quantize_to_palette(pixmap);
-                    Ok(images.insert(pixmap, opaque))
-                },
-            )?,
+            move |ctx: Ctx<'_>, path: String| -> Result<u32> {
+                let resolved = filesystem::resolve_userland_path(&userland_root, &path)
+                    .map_err(|err| rquickjs::Exception::throw_message(&ctx, &err.to_string()))?;
+                let bytes = std::fs::read(&resolved).map_err(|err| {
+                    rquickjs::Exception::throw_message(&ctx, &format!("{path}: {err}"))
+                })?;
+                let pixmap = tiny_skia::Pixmap::decode_png(&bytes).map_err(|err| {
+                    rquickjs::Exception::throw_message(&ctx, &format!("{path}: {err}"))
+                })?;
+                let (pixmap, opaque) = quantize_to_palette(pixmap);
+                Ok(images.insert(pixmap, opaque))
+            },
         )?;
     }
 
     {
         let images = Rc::clone(&images);
-        global.set(
+        bind(
+            ctx,
             "__image_width",
-            Function::new(ctx.clone(), move |ctx: Ctx<'_>, id: u32| -> Result<u32> {
+            move |ctx: Ctx<'_>, id: u32| -> Result<u32> {
                 Ok(resolve_image(&ctx, &images, id)?.pixmap.width())
-            })?,
+            },
         )?;
     }
 
     {
         let images = Rc::clone(&images);
-        global.set(
+        bind(
+            ctx,
             "__image_height",
-            Function::new(ctx.clone(), move |ctx: Ctx<'_>, id: u32| -> Result<u32> {
+            move |ctx: Ctx<'_>, id: u32| -> Result<u32> {
                 Ok(resolve_image(&ctx, &images, id)?.pixmap.height())
-            })?,
+            },
         )?;
     }
 
-    global.set(
-        "__image_unload",
-        Function::new(ctx.clone(), move |id: u32| {
-            images.remove(id);
-        })?,
-    )?;
+    bind(ctx, "__image_unload", move |id: u32| {
+        images.remove(id);
+    })?;
 
     Ok(())
 }

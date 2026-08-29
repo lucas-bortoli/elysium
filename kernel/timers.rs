@@ -2,6 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use crate::bindings::bind;
 use rquickjs::function::{Opt, Rest};
 use rquickjs::{Ctx, Function, Persistent, Result, Value};
 
@@ -191,70 +192,57 @@ pub fn bootstrap_timers<'js>(
     timers: Rc<TimerQueue>,
     microtasks: Rc<RefCell<Vec<Persistent<Function<'static>>>>>,
 ) -> Result<()> {
-    let global = ctx.globals();
-
     {
         let timers = Rc::clone(&timers);
-        global.set(
+        bind(
+            ctx,
             "setTimeout",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'js>,
-                      callback: Function<'js>,
-                      delay: Opt<f64>,
-                      extra: Rest<Value<'js>>|
-                      -> Result<u32> {
-                    timers.schedule(&ctx, callback, delay.0.unwrap_or(0.0), extra.0, None)
-                },
-            )?,
+            move |ctx: Ctx<'js>,
+                  callback: Function<'js>,
+                  delay: Opt<f64>,
+                  extra: Rest<Value<'js>>|
+                  -> Result<u32> {
+                timers.schedule(&ctx, callback, delay.0.unwrap_or(0.0), extra.0, None)
+            },
         )?;
     }
 
     {
         let timers = Rc::clone(&timers);
-        global.set(
+        bind(
+            ctx,
             "setInterval",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'js>,
-                      callback: Function<'js>,
-                      delay: Opt<f64>,
-                      extra: Rest<Value<'js>>|
-                      -> Result<u32> {
-                    let delay_ms = delay.0.unwrap_or(0.0);
-                    let period = Duration::from_secs_f64(delay_ms.max(0.0) / 1000.0);
-                    timers.schedule(&ctx, callback, delay_ms, extra.0, Some(period))
-                },
-            )?,
+            move |ctx: Ctx<'js>,
+                  callback: Function<'js>,
+                  delay: Opt<f64>,
+                  extra: Rest<Value<'js>>|
+                  -> Result<u32> {
+                let delay_ms = delay.0.unwrap_or(0.0);
+                let period = Duration::from_secs_f64(delay_ms.max(0.0) / 1000.0);
+                timers.schedule(&ctx, callback, delay_ms, extra.0, Some(period))
+            },
         )?;
     }
 
     {
         let timers = Rc::clone(&timers);
-        global.set(
+        bind(
+            ctx,
             "setImmediate",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'js>,
-                      callback: Function<'js>,
-                      extra: Rest<Value<'js>>|
-                      -> Result<u32> {
-                    timers.schedule(&ctx, callback, 0.0, extra.0, None)
-                },
-            )?,
+            move |ctx: Ctx<'js>, callback: Function<'js>, extra: Rest<Value<'js>>| -> Result<u32> {
+                timers.schedule(&ctx, callback, 0.0, extra.0, None)
+            },
         )?;
     }
 
     {
         let timers = Rc::clone(&timers);
-        global.set(
+        bind(
+            ctx,
             "requestAnimationFrame",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'js>, callback: Function<'js>| -> Result<u32> {
-                    timers.schedule_animation_frame(&ctx, callback)
-                },
-            )?,
+            move |ctx: Ctx<'js>, callback: Function<'js>| -> Result<u32> {
+                timers.schedule_animation_frame(&ctx, callback)
+            },
         )?;
     }
 
@@ -265,28 +253,23 @@ pub fn bootstrap_timers<'js>(
         "cancelAnimationFrame",
     ] {
         let timers = Rc::clone(&timers);
-        global.set(
-            name,
-            Function::new(ctx.clone(), move |id: Opt<u32>| {
-                if let Some(id) = id.0 {
-                    timers.clear(id);
-                }
-            })?,
-        )?;
+        bind(ctx, name, move |id: Opt<u32>| {
+            if let Some(id) = id.0 {
+                timers.clear(id);
+            }
+        })?;
     }
 
     {
         let microtasks = Rc::clone(&microtasks);
-        global.set(
+        bind(
+            ctx,
             "queueMicrotask",
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'js>, callback: Function<'js>| {
-                    microtasks
-                        .borrow_mut()
-                        .push(Persistent::save(&ctx, callback));
-                },
-            )?,
+            move |ctx: Ctx<'js>, callback: Function<'js>| {
+                microtasks
+                    .borrow_mut()
+                    .push(Persistent::save(&ctx, callback));
+            },
         )?;
     }
 

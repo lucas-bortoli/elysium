@@ -1,3 +1,4 @@
+mod bindings;
 mod esm_resolver;
 mod filesystem;
 mod framebuffer;
