@@ -1,0 +1,5 @@
+{
+  "title": "Clipping",
+  "description": "Confining drawing to a region, and how nesting only ever narrows it.",
+  "order": 4
+}
