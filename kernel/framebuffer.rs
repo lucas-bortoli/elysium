@@ -56,6 +56,17 @@ pub enum DrawCommand {
         x: f32,
         y: f32,
     },
+    /// Draws part of an image under a transform of its own — a source rect,
+    /// a size, a flip, a turn. Kept apart from `DrawImage` so the common
+    /// case of a whole image at its natural size stays a straight blit.
+    DrawImageTransformed {
+        pixmap: Rc<tiny_skia::Pixmap>,
+        /// The part of the image to draw, in its own pixels.
+        source: tiny_skia::Rect,
+        /// Where that part lands, mapping the source rect's own top-left
+        /// corner and size onto the surface.
+        transform: tiny_skia::Transform,
+    },
     DrawText {
         x: f32,
         y: f32,
@@ -121,6 +132,8 @@ pub fn bootstrap_framebuffer_bindings(
     images: Rc<crate::image::ImageTable>,
 ) -> Result<()> {
     let global = ctx.globals();
+    let images_transformed = Rc::clone(&images);
+    let draw_commands_transformed = Rc::clone(&draw_commands);
 
     paths::bootstrap_path_bindings(
         ctx,
@@ -276,6 +289,37 @@ pub fn bootstrap_framebuffer_bindings(
                     x,
                     y,
                 });
+                Ok(())
+            },
+        )?,
+    )?;
+
+    global.set(
+        "__framebuffer_draw_image_transformed",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'_>, id: u32, source: Vec<f32>, transform: Vec<f32>| -> Result<()> {
+                let image = crate::image::resolve_image(&ctx, &images_transformed, id)?;
+                // `[x, y, w, h]` and the six numbers of a 2x3 matrix, both
+                // assembled on the JS side — too many to pass one by one.
+                let ([sx, sy, sw, sh], [a, b, c, d, e, f]) = (
+                    <[f32; 4]>::try_from(source.as_slice()).map_err(|_| {
+                        rquickjs::Exception::throw_type(&ctx, "a source rect needs four numbers")
+                    })?,
+                    <[f32; 6]>::try_from(transform.as_slice()).map_err(|_| {
+                        rquickjs::Exception::throw_type(&ctx, "a transform needs six numbers")
+                    })?,
+                );
+                let Some(source) = tiny_skia::Rect::from_xywh(sx, sy, sw, sh) else {
+                    return Ok(()); // nothing of the image asked for
+                };
+                draw_commands_transformed
+                    .borrow_mut()
+                    .push(DrawCommand::DrawImageTransformed {
+                        pixmap: image.pixmap,
+                        source,
+                        transform: tiny_skia::Transform::from_row(a, b, c, d, e, f),
+                    });
                 Ok(())
             },
         )?,
@@ -584,6 +628,40 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
                     state.clip(),
                 );
             }
+            DrawCommand::DrawImageTransformed {
+                pixmap: image,
+                source,
+                transform,
+            } => {
+                // The pattern is shifted so the source rect's own top-left
+                // lands at the local origin, which crops to it without
+                // copying the pixels out first. Nearest sampling keeps every
+                // pixel drawn an exact palette color however the image is
+                // turned or resized.
+                let pattern = tiny_skia::Pattern::new(
+                    (**image).as_ref(),
+                    tiny_skia::SpreadMode::Pad,
+                    tiny_skia::FilterQuality::Nearest,
+                    1.0,
+                    tiny_skia::Transform::from_translate(-source.x(), -source.y()),
+                );
+                let patterned = tiny_skia::Paint {
+                    shader: pattern,
+                    anti_alias: false,
+                    ..Default::default()
+                };
+                let Some(local) =
+                    tiny_skia::Rect::from_xywh(0.0, 0.0, source.width(), source.height())
+                else {
+                    continue;
+                };
+                pixmap.fill_rect(
+                    local,
+                    &patterned,
+                    state.transform().pre_concat(*transform),
+                    state.clip(),
+                );
+            }
             DrawCommand::DrawText {
                 x,
                 y,
@@ -705,21 +783,7 @@ mod tests {
             ],
         );
 
-        for y in 0..pixmap.height() {
-            for x in 0..pixmap.width() {
-                let found = pixel_at(&pixmap, x, y);
-                let nearest = Color::nearest(
-                    ((found >> 16) & 0xff) as u8,
-                    ((found >> 8) & 0xff) as u8,
-                    (found & 0xff) as u8,
-                );
-                assert_eq!(
-                    found,
-                    nearest.hex(),
-                    "pixel at ({x}, {y}) is {found:#08x}, which is not a palette color"
-                );
-            }
-        }
+        assert_every_pixel_is_a_palette_color(&pixmap);
     }
 
     #[test]
@@ -971,6 +1035,144 @@ mod tests {
         let single = lit_at(1);
         assert!(single > 0, "the text should have drawn something");
         assert_eq!(lit_at(3), single * 9);
+    }
+
+    /// A 4x4 image with a single distinct pixel at `(1, 1)`, so a source
+    /// rect can be told apart from the whole image.
+    fn marked_image() -> std::rc::Rc<tiny_skia::Pixmap> {
+        let mut image = tiny_skia::Pixmap::new(4, 4).expect("test image");
+        image.fill(Color::Teal300.to_skia());
+        let hex = Color::Rose500.hex();
+        image.pixels_mut()[1 * 4 + 1] = tiny_skia::ColorU8::from_rgba(
+            ((hex >> 16) & 0xff) as u8,
+            ((hex >> 8) & 0xff) as u8,
+            (hex & 0xff) as u8,
+            255,
+        )
+        .premultiply();
+        std::rc::Rc::new(image)
+    }
+
+    fn identity() -> tiny_skia::Transform {
+        tiny_skia::Transform::identity()
+    }
+
+    #[test]
+    fn a_source_rect_crops_to_the_part_of_the_image_it_names() {
+        let mut pixmap = surface();
+        rasterize(
+            &mut pixmap,
+            &[
+                DrawCommand::ClearScreen {
+                    color: Color::Slate900,
+                },
+                DrawCommand::DrawImageTransformed {
+                    pixmap: marked_image(),
+                    // Just the marked pixel.
+                    source: tiny_skia::Rect::from_xywh(1.0, 1.0, 1.0, 1.0).unwrap(),
+                    transform: tiny_skia::Transform::from_translate(10.0, 10.0),
+                },
+            ],
+        );
+        assert_eq!(pixel_at(&pixmap, 10, 10), Color::Rose500.hex());
+        // One pixel wide, so its neighbours are untouched.
+        assert_eq!(pixel_at(&pixmap, 11, 10), Color::Slate900.hex());
+        assert_eq!(pixel_at(&pixmap, 9, 10), Color::Slate900.hex());
+    }
+
+    #[test]
+    fn a_scaled_image_grows_by_whole_pixel_blocks() {
+        let mut pixmap = surface();
+        rasterize(
+            &mut pixmap,
+            &[
+                DrawCommand::ClearScreen {
+                    color: Color::Slate900,
+                },
+                DrawCommand::DrawImageTransformed {
+                    pixmap: marked_image(),
+                    source: tiny_skia::Rect::from_xywh(1.0, 1.0, 1.0, 1.0).unwrap(),
+                    transform: tiny_skia::Transform::from_row(4.0, 0.0, 0.0, 4.0, 10.0, 10.0),
+                },
+            ],
+        );
+        // The one marked pixel, four times the size.
+        assert_eq!(lit_pixels(&pixmap, Color::Rose500), 16);
+        assert_eq!(pixel_at(&pixmap, 13, 13), Color::Rose500.hex());
+        assert_eq!(pixel_at(&pixmap, 14, 14), Color::Slate900.hex());
+    }
+
+    #[test]
+    fn a_flipped_image_covers_the_same_box_the_other_way_round() {
+        let placements = [
+            // Unflipped: the marked pixel sits one in from the top-left.
+            (identity(), (11, 11)),
+            // Mirrored left to right within the same 4x4 box.
+            (
+                tiny_skia::Transform::from_row(-1.0, 0.0, 0.0, 1.0, 4.0, 0.0),
+                (12, 11),
+            ),
+        ];
+        for (flip, (x, y)) in placements {
+            let mut pixmap = surface();
+            rasterize(
+                &mut pixmap,
+                &[
+                    DrawCommand::ClearScreen {
+                        color: Color::Slate900,
+                    },
+                    DrawCommand::DrawImageTransformed {
+                        pixmap: marked_image(),
+                        source: tiny_skia::Rect::from_xywh(0.0, 0.0, 4.0, 4.0).unwrap(),
+                        transform: tiny_skia::Transform::from_translate(10.0, 10.0)
+                            .pre_concat(flip),
+                    },
+                ],
+            );
+            assert_eq!(pixel_at(&pixmap, x, y), Color::Rose500.hex());
+            assert_eq!(lit_pixels(&pixmap, Color::Rose500), 1);
+        }
+    }
+
+    #[test]
+    fn a_turned_or_resized_image_still_only_paints_palette_colors() {
+        // Turning and resizing are where a smoothing sampler would blend
+        // neighbouring pixels into something no program could have named.
+        let mut pixmap = surface();
+        rasterize(
+            &mut pixmap,
+            &[
+                DrawCommand::ClearScreen {
+                    color: Color::Slate900,
+                },
+                DrawCommand::DrawImageTransformed {
+                    pixmap: marked_image(),
+                    source: tiny_skia::Rect::from_xywh(0.0, 0.0, 4.0, 4.0).unwrap(),
+                    transform: tiny_skia::Transform::from_translate(20.0, 20.0)
+                        .pre_concat(tiny_skia::Transform::from_rotate(37.0))
+                        .pre_concat(tiny_skia::Transform::from_scale(3.5, 2.25)),
+                },
+            ],
+        );
+        assert_every_pixel_is_a_palette_color(&pixmap);
+    }
+
+    fn assert_every_pixel_is_a_palette_color(pixmap: &tiny_skia::Pixmap) {
+        for y in 0..pixmap.height() {
+            for x in 0..pixmap.width() {
+                let found = pixel_at(pixmap, x, y);
+                let nearest = Color::nearest(
+                    ((found >> 16) & 0xff) as u8,
+                    ((found >> 8) & 0xff) as u8,
+                    (found & 0xff) as u8,
+                );
+                assert_eq!(
+                    found,
+                    nearest.hex(),
+                    "pixel at ({x}, {y}) is {found:#08x}, which is not a palette color"
+                );
+            }
+        }
     }
 
     fn lit_pixels(pixmap: &tiny_skia::Pixmap, color: Color) -> usize {

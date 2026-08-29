@@ -413,12 +413,56 @@ declare module "ely:framebuffer" {
     color: Color,
   ): void;
 
-  /** Draws `image` with its top-left corner at `(x, y)`, at its natural
-   * size — no scaling or rotation. */
+  /** Which part of an image to draw, and how to place it. */
+  export interface DrawImageOptions {
+    /** The left edge of the part of the image to draw. Defaults to 0. */
+    sx?: number;
+    /** The top edge of the part of the image to draw. Defaults to 0. */
+    sy?: number;
+    /** The width of the part to draw. Defaults to the rest of the image,
+     * to the right of `sx`. */
+    sw?: number;
+    /** The height of the part to draw. Defaults to the rest of the image,
+     * below `sy`. */
+    sh?: number;
+    /** Draws the image this many times its natural size. A single number
+     * scales both axes alike. Whole numbers keep it pixel-crisp; anything
+     * else lands its pixels unevenly, since nothing is smoothed. */
+    scale?: number | import("ely:math").Vector2d;
+    /** Mirrors the image left to right, within the same destination box. */
+    flipX?: boolean;
+    /** Mirrors the image top to bottom, within the same destination box. */
+    flipY?: boolean;
+  }
+
+  /** Where an image turns about, in the drawn image's own pixels, measured
+   * from its top-left corner. */
+  export interface DrawImageRotatedOptions extends DrawImageOptions {
+    /** Defaults to the left edge. */
+    originX?: number;
+    /** Defaults to the top edge. */
+    originY?: number;
+  }
+
+  /** Draws `image` with its top-left corner at `(x, y)`. With no options it
+   * goes on at its natural size, whole; options take part of it instead,
+   * resize it, or mirror it. */
   export function drawImage(
     image: import("ely:image").Image | import("ely:image").ImageId,
     x: number,
     y: number,
+    options?: DrawImageOptions,
+  ): void;
+
+  /** Draws `image` at `(x, y)`, turned `radians` about the point
+   * `originX`, `originY` within it — clockwise on screen, since `y` grows
+   * downward. The origin defaults to the image's top-left corner. */
+  export function drawImageRotated(
+    image: import("ely:image").Image | import("ely:image").ImageId,
+    x: number,
+    y: number,
+    radians: number,
+    options?: DrawImageRotatedOptions,
   ): void;
 
   /** Which edge of the text box `drawText`'s `x` names. */

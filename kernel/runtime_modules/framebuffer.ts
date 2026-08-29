@@ -99,6 +99,13 @@ declare function __framebuffer_push_transform(
 declare function __framebuffer_pop_transform(): void;
 declare function __framebuffer_push_clip(rule: FillRule): void;
 declare function __framebuffer_pop_clip(): void;
+declare function __framebuffer_draw_image_transformed(
+  id: number,
+  source: [number, number, number, number],
+  transform: [number, number, number, number, number, number],
+): void;
+declare function __image_width(id: number): number;
+declare function __image_height(id: number): number;
 declare function __framebuffer_set_pixel(
   x: number,
   y: number,
@@ -502,13 +509,6 @@ export function fillRectangle(
 ): void {
   if (!insideDrawHandler) throw new DrawOutsideHandlerError();
   __framebuffer_fill_rectangle(x, y, w, h, color);
-}
-
-/** Draws `image` with its top-left corner at `(x, y)`, at its natural size —
- * no scaling or rotation. */
-export function drawImage(image: Image | ImageId, x: number, y: number): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_draw_image(typeof image === "number" ? image : image.id, x, y);
 }
 
 /** Which edge of the text box `drawText`'s `x` names. */
@@ -1069,4 +1069,158 @@ export function drawPixels(points: readonly Vector2d[], color: Color): void {
   for (const point of points) {
     __framebuffer_set_pixel(point.x, point.y, color);
   }
+}
+
+/** A 2x3 matrix laid out so that a point `(x, y)` maps to
+ * `(a x + c y + e, b x + d y + f)` — the same six numbers the kernel takes. */
+type Matrix = [number, number, number, number, number, number];
+
+/** `outer` applied after `inner`, so `inner` acts on a point first. */
+function concat(outer: Matrix, inner: Matrix): Matrix {
+  const [a, b, c, d, e, f] = outer;
+  const [g, h, i, j, k, l] = inner;
+  return [
+    a * g + c * h,
+    b * g + d * h,
+    a * i + c * j,
+    b * i + d * j,
+    a * k + c * l + e,
+    b * k + d * l + f,
+  ];
+}
+
+/** Which part of an image to draw, and how to place it. */
+export interface DrawImageOptions {
+  /** The left edge of the part of the image to draw. Defaults to 0. */
+  sx?: number;
+  /** The top edge of the part of the image to draw. Defaults to 0. */
+  sy?: number;
+  /** The width of the part of the image to draw. Defaults to the rest of
+   * it, to the right of `sx`. */
+  sw?: number;
+  /** The height of the part of the image to draw. Defaults to the rest of
+   * it, below `sy`. */
+  sh?: number;
+  /** Draws the image this many times its natural size. A single number
+   * scales both axes alike. Whole numbers keep it pixel-crisp; anything
+   * else lands its pixels unevenly, since nothing is smoothed. */
+  scale?: number | Vector2d;
+  /** Mirrors the image left to right, within the same destination box. */
+  flipX?: boolean;
+  /** Mirrors the image top to bottom, within the same destination box. */
+  flipY?: boolean;
+}
+
+/** Where an image turns about, in the drawn image's own pixels, measured
+ * from its top-left corner. */
+export interface DrawImageRotatedOptions extends DrawImageOptions {
+  /** Defaults to the left edge. */
+  originX?: number;
+  /** Defaults to the top edge. */
+  originY?: number;
+}
+
+function imageId(image: Image | ImageId): number {
+  return typeof image === "number" ? image : image.id;
+}
+
+/** The source rect asked for, filled in against the image's real size. */
+function sourceRect(
+  id: number,
+  options: DrawImageOptions,
+): [number, number, number, number] {
+  const sx = options.sx ?? 0;
+  const sy = options.sy ?? 0;
+  return [
+    sx,
+    sy,
+    options.sw ?? __image_width(id) - sx,
+    options.sh ?? __image_height(id) - sy,
+  ];
+}
+
+/** Maps the source rect's own box onto the surface: mirrored, resized,
+ * turned about its origin, and finally moved to `(x, y)`. */
+function placement(
+  x: number,
+  y: number,
+  sw: number,
+  sh: number,
+  radians: number,
+  options: DrawImageRotatedOptions,
+): Matrix {
+  const scale = options.scale ?? 1;
+  const scaleX = typeof scale === "number" ? scale : scale.x;
+  const scaleY = typeof scale === "number" ? scale : scale.y;
+
+  // Mirroring folds the box back onto itself, so a flipped image covers the
+  // same destination as an unflipped one.
+  let matrix: Matrix = [
+    options.flipX ? -1 : 1,
+    0,
+    0,
+    options.flipY ? -1 : 1,
+    options.flipX ? sw : 0,
+    options.flipY ? sh : 0,
+  ];
+  matrix = concat([scaleX, 0, 0, scaleY, 0, 0], matrix);
+
+  if (radians !== 0) {
+    const ox = options.originX ?? 0;
+    const oy = options.originY ?? 0;
+    const cos = Math.cos(radians);
+    const sin = Math.sin(radians);
+    // Turn about the origin: bring it to zero, turn, and put it back.
+    matrix = concat(
+      concat([1, 0, 0, 1, ox, oy], [cos, sin, -sin, cos, 0, 0]),
+      concat([1, 0, 0, 1, -ox, -oy], matrix),
+    );
+  }
+
+  return concat([1, 0, 0, 1, x, y], matrix);
+}
+
+/** Draws `image` with its top-left corner at `(x, y)`.
+ *
+ * With no options it goes on at its natural size, whole. Options take part
+ * of it instead, resize it, or mirror it — see `DrawImageOptions`. */
+export function drawImage(
+  image: Image | ImageId,
+  x: number,
+  y: number,
+  options?: DrawImageOptions,
+): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  const id = imageId(image);
+  if (options === undefined) {
+    __framebuffer_draw_image(id, x, y);
+    return;
+  }
+  const source = sourceRect(id, options);
+  __framebuffer_draw_image_transformed(
+    id,
+    source,
+    placement(x, y, source[2], source[3], 0, options),
+  );
+}
+
+/** Draws `image` at `(x, y)`, turned `radians` about the point `originX`,
+ * `originY` within it — clockwise on screen, since `y` grows downward. The
+ * origin defaults to the image's top-left corner, so turning about its
+ * middle means naming its middle. */
+export function drawImageRotated(
+  image: Image | ImageId,
+  x: number,
+  y: number,
+  radians: number,
+  options: DrawImageRotatedOptions = {},
+): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  const id = imageId(image);
+  const source = sourceRect(id, options);
+  __framebuffer_draw_image_transformed(
+    id,
+    source,
+    placement(x, y, source[2], source[3], radians, options),
+  );
 }
