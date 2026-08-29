@@ -81,6 +81,13 @@ pub enum DrawCommand {
         stroke: tiny_skia::Stroke,
         color: Color,
     },
+    /// Sets a single pixel. Bypasses the rasterizer the way text does, so
+    /// it applies the transform and clip in effect itself.
+    SetPixel {
+        x: f32,
+        y: f32,
+        color: Color,
+    },
     /// Nests a transform inside whatever is already in effect, until the
     /// matching `PopTransform`. See `state.rs` for how the two stacks nest.
     PushTransform {
@@ -116,6 +123,23 @@ pub fn bootstrap_framebuffer_bindings(
         Rc::clone(&draw_commands),
         Rc::new(RefCell::new(tiny_skia::PathBuilder::new())),
     )?;
+
+    {
+        let draw_commands = Rc::clone(&draw_commands);
+        global.set(
+            "__framebuffer_set_pixel",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'_>, x: f32, y: f32, color: u16| -> Result<()> {
+                    let color = resolve_color(&ctx, color)?;
+                    draw_commands
+                        .borrow_mut()
+                        .push(DrawCommand::SetPixel { x, y, color });
+                    Ok(())
+                },
+            )?,
+        )?;
+    }
 
     {
         let draw_commands = Rc::clone(&draw_commands);
@@ -505,6 +529,27 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
                 paint.set_color(color.to_skia());
                 pixmap.stroke_path(path, &paint, stroke, state.transform(), state.clip());
             }
+            DrawCommand::SetPixel { x, y, color } => {
+                let (px, py) = state.map_point(*x, *y);
+                let (px, py) = (px.floor() as i32, py.floor() as i32);
+                if px >= 0
+                    && py >= 0
+                    && px < pixmap.width() as i32
+                    && py < pixmap.height() as i32
+                    && state.is_visible(px, py)
+                {
+                    let hex = color.hex();
+                    let width = pixmap.width() as i32;
+                    pixmap.pixels_mut()[(py * width + px) as usize] =
+                        tiny_skia::ColorU8::from_rgba(
+                            ((hex >> 16) & 0xff) as u8,
+                            ((hex >> 8) & 0xff) as u8,
+                            (hex & 0xff) as u8,
+                            255,
+                        )
+                        .premultiply();
+                }
+            }
             DrawCommand::PushTransform { transform } => state.push_transform(*transform),
             DrawCommand::PopTransform => state.pop_transform(),
             DrawCommand::PushClip { path, rule } => state.push_clip(path.as_ref(), *rule),
@@ -764,6 +809,67 @@ mod tests {
         assert_eq!(pixel_at(&pixmap, 14, 14), Color::Amber400.hex());
         assert_eq!(pixel_at(&pixmap, 15, 14), Color::Slate900.hex());
         assert_eq!(pixel_at(&pixmap, 9, 10), Color::Slate900.hex());
+    }
+
+    #[test]
+    fn a_pixel_lands_on_the_pixel_its_coordinate_falls_inside() {
+        // Coordinates name grid corners, so both of these name the same
+        // pixel: the one between (3, 4) and (4, 5).
+        let mut pixmap = surface();
+        rasterize(
+            &mut pixmap,
+            &[
+                DrawCommand::ClearScreen {
+                    color: Color::Slate900,
+                },
+                DrawCommand::SetPixel {
+                    x: 3.0,
+                    y: 4.0,
+                    color: Color::Amber400,
+                },
+                DrawCommand::SetPixel {
+                    x: 10.9,
+                    y: 10.1,
+                    color: Color::Teal300,
+                },
+            ],
+        );
+        assert_eq!(pixel_at(&pixmap, 3, 4), Color::Amber400.hex());
+        assert_eq!(pixel_at(&pixmap, 10, 10), Color::Teal300.hex());
+        assert_eq!(pixel_at(&pixmap, 11, 10), Color::Slate900.hex());
+    }
+
+    #[test]
+    fn a_pixel_outside_the_surface_or_a_clip_is_dropped() {
+        let mut pixmap = surface();
+        rasterize(
+            &mut pixmap,
+            &[
+                DrawCommand::ClearScreen {
+                    color: Color::Slate900,
+                },
+                DrawCommand::SetPixel {
+                    x: -5.0,
+                    y: 10.0,
+                    color: Color::Amber400,
+                },
+                DrawCommand::SetPixel {
+                    x: 1000.0,
+                    y: 10.0,
+                    color: Color::Amber400,
+                },
+                DrawCommand::PushClip {
+                    path: Some(rect_path(0.0, 0.0, 10.0, 10.0)),
+                    rule: tiny_skia::FillRule::Winding,
+                },
+                DrawCommand::SetPixel {
+                    x: 20.0,
+                    y: 20.0,
+                    color: Color::Amber400,
+                },
+            ],
+        );
+        assert_eq!(lit_pixels(&pixmap, Color::Amber400), 0);
     }
 
     #[test]

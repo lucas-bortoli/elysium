@@ -98,6 +98,11 @@ declare function __framebuffer_push_transform(
 declare function __framebuffer_pop_transform(): void;
 declare function __framebuffer_push_clip(rule: FillRule): void;
 declare function __framebuffer_pop_clip(): void;
+declare function __framebuffer_set_pixel(
+  x: number,
+  y: number,
+  color: Color,
+): void;
 
 // The kernel's fixed, curated color palette. Every color a program can
 // draw with is one of these named entries — never a raw, unconstrained
@@ -927,5 +932,21 @@ function tracePoints(points: readonly Vector2d[]): void {
   __framebuffer_path_move_to(points[0].x, points[0].y);
   for (let i = 1; i < points.length; i++) {
     __framebuffer_path_line_to(points[i].x, points[i].y);
+  }
+}
+
+/** Sets the single pixel that `(x, y)` falls inside. Coordinates name the
+ * corners of the pixel grid, so `(3, 4)` and `(3.5, 4.5)` both set the same
+ * pixel — the fourth across and fifth down. */
+export function setPixel(x: number, y: number, color: Color): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_set_pixel(x, y, color);
+}
+
+/** Sets every pixel in `points` to the same color. */
+export function drawPixels(points: readonly Vector2d[], color: Color): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  for (const point of points) {
+    __framebuffer_set_pixel(point.x, point.y, color);
   }
 }

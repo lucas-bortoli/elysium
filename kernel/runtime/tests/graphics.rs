@@ -339,3 +339,35 @@ fn shape_calls_outside_a_handler_throw_draw_outside_handler_error() {
     assert_eq!(threw.len(), 4);
     assert!(threw.iter().all(|&t| t));
 }
+
+#[test]
+fn setting_pixels_inside_a_handler_succeeds() {
+    let runtime = eval(
+        "import { addDrawHandler, setPixel, drawPixels, Color } from 'ely:framebuffer'; \
+         globalThis.error = ''; \
+         addDrawHandler(() => { \
+             try { \
+                 setPixel(3, 4, Color.Amber400); \
+                 drawPixels([{ x: 1, y: 1 }, { x: 2, y: 2 }], Color.Teal300); \
+                 drawPixels([], Color.Teal300); \
+                 globalThis.error = 'none'; \
+             } catch (err) { globalThis.error = String(err); } \
+         });",
+    );
+    runtime.run_due_timers().unwrap();
+    assert_eq!(global::<String>(&runtime, "error"), "none");
+}
+
+#[test]
+fn setting_a_pixel_to_an_unknown_color_throws() {
+    let runtime = eval(
+        "import { addDrawHandler, setPixel } from 'ely:framebuffer'; \
+         globalThis.threw = false; \
+         addDrawHandler(() => { \
+             try { setPixel(1, 1, 60000); } \
+             catch (err) { globalThis.threw = err instanceof TypeError; } \
+         });",
+    );
+    runtime.run_due_timers().unwrap();
+    assert!(global::<bool>(&runtime, "threw"));
+}
