@@ -104,23 +104,26 @@ pub fn resolve_image(ctx: &Ctx<'_>, images: &ImageTable, id: u32) -> Result<Load
 }
 
 /// Snaps every pixel's straight (un-premultiplied) RGB to its nearest
-/// palette entry via `Color::nearest`, then re-premultiplies by that
-/// pixel's original alpha — alpha itself is never touched, so transparency
-/// survives quantization untouched. Runs once, at load time, never per
-/// frame. Also reports whether the image is fully opaque, so the
-/// Framebuffer can blit it with a plain copy.
+/// palette entry via `Color::nearest`, and its alpha to fully transparent
+/// or fully opaque, cutting at the midpoint. Both halves keep the same
+/// promise: a pixel this image contributes to a frame is either absent or
+/// an exact palette color, never a blend of one with whatever sits behind
+/// it. Runs once, at load time, never per frame. Also reports whether the
+/// image ends up fully opaque, so the Framebuffer can blit it with a plain
+/// copy.
 fn quantize_to_palette(mut pixmap: tiny_skia::Pixmap) -> (tiny_skia::Pixmap, bool) {
     let mut opaque = true;
     for pixel in pixmap.pixels_mut() {
         let straight = pixel.demultiply();
-        opaque &= straight.alpha() == 255;
+        let alpha = if straight.alpha() >= 128 { 255 } else { 0 };
+        opaque &= alpha == 255;
         let matched = Color::nearest(straight.red(), straight.green(), straight.blue());
         let hex = matched.hex();
         let matched_straight = tiny_skia::ColorU8::from_rgba(
             ((hex >> 16) & 0xff) as u8,
             ((hex >> 8) & 0xff) as u8,
             (hex & 0xff) as u8,
-            straight.alpha(),
+            alpha,
         );
         *pixel = matched_straight.premultiply();
     }
@@ -144,13 +147,35 @@ mod tests {
         assert!(opaque);
     }
 
+    /// Replaces one pixel with `rgba` and quantizes, returning that same
+    /// pixel back as straight (un-premultiplied) channels plus whether the
+    /// whole image came out opaque.
+    fn quantize_one(rgba: [u8; 4]) -> (tiny_skia::ColorU8, bool) {
+        let mut pixmap = solid(4, 4, [10, 20, 30, 255]);
+        pixmap.pixels_mut()[5] =
+            tiny_skia::ColorU8::from_rgba(rgba[0], rgba[1], rgba[2], rgba[3]).premultiply();
+        let (pixmap, opaque) = quantize_to_palette(pixmap);
+        (pixmap.pixels()[5].demultiply(), opaque)
+    }
+
     #[test]
     fn quantize_reports_any_transparency_as_not_opaque() {
-        let mut pixmap = solid(4, 4, [10, 20, 30, 255]);
-        // Punch one pixel to partial alpha.
-        pixmap.pixels_mut()[5] = tiny_skia::ColorU8::from_rgba(10, 20, 30, 128).premultiply();
-        let (_, opaque) = quantize_to_palette(pixmap);
+        let (_, opaque) = quantize_one([10, 20, 30, 8]);
         assert!(!opaque);
+    }
+
+    #[test]
+    fn quantize_snaps_alpha_below_the_midpoint_to_transparent() {
+        let (pixel, opaque) = quantize_one([10, 20, 30, 127]);
+        assert_eq!(pixel.alpha(), 0);
+        assert!(!opaque);
+    }
+
+    #[test]
+    fn quantize_snaps_alpha_at_or_above_the_midpoint_to_opaque() {
+        let (pixel, opaque) = quantize_one([10, 20, 30, 128]);
+        assert_eq!(pixel.alpha(), 255);
+        assert!(opaque);
     }
 }
 
