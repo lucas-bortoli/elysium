@@ -44,6 +44,25 @@ place. If Y is just a design not chosen, drop it and state what the code
 does; a reader who never knew Y was considered loses nothing, and the
 comment stops rotting the moment the history it references is forgotten.
 
+## Writing tests
+
+Tests live at one of two layers. A test that exercises a device's own
+internals, with no JavaScript involved, goes in a `mod tests` inside that
+device's own module — the clip and transform algebra, path geometry, glyph
+metrics, how window events fold into input state. A test that exercises an
+`ely:` surface the way a program sees it, with JavaScript as the input, goes
+in `kernel/runtime/tests/`, one module per surface, using the shared VM
+helpers in `kernel/runtime/tests.rs`.
+
+The two are complementary rather than alternatives, and a mechanism worth
+having is usually worth covering at both layers. Prefer the inner one when
+either would do: it runs without building a VM, and it fails pointing at the
+thing that broke.
+
+Name a test as a sentence about the behaviour it pins down
+(`a_nested_clip_cannot_widen_the_one_it_nests_in`), not after the function it
+calls.
+
 ## Committing
 
 When asked to commit, split the changes into separate commits along

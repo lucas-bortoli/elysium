@@ -299,4 +299,137 @@ mod tests {
         queue.clear(id);
         assert!(queue.is_empty(), "cleared");
     }
+
+    /// A queue plus the JS context its callbacks have to be saved against.
+    /// Every test below schedules through this, since a `Persistent` can
+    /// only be made from inside a live context.
+    fn queue_with<R>(body: impl FnOnce(&TimerQueue, &Ctx<'_>) -> R) -> R {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+        let queue = TimerQueue::new();
+        context.with(|ctx| body(&queue, &ctx))
+    }
+
+    fn schedule_at(queue: &TimerQueue, ctx: &Ctx<'_>, delay_ms: f64) -> u32 {
+        let noop = Function::new(ctx.clone(), || {}).unwrap();
+        queue
+            .schedule(ctx, noop, delay_ms, Vec::new(), None)
+            .unwrap()
+    }
+
+    #[test]
+    fn due_ids_reports_only_timers_whose_delay_has_elapsed() {
+        queue_with(|queue, ctx| {
+            let soon = schedule_at(queue, ctx, 0.0);
+            let later = schedule_at(queue, ctx, 10_000.0);
+
+            let due = queue.due_ids(Instant::now());
+            assert_eq!(due, vec![soon], "only the elapsed timer is due");
+
+            let due = queue.due_ids(Instant::now() + Duration::from_secs(20));
+            assert_eq!(due, vec![soon, later], "far enough ahead, both are");
+        });
+    }
+
+    #[test]
+    fn a_negative_or_absent_delay_is_due_immediately() {
+        queue_with(|queue, ctx| {
+            let negative = schedule_at(queue, ctx, -5_000.0);
+            assert_eq!(queue.due_ids(Instant::now()), vec![negative]);
+        });
+    }
+
+    #[test]
+    fn preparing_a_one_shot_timer_takes_it_out_of_the_queue() {
+        queue_with(|queue, ctx| {
+            let id = schedule_at(queue, ctx, 0.0);
+            assert!(queue.prepare_run(id).is_some(), "first run");
+            assert!(queue.is_empty(), "a one-shot timer is spent once prepared");
+            assert!(
+                queue.prepare_run(id).is_none(),
+                "and cannot be prepared twice"
+            );
+        });
+    }
+
+    #[test]
+    fn preparing_an_interval_leaves_it_in_the_queue_to_be_rescheduled() {
+        queue_with(|queue, ctx| {
+            let noop = Function::new(ctx.clone(), || {}).unwrap();
+            let id = queue
+                .schedule(ctx, noop, 0.0, Vec::new(), Some(Duration::from_secs(1)))
+                .unwrap();
+
+            let (_callback, _args, interval) = queue.prepare_run(id).expect("interval prepares");
+            assert_eq!(interval, Some(Duration::from_secs(1)));
+            assert!(!queue.is_empty(), "an interval survives its own firing");
+        });
+    }
+
+    /// The case a callback that clears its own interval exercises: by the
+    /// time the manager reschedules, the id is gone and must stay gone.
+    #[test]
+    fn rescheduling_a_timer_its_callback_cleared_does_not_revive_it() {
+        queue_with(|queue, ctx| {
+            let noop = Function::new(ctx.clone(), || {}).unwrap();
+            let id = queue
+                .schedule(ctx, noop, 0.0, Vec::new(), Some(Duration::from_secs(1)))
+                .unwrap();
+
+            queue.prepare_run(id).expect("interval prepares");
+            queue.clear(id); // what `clearInterval` inside the callback does
+            queue.reschedule_if_still_active(id, Instant::now() + Duration::from_secs(1));
+
+            assert!(queue.is_empty(), "a cleared interval stays cleared");
+            assert!(queue.due_ids(Instant::now()).is_empty());
+        });
+    }
+
+    #[test]
+    fn rescheduling_a_live_interval_moves_it_past_the_current_instant() {
+        queue_with(|queue, ctx| {
+            let noop = Function::new(ctx.clone(), || {}).unwrap();
+            let id = queue
+                .schedule(ctx, noop, 0.0, Vec::new(), Some(Duration::from_secs(1)))
+                .unwrap();
+
+            let now = Instant::now();
+            assert_eq!(queue.due_ids(now), vec![id], "due before rescheduling");
+            queue.prepare_run(id).expect("interval prepares");
+            queue.reschedule_if_still_active(id, now + Duration::from_secs(1));
+
+            assert!(queue.due_ids(now).is_empty(), "not due again yet");
+            assert_eq!(
+                queue.due_ids(now + Duration::from_secs(2)),
+                vec![id],
+                "due again once its period has passed"
+            );
+        });
+    }
+
+    /// All four clear functions share one id space, so clearing one timer
+    /// must leave its neighbours alone.
+    #[test]
+    fn clearing_one_timer_leaves_the_others_scheduled() {
+        queue_with(|queue, ctx| {
+            let first = schedule_at(queue, ctx, 0.0);
+            let second = schedule_at(queue, ctx, 0.0);
+
+            queue.clear(first);
+            assert_eq!(queue.due_ids(Instant::now()), vec![second]);
+            queue.clear(9_999); // an id that was never handed out
+            assert_eq!(queue.due_ids(Instant::now()), vec![second]);
+        });
+    }
+
+    #[test]
+    fn an_animation_frame_callback_is_handed_a_timestamp_instead_of_args() {
+        queue_with(|queue, ctx| {
+            let noop = Function::new(ctx.clone(), || {}).unwrap();
+            let id = queue.schedule_animation_frame(ctx, noop).unwrap();
+            let (_callback, args, interval) = queue.prepare_run(id).expect("prepares");
+            assert!(matches!(args, TimerArgs::AnimationFrameTimestamp));
+            assert_eq!(interval, None, "an animation frame fires once");
+        });
+    }
 }
