@@ -8,6 +8,7 @@ use rquickjs::{
     Context, Ctx, Error, Function, Module, Persistent, Result, Runtime as JsRuntime, Type, Value,
 };
 
+use crate::bindings::bind;
 use crate::esm_resolver::{
     CompilingLoader, EmbeddedOrFileResolver, bootstrap_jsx_runtime, set_virtual_import_meta,
 };
@@ -58,6 +59,53 @@ const DEFAULT_EVAL_BUDGET: Duration = Duration::from_secs(5);
 /// of milliseconds at any reasonable frame rate.
 const FRAME_BUDGET: Duration = Duration::from_millis(16);
 
+/// The devices the kernel owns and every VM shares a handle to.
+///
+/// A process gets no private copy of any of these: `draw_commands` is the one
+/// buffer `ely:framebuffer`'s bindings append to and the kernel drains once a
+/// guarded `draw()` returns, `input` is the pointer and keyboard state fed
+/// from raw window events, and `scale` is the physical-pixels-per-logical-pixel
+/// setting `setScale` writes straight into. `userland_root` is the root of the
+/// whole userland tree — an absolute virtual path resolves against it and can
+/// never escape it, whatever the process's own entry path was, and every
+/// module's `import.meta` is expressed relative to it.
+///
+/// Canonicalized once, when this is built, so every sandbox walk downstream
+/// starts from a real, symlink-free root and no caller has to re-establish
+/// that invariant.
+#[derive(Clone)]
+pub struct Devices {
+    pub draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
+    pub input: Rc<Input>,
+    pub scale: Rc<Cell<u32>>,
+    pub userland_root: PathBuf,
+}
+
+impl Devices {
+    /// Panics if `userland_root` doesn't resolve — there is no useful Elysium
+    /// without a userland tree, and failing here beats every path operation
+    /// failing later for a reason that no longer names the cause.
+    pub fn new(
+        draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
+        input: Rc<Input>,
+        scale: Rc<Cell<u32>>,
+        userland_root: PathBuf,
+    ) -> Self {
+        let userland_root = std::fs::canonicalize(&userland_root).unwrap_or_else(|err| {
+            panic!(
+                "userland root {} is invalid: {err}",
+                userland_root.display()
+            )
+        });
+        Self {
+            draw_commands,
+            input,
+            scale,
+            userland_root,
+        }
+    }
+}
+
 pub struct ElysiumRuntime {
     /// This and the field below hold [`Persistent`] JS values, which must be
     /// dropped while `js_runtime` is still alive to free their underlying
@@ -99,35 +147,22 @@ pub struct ElysiumRuntime {
 }
 
 impl ElysiumRuntime {
-    /// `draw_commands` is the Framebuffer device's shared draw-command buffer:
-    /// `ely:framebuffer`'s hidden globals push onto it directly rather than
-    /// touching any drawing state themselves, keeping the VM's own bindings
-    /// ignorant of how frames actually get rasterized. `input` is the
-    /// Input device's shared pointer state, updated from raw window events
-    /// and read by `ely:input`'s hidden globals. `scale` is the
-    /// Framebuffer's shared physical-pixels-per-logical-pixel setting;
-    /// `ely:framebuffer`'s `setScale` writes to it directly, the same way
-    /// `draw_commands` is written to. `userland_root` is the root of the
-    /// whole userland tree, shared by every program — `ely:image`'s
-    /// `loadImage` resolves an absolute virtual path against it and can
-    /// never escape it, regardless of the process's actual working
-    /// directory, and every module's `import.meta.directoryName`/`fileName` is
-    /// expressed relative to this same root.
+    /// Builds a VM wired to `devices`, owned by process `self_id`. `channel`
+    /// is the shared queue its `ely:process` bindings push spawn, send and
+    /// control requests onto; `arguments_json` is whatever `spawn` was passed
+    /// for this process (`None` for init).
     pub fn new(
-        draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
-        input: Rc<Input>,
-        scale: Rc<Cell<u32>>,
-        userland_root: PathBuf,
+        devices: &Devices,
         self_id: ProcessId,
         channel: ProcessChannel,
         arguments_json: Option<String>,
     ) -> Result<Self> {
-        let userland_root = std::fs::canonicalize(&userland_root).unwrap_or_else(|err| {
-            panic!(
-                "userland root {} is invalid: {err}",
-                userland_root.display()
-            )
-        });
+        let Devices {
+            draw_commands,
+            input,
+            scale,
+            userland_root,
+        } = devices.clone();
 
         let js_runtime = JsRuntime::new()?;
         // Every process is capped at 16 MB of QuickJS heap; a program that
@@ -166,8 +201,7 @@ impl ElysiumRuntime {
         let images = Rc::new(ImageTable::new());
 
         context.with(|ctx| -> Result<()> {
-            let global = ctx.globals();
-            global.set("print", Function::new(ctx.clone(), print)?)?;
+            bind(&ctx, "print", print)?;
             bootstrap_jsx_runtime(&ctx)?;
             framebuffer::bootstrap_framebuffer_bindings(
                 &ctx,
@@ -184,8 +218,10 @@ impl ElysiumRuntime {
                 &ctx,
                 self_id,
                 channel,
-                Rc::clone(&message_handler),
-                Rc::clone(&exit_requested),
+                process::ProcessState {
+                    message_handler: Rc::clone(&message_handler),
+                    exit_requested: Rc::clone(&exit_requested),
+                },
                 arguments_json,
             )?;
             Ok(())
@@ -432,8 +468,6 @@ impl Drop for ElysiumRuntime {
     }
 }
 
-/// Host binding for `print(...values)`: writes any number of JS values,
-/// space-separated, to stdout.
 /// Registers `__add_post_init_handler` (wrapped by `ely:lifecycle`'s
 /// `addPostInitHandler`) as a global that appends onto `handlers`, mirroring
 /// `bootstrap_timers`' `queueMicrotask` registration.
@@ -441,14 +475,17 @@ fn bootstrap_post_init_handlers<'js>(
     ctx: &Ctx<'js>,
     handlers: Rc<RefCell<Vec<Persistent<Function<'static>>>>>,
 ) -> Result<()> {
-    ctx.globals().set(
+    bind(
+        ctx,
         "__add_post_init_handler",
-        Function::new(ctx.clone(), move |ctx: Ctx<'js>, handler: Function<'js>| {
+        move |ctx: Ctx<'js>, handler: Function<'js>| {
             handlers.borrow_mut().push(Persistent::save(&ctx, handler));
-        })?,
+        },
     )
 }
 
+/// Host binding for `print(...values)`: writes any number of JS values,
+/// space-separated, to stdout.
 fn print<'js>(ctx: Ctx<'js>, values: Rest<Value<'js>>) -> Result<()> {
     let line = values
         .0

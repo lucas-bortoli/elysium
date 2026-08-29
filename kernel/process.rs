@@ -120,21 +120,30 @@ impl ProcessChannel {
     }
 }
 
+/// The per-process state `ely:process`'s bindings own and the manager reads
+/// back each turn: the dispatch callback `addMessageHandler` installs, and
+/// the flag `exit()` sets.
+pub struct ProcessState {
+    pub message_handler: Rc<RefCell<Option<Persistent<Function<'static>>>>>,
+    pub exit_requested: Rc<Cell<bool>>,
+}
+
 /// Installs the hidden `__process_*` globals `runtime_modules/process.ts`
 /// builds its public surface on. `self_id` is this process's own id;
-/// `channel` is the shared queue back to the manager; `message_handler`
-/// and `exit_requested` are the two pieces of per-process state the
-/// manager reads back each turn; `arguments_json` is the JSON passed to
-/// `spawn` for this process (`None` for the init process).
-#[allow(clippy::too_many_arguments)]
+/// `channel` is the shared queue back to the manager; `arguments_json` is
+/// the JSON passed to `spawn` for this process (`None` for the init
+/// process).
 pub fn bootstrap_process_bindings<'js>(
     ctx: &Ctx<'js>,
     self_id: ProcessId,
     channel: ProcessChannel,
-    message_handler: Rc<RefCell<Option<Persistent<Function<'static>>>>>,
-    exit_requested: Rc<Cell<bool>>,
+    state: ProcessState,
     arguments_json: Option<String>,
 ) -> Result<()> {
+    let ProcessState {
+        message_handler,
+        exit_requested,
+    } = state;
     bind(ctx, "__process_self_id", move || self_id)?;
 
     bind(ctx, "__process_raw_arguments", move || {
