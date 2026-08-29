@@ -13,8 +13,8 @@
     "moduleDetection": "force",
 
     // Programs import their siblings by the real on-disk path, extension
-    // included (`../../lib/text-layout.ts`), since nothing is rewritten
-    // before the host resolves it.
+    // included (`../../lib/geometry.ts`), since nothing is rewritten before
+    // the host resolves it.
     "allowImportingTsExtensions": true,
 
     // JSX is rewritten into calls to the `h`/`Fragment` factory (see

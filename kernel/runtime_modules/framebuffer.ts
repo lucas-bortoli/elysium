@@ -24,6 +24,7 @@ declare function __framebuffer_draw_text(
   y: number,
   text: string,
   font: number,
+  scale: number,
   color: Color,
 ): void;
 declare function __framebuffer_measure_text(
@@ -510,25 +511,144 @@ export function drawImage(image: Image | ImageId, x: number, y: number): void {
   __framebuffer_draw_image(typeof image === "number" ? image : image.id, x, y);
 }
 
-/** Draws `text` with its top-left corner at `(x, y)`, in `color`, using one
- * of the kernel's built-in bitmap fonts. Like the other draw calls, only
- * takes effect from inside a running draw handler. */
+/** Which edge of the text box `drawText`'s `x` names. */
+export type TextAlign = "left" | "center" | "right";
+
+/** How `drawText` and `measureText` should lay a string out. */
+export interface TextOptions {
+  /** Which of the kernel's built-in fonts to use. */
+  font?: Font;
+  /** How many pixels wide to draw each of the font's own pixels — a whole
+   * number of at least 1. A bigger size is the same bitmap with bigger
+   * pixels, so it stays as crisp as the font itself. */
+  scale?: number;
+  /** Which edge of the text `x` names. Defaults to its left. */
+  align?: TextAlign;
+  /** Wraps the text to this width, breaking between words. A single word
+   * too wide to fit still gets a line of its own and overruns it. */
+  maxWidth?: number;
+  /** Multiplies the gap between lines. */
+  lineSpacing?: number;
+}
+
+interface ResolvedTextOptions {
+  font: Font;
+  scale: number;
+  align: TextAlign;
+  maxWidth: number | undefined;
+  lineSpacing: number;
+}
+
+/** Accepts either a bare font, which is all `drawText` used to take, or the
+ * full options object. */
+function resolveTextOptions(
+  fontOrOptions: Font | TextOptions | undefined,
+): ResolvedTextOptions {
+  const options =
+    typeof fontOrOptions === "number"
+      ? { font: fontOrOptions }
+      : (fontOrOptions ?? {});
+  const scale = options.scale ?? 1;
+  if (!Number.isInteger(scale) || scale < 1) {
+    throw new RangeError("text scale must be a whole number of at least 1");
+  }
+  return {
+    font: options.font ?? Font.Cozette,
+    scale,
+    align: options.align ?? "left",
+    maxWidth: options.maxWidth,
+    lineSpacing: options.lineSpacing ?? 1,
+  };
+}
+
+function lineWidth(line: string, options: ResolvedTextOptions): number {
+  return __framebuffer_measure_text(line, options.font)[0] * options.scale;
+}
+
+/** Greedily packs as many words as fit within `maxWidth` onto each line. A
+ * word wider than `maxWidth` on its own still gets its own line and
+ * overruns it — there is no hyphenation or mid-word breaking. */
+function wrapLine(line: string, options: ResolvedTextOptions): string[] {
+  if (options.maxWidth === undefined) return [line];
+  const wrapped: string[] = [];
+  let current = "";
+  for (const word of line.split(" ")) {
+    const candidate = current === "" ? word : `${current} ${word}`;
+    if (current !== "" && lineWidth(candidate, options) > options.maxWidth) {
+      wrapped.push(current);
+      current = word;
+    } else {
+      current = candidate;
+    }
+  }
+  wrapped.push(current);
+  return wrapped;
+}
+
+/** Where every line of `text` sits and how much room the whole block takes,
+ * shared by `drawText` and `measureText` so the two can't disagree. */
+function layoutText(text: string, options: ResolvedTextOptions) {
+  const lines = text
+    .split("\n")
+    .flatMap((line) => wrapLine(line, options));
+  const widths = lines.map((line) => lineWidth(line, options));
+  const lineHeight = __framebuffer_measure_text("", options.font)[1] * options.scale;
+  const step = lineHeight * options.lineSpacing;
+  return {
+    lines,
+    widths,
+    step,
+    width: widths.reduce((widest, width) => Math.max(widest, width), 0),
+    // The last line takes its full height rather than a spaced step, so a
+    // single line measures exactly the font's line height whatever
+    // `lineSpacing` says.
+    height: (lines.length - 1) * step + lineHeight,
+  };
+}
+
+/** Draws `text` in `color` with its top-left corner at `(x, y)`, using one
+ * of the kernel's built-in bitmap fonts.
+ *
+ * Passing options instead of a bare font aligns the text against `x` rather
+ * than starting from it, wraps it to a width, or draws it at a whole-number
+ * multiple of the font's size. Line breaks in `text` are honoured either
+ * way. Like the other draw calls, only takes effect from inside a running
+ * draw handler. */
 export function drawText(
   x: number,
   y: number,
   text: string,
   color: Color,
-  font: Font = Font.Cozette,
+  fontOrOptions: Font | TextOptions = Font.Cozette,
 ): void {
   if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_draw_text(x, y, text, font, color);
+  const options = resolveTextOptions(fontOrOptions);
+  const { lines, widths, step } = layoutText(text, options);
+  for (let i = 0; i < lines.length; i++) {
+    let left = x;
+    if (options.align === "center") left = x - widths[i] / 2;
+    else if (options.align === "right") left = x - widths[i];
+    __framebuffer_draw_text(
+      left,
+      y + step * i,
+      lines[i],
+      options.font,
+      options.scale,
+      color,
+    );
+  }
 }
 
-/** The pixel box `text` would occupy if drawn with `font` — its total
- * advance width and the font's line height. A query, not a draw call: can
- * be used from anywhere to lay text out without assuming the font's size. */
-export function measureText(text: string, font: Font = Font.Cozette): Size2d {
-  const [width, height] = __framebuffer_measure_text(text, font);
+/** The pixel box `text` would occupy if drawn with the same options — the
+ * width of its widest line and the height of the whole block. A query, not
+ * a draw call: can be used from anywhere to lay text out without assuming
+ * the font's size. */
+export function measureText(
+  text: string,
+  fontOrOptions: Font | TextOptions = Font.Cozette,
+): Size2d {
+  const options = resolveTextOptions(fontOrOptions);
+  const { width, height } = layoutText(text, options);
   return { width, height };
 }
 

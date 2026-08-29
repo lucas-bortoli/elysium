@@ -421,24 +421,49 @@ declare module "ely:framebuffer" {
     y: number,
   ): void;
 
-  /** Draws `text` with its top-left corner at `(x, y)`, in `color`, using
-   * one of the kernel's built-in bitmap fonts. Only takes effect from
-   * inside a running draw handler. */
+  /** Which edge of the text box `drawText`'s `x` names. */
+  export type TextAlign = "left" | "center" | "right";
+
+  /** How `drawText` and `measureText` should lay a string out. */
+  export interface TextOptions {
+    /** Which of the kernel's built-in fonts to use. */
+    font?: Font;
+    /** How many pixels wide to draw each of the font's own pixels — a whole
+     * number of at least 1. A bigger size is the same bitmap with bigger
+     * pixels, so it stays as crisp as the font itself. */
+    scale?: number;
+    /** Which edge of the text `x` names. Defaults to its left. */
+    align?: TextAlign;
+    /** Wraps the text to this width, breaking between words. A single word
+     * too wide to fit still gets a line of its own and overruns it. */
+    maxWidth?: number;
+    /** Multiplies the gap between lines. */
+    lineSpacing?: number;
+  }
+
+  /** Draws `text` in `color` with its top-left corner at `(x, y)`, using
+   * one of the kernel's built-in bitmap fonts.
+   *
+   * Passing options instead of a bare font aligns the text against `x`
+   * rather than starting from it, wraps it to a width, or draws it at a
+   * whole-number multiple of the font's size. Line breaks in `text` are
+   * honoured either way. Only takes effect from inside a running draw
+   * handler. */
   export function drawText(
     x: number,
     y: number,
     text: string,
     color: Color,
-    font?: Font,
+    fontOrOptions?: Font | TextOptions,
   ): void;
 
-  /** The pixel box `text` would occupy if drawn with `font` — its total
-   * advance width and the font's line height. A query, not a draw call:
-   * usable from anywhere to lay text out without assuming the font's
-   * size. */
+  /** The pixel box `text` would occupy if drawn with the same options —
+   * the width of its widest line and the height of the whole block. A
+   * query, not a draw call: usable from anywhere to lay text out without
+   * assuming the font's size. */
   export function measureText(
     text: string,
-    font?: Font,
+    fontOrOptions?: Font | TextOptions,
   ): import("ely:math").Size2d;
 
   /** Sets how many physical pixels the window draws each logical pixel as
