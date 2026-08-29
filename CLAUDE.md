@@ -8,7 +8,7 @@ Its features are:
 
 ## Writing documentation
 
-Docs under `Documentation/` are about Elysium as a system — its architecture,
+Docs under `documentation/` are about Elysium as a system — its architecture,
 mechanisms, and the contracts programs and the kernel rely on — not about the
 Rust code that happens to implement it today. Write for a reader who wants to
 understand how Elysium behaves, not one reading the source alongside it.
@@ -25,7 +25,7 @@ VM is destroyed, the kernel keeps running — over describing the code path
 that provides it.
 
 Write in prose, in paragraphs, the way this file and the rest of
-`Documentation/` are written. Reach for a bullet list only when you're
+`documentation/` are written. Reach for a bullet list only when you're
 actually enumerating discrete, parallel items (a set of options, a
 non-goals list); don't default to header-per-topic, bullet-per-sentence
 structure for material that's really just an explanation — that fragments
