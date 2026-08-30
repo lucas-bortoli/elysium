@@ -1,7 +1,7 @@
 import { none } from "ely:container";
 import { addPostInitHandler, delay } from "ely:lifecycle";
 import { spawn } from "ely:process";
-import { Waveform, noteToFrequency, playTone } from "ely:sound";
+import { Waveform, playTone } from "ely:sound";
 import type { Note } from "ely:sound";
 
 // An A major triad, arpeggiated — the one audible sign the sound device came
@@ -16,7 +16,7 @@ addPostInitHandler(async () => {
 
   for (const note of CHIME) {
     await delay(100);
-    playTone(noteToFrequency(note), {
+    playTone(note, {
       waveform: Waveform.Triangle,
       amplitude: 0.6,
       attack: 0.01,
