@@ -34,6 +34,20 @@ reassembling it. A short document doesn't need section headers at all; a
 longer one should still read as connected reasoning under each heading, not
 a list of one-liners.
 
+That default is about explanation, and some documents are also references.
+A surface with a large closed set of knobs — every waveform, every option
+with its default and its range, every error and what triggers it — is
+material a reader scans and comes back to rather than follows once, and a
+table is the right tool for it; `documentation/Sound.md` is the model.
+The test is what the material actually is, not which document it's in: a
+table for a closed set, prose for an argument. Two options contrasted to
+explain who owns a decision are an argument, and splitting them into cells
+makes the reader assemble the reasoning themselves — while ten options
+with their defaults are a set, and writing them out as sentences buries
+what someone opened the page to look up. A reference doc still explains
+its mechanisms in prose; the tables hang off that explanation rather than
+replacing it.
+
 ## Writing code comments
 
 A comment should describe the code as it stands, not the code it used to be
