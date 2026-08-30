@@ -32,7 +32,10 @@ fn main() {
         .to_path_buf();
     let userland_root = exe_dir.join("userland");
 
-    let _audio = audio::start();
+    let audio = audio::start();
+    if let Some(audio) = &audio {
+        audio.play_boot_chime();
+    }
 
     let draw_commands = Rc::new(RefCell::new(Vec::new()));
     let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
