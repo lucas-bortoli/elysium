@@ -1,7 +1,7 @@
 // Ambient declarations for the Elysium host API: globals (print, timers,
 // the JSX factory), the ambient `JSX` namespace, and the `ely:framebuffer`/
 // `ely:lifecycle`/`ely:math`/`ely:input`/`ely:image`/`ely:filesystem`/
-// `ely:container`/`ely:process` namespaces.
+// `ely:container`/`ely:process`/`ely:sound` namespaces.
 
 /** A module's own location, expressed as an absolute path rooted at the
  * userland tree.
@@ -1541,3 +1541,71 @@ declare const h: (
   ...children: unknown[]
 ) => JSX.Element;
 declare const Fragment: (props: Props) => JSX.Element;
+
+declare module "ely:sound" {
+  import type { Option } from "ely:container";
+
+  /** Opaque handle to a sounding voice, returned by `playTone`. */
+  export type VoiceId = number;
+
+  /** The shape of a voice's waveform, which is what decides its timbre. */
+  export const Waveform: {
+    readonly Square: 0;
+    readonly Triangle: 1;
+    readonly Sine: 2;
+    readonly Noise: 3;
+  };
+
+  /** One of `Waveform`'s named entries (e.g. `Waveform.Triangle`). */
+  export type Waveform = (typeof Waveform)[keyof typeof Waveform];
+
+  /** Every note name the system understands: a letter, an optional sharp or
+   * flat, and an octave 0 to 8 — `"A4"`, `"C#5"`, `"Eb3"`. */
+  export type Note =
+    `${"A" | "B" | "C" | "D" | "E" | "F" | "G"}${"" | "#" | "b"}${0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8}`;
+
+  export interface ToneOptions {
+    /** Defaults to `Waveform.Triangle`. */
+    waveform?: Waveform;
+    /** How loud this voice is within the mix, `0` to `1`. Defaults to `0.6`. */
+    amplitude?: number;
+    /** Seconds spent rising from silence to full. Defaults to `0.01`. */
+    attack?: number;
+    /** Seconds spent falling back to silence once released. Defaults to `0.1`. */
+    release?: number;
+    /** Seconds to hold at full before the release begins. Omitted, the voice
+     * holds until `stopVoice`. */
+    duration?: number;
+  }
+
+  /** Starts `frequency` sounding, returning the voice's id. The result is
+   * absent when the machine has no working sound device or every voice is
+   * already in use — both ordinary conditions, not errors. A tone given a
+   * `duration` outlives the code that started it; one given none holds until
+   * `stopVoice` and is released when the program ends.
+   * @throws {RangeError} if amplitude, frequency, attack, release or
+   * duration is out of range.
+   * @throws {TypeError} if `waveform` is not one of `Waveform`'s entries. */
+  export function playTone(
+    frequency: number,
+    options?: ToneOptions,
+  ): Option<VoiceId>;
+
+  /** Releases the voice `id` names, fading it over its own release rather
+   * than cutting it off. An already-finished id is ignored. */
+  export function stopVoice(id: VoiceId): void;
+
+  /** Whether `value` names a note, narrowing it to `Note`. For a name built
+   * at runtime; a literal is checked as it's written. */
+  export function isNote(value: string): value is Note;
+
+  /** The frequency in hertz of the note `note` names, in equal temperament
+   * anchored at `A4` = 440 Hz. A flat and the sharp below it are the same
+   * pitch.
+   * @throws {UnknownNoteError} if `note` isn't a note name. */
+  export function noteToFrequency(note: Note): number;
+
+  export class UnknownNoteError extends Error {
+    constructor(note: string);
+  }
+}

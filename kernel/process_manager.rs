@@ -393,10 +393,13 @@ mod tests {
     fn manager(root: PathBuf) -> ProcessManager {
         let scale = Rc::new(Cell::new(DEFAULT_SCALE));
         let input = Rc::new(Input::new(Rc::clone(&scale)));
+        // Scheduling has nothing to do with sound, and a kernel with no
+        // output device has to schedule exactly the same way.
         ProcessManager::new(Devices::new(
             Rc::new(RefCell::new(Vec::new())),
             input,
             scale,
+            None,
             root,
         ))
     }

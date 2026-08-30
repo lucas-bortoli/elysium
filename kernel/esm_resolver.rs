@@ -36,6 +36,7 @@ const EMBEDDED_RUNTIME_MODULES: &[(&str, &str)] = &[
     ("filesystem", include_str!("runtime_modules/filesystem.ts")),
     ("container", include_str!("runtime_modules/container.ts")),
     ("process", include_str!("runtime_modules/process.ts")),
+    ("sound", include_str!("runtime_modules/sound.ts")),
 ];
 
 /// The namespace every VM-owned module lives under, whether a program
