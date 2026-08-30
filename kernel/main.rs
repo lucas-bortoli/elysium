@@ -80,23 +80,45 @@ fn main() {
             let input = Rc::clone(&input);
             let mut fps_frames: u32 = 0;
             let mut fps_since = Instant::now();
+            // Summed across the same window `fps_frames`/`fps_since` cover,
+            // so the per-frame averages reported alongside FPS are over the
+            // same frames — not just a snapshot of the one frame that
+            // happened to cross the one-second mark.
+            let mut tick_time = std::time::Duration::ZERO;
+            let mut render_time = std::time::Duration::ZERO;
             move |window, _dt| {
                 let framebuffer = framebuffer
                     .get_or_insert_with(|| Framebuffer::new(window.clone(), Rc::clone(&scale)));
 
-                manager.borrow_mut().tick(Instant::now());
+                let tick_start = Instant::now();
+                manager.borrow_mut().tick(tick_start);
+                tick_time += tick_start.elapsed();
 
+                let render_start = Instant::now();
                 framebuffer.render(&draw_commands.borrow());
+                render_time += render_start.elapsed();
+
                 draw_commands.borrow_mut().clear();
                 input.end_frame();
 
-                // Report the average frame rate over the last second.
+                // Report the average frame rate over the last second, split
+                // into how much of each frame went to ticking every
+                // process's VM versus rasterizing and presenting the result
+                // — the two halves of the frame loop a future decision to
+                // move either onto its own thread would be based on.
                 fps_frames += 1;
                 let elapsed = fps_since.elapsed();
                 if elapsed >= std::time::Duration::from_secs(1) {
-                    eprintln!("[fps] {:.1}", fps_frames as f64 / elapsed.as_secs_f64());
+                    eprintln!(
+                        "[fps] {:.1} (tick {:.2}ms, render {:.2}ms avg/frame)",
+                        fps_frames as f64 / elapsed.as_secs_f64(),
+                        tick_time.as_secs_f64() * 1000.0 / fps_frames as f64,
+                        render_time.as_secs_f64() * 1000.0 / fps_frames as f64,
+                    );
                     fps_frames = 0;
                     fps_since = Instant::now();
+                    tick_time = std::time::Duration::ZERO;
+                    render_time = std::time::Duration::ZERO;
                 }
             }
         },
