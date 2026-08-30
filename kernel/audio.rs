@@ -170,6 +170,19 @@ pub struct Envelope {
     pub duration_secs: Option<f32>,
 }
 
+/// A slide from the note's own pitch to another one, over a fixed time.
+///
+/// This is what a kick drum is: a tone starting near 150 Hz and falling to
+/// near 50 Hz inside a tenth of a second reads as a thump rather than as a
+/// note, and no amount of shaping its loudness produces that. It is also the
+/// falling "pew" of an arcade shot, which the Game Boy's first channel could
+/// do in hardware for the same reason — it is cheap and it is unmistakable.
+#[derive(Debug, Clone, Copy)]
+pub struct Sweep {
+    pub to_hz: f32,
+    pub over_secs: f32,
+}
+
 /// Everything [`Audio::play`] needs to start one voice.
 #[derive(Debug, Clone, Copy)]
 pub struct Tone {
@@ -178,6 +191,8 @@ pub struct Tone {
     /// Scales this voice within the mix, before [`MASTER_GAIN`].
     pub amplitude: f32,
     pub envelope: Envelope,
+    /// Where the pitch slides to, if it slides at all.
+    pub sweep: Option<Sweep>,
 }
 
 /// One sounding voice: a waveform, where it currently is in its cycle, and
@@ -244,10 +259,37 @@ impl Voice {
         envelope.sustain_level
     }
 
+    /// This voice's pitch `elapsed` seconds in: its own frequency, sliding
+    /// toward the sweep's target across the sweep's time and holding there
+    /// afterwards.
+    ///
+    /// The slide is geometric rather than linear in hertz, because pitch is
+    /// heard that way — an octave is a doubling, so an even-sounding glide
+    /// is one that multiplies by a constant each moment rather than adding
+    /// one. A linear ramp from 800 Hz to 200 Hz spends most of its time
+    /// sounding low. Endpoints at or below zero can't be multiplied toward,
+    /// so those fall back to a straight ramp.
+    fn frequency_at(&self, elapsed: f32) -> f32 {
+        let Some(sweep) = self.tone.sweep else {
+            return self.tone.frequency_hz;
+        };
+        if sweep.over_secs <= 0.0 {
+            return sweep.to_hz;
+        }
+
+        let from = self.tone.frequency_hz;
+        let through = (elapsed / sweep.over_secs).clamp(0.0, 1.0);
+        if from > 0.0 && sweep.to_hz > 0.0 {
+            from * (sweep.to_hz / from).powf(through)
+        } else {
+            from + (sweep.to_hz - from) * through
+        }
+    }
+
     /// Advances the waveform and the envelope by one sample, entering the
     /// release once `duration_secs` has run out.
     fn advance(&mut self, dt_secs: f32) {
-        self.phase += self.tone.frequency_hz * dt_secs;
+        self.phase += self.frequency_at(self.elapsed_secs) * dt_secs;
         if self.phase >= 1.0 {
             // Clocked per cycle rather than per sample, so frequency
             // pitches the noise — see `advance_lfsr`.
@@ -476,6 +518,7 @@ pub fn bootstrap_audio_bindings(
                   frequency_hz: f32,
                   amplitude: f32,
                   envelope: Vec<f32>,
+                  sweep: Vec<f32>,
                   duration_secs: Option<f32>|
                   -> Result<Option<VoiceId>> {
                 // Everything is checked before the mixer sees any of it. The
@@ -533,6 +576,37 @@ pub fn bootstrap_audio_bindings(
                         "release must not be negative",
                     ));
                 }
+                // Empty when the note holds its pitch, which is the common
+                // case, so it costs nothing to say nothing.
+                let sweep = match sweep.as_slice() {
+                    [] => None,
+                    [to_hz, over_secs] => Some(Sweep {
+                        to_hz: *to_hz,
+                        over_secs: *over_secs,
+                    }),
+                    _ => {
+                        return Err(rquickjs::Exception::throw_type(
+                            &ctx,
+                            "a sweep needs a frequency and a time",
+                        ));
+                    }
+                };
+                if let Some(sweep) = sweep {
+                    if !sweep.to_hz.is_finite() || !(0.0..=MAX_FREQUENCY_HZ).contains(&sweep.to_hz)
+                    {
+                        return Err(rquickjs::Exception::throw_range(
+                            &ctx,
+                            &format!("sweepTo must be between 0 and {MAX_FREQUENCY_HZ} Hz"),
+                        ));
+                    }
+                    if !sweep.over_secs.is_finite() || sweep.over_secs < 0.0 {
+                        return Err(rquickjs::Exception::throw_range(
+                            &ctx,
+                            "sweepOver must not be negative",
+                        ));
+                    }
+                }
+
                 if let Some(duration) = duration_secs
                     && (!duration.is_finite() || duration <= 0.0)
                 {
@@ -556,6 +630,7 @@ pub fn bootstrap_audio_bindings(
                         release_secs,
                         duration_secs,
                     },
+                    sweep,
                 });
                 // Only a voice that holds until stopped needs releasing when
                 // this VM goes away; a timed one sees itself out.
@@ -729,7 +804,7 @@ impl Audio {
 #[cfg(test)]
 mod tests {
     use super::{
-        Audio, Envelope, MASTER_GAIN, MAX_VOICES, Mixer, Tone, Voice, Waveform, advance_lfsr,
+        Audio, Envelope, MASTER_GAIN, MAX_VOICES, Mixer, Sweep, Tone, Voice, Waveform, advance_lfsr,
     };
 
     /// A tone that holds until stopped, with no attack or release ramp, so a
@@ -746,6 +821,7 @@ mod tests {
                 release_secs: 0.0,
                 duration_secs: None,
             },
+            sweep: None,
         }
     }
 
@@ -1173,6 +1249,76 @@ mod tests {
             "it should have rung out"
         );
         assert_eq!(mixer.active(), 1, "but it is still a sounding voice");
+    }
+
+    /// Counts complete cycles in a rendered square wave, which is a
+    /// stand-in for how high it sounded: more zero crossings, higher pitch.
+    fn cycles_in(samples: &[f32]) -> usize {
+        samples
+            .windows(2)
+            .filter(|w| w[0] > 0.0 && w[1] < 0.0)
+            .count()
+    }
+
+    #[test]
+    fn a_sweep_slides_the_pitch_toward_its_target() {
+        let mut swept = tone(Waveform::Square, 400.0);
+        swept.sweep = Some(Sweep {
+            to_hz: 100.0,
+            over_secs: 0.05,
+        });
+        let samples = render_one(swept, 100);
+
+        // The first half sweeps down through the high frequencies; by the
+        // second half it has arrived and holds.
+        let early = cycles_in(&samples[..25]);
+        let late = cycles_in(&samples[75..]);
+        assert!(
+            early > late,
+            "the pitch should fall: {early} cycles early, {late} late"
+        );
+    }
+
+    #[test]
+    fn a_sweep_holds_its_target_once_it_arrives() {
+        let mut swept = tone(Waveform::Square, 400.0);
+        swept.sweep = Some(Sweep {
+            to_hz: 100.0,
+            over_secs: 0.02,
+        });
+        let samples = render_one(swept, 120);
+        // 100 Hz at 1000 Hz is one cycle every ten samples, so forty
+        // samples well past the sweep hold four.
+        assert_eq!(cycles_in(&samples[60..100]), 4);
+    }
+
+    #[test]
+    fn a_tone_with_no_sweep_holds_the_pitch_it_started_on() {
+        let steady = tone(Waveform::Square, 100.0);
+        let samples = render_one(steady, 100);
+        assert_eq!(cycles_in(&samples[..50]), cycles_in(&samples[50..]));
+    }
+
+    #[test]
+    fn a_sweep_between_two_pitches_passes_through_their_geometric_middle() {
+        // Pitch is heard geometrically, so half way through a slide from 400
+        // to 100 is 200 — their geometric mean — not 250, their average.
+        let mut swept = tone(Waveform::Square, 400.0);
+        swept.sweep = Some(Sweep {
+            to_hz: 100.0,
+            over_secs: 1.0,
+        });
+        let mut mixer = Mixer::new();
+        mixer.add(Voice::new(1, swept));
+        let mut out = vec![0.0; 1];
+        mixer.render(&mut out, 1, 1000.0);
+
+        let voice = &mixer.voices[0];
+        let middle = voice.frequency_at(0.5);
+        assert!(
+            (middle - 200.0).abs() < 1.0,
+            "half way should be 200 Hz, got {middle}"
+        );
     }
 
     #[test]

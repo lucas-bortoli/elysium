@@ -9,6 +9,7 @@ declare function __sound_play(
   frequency: number,
   amplitude: number,
   envelope: number[],
+  sweep: number[],
   duration: number | undefined,
 ): Option<number>;
 declare function __sound_stop(id: number): void;
@@ -62,6 +63,18 @@ export interface ToneOptions {
   /** Seconds spent falling the rest of the way to silence once released.
    * Defaults to `0.1`. */
   release?: number;
+  /** The frequency, in hertz, the pitch slides to over `sweepOver` seconds.
+   * Omitted, the note holds the pitch it started on.
+   *
+   * A slide is what a drum is: start near 150 and fall to near 50 inside a
+   * tenth of a second and it reads as a thump rather than as a note. It is
+   * also the falling "pew" of an arcade shot. The slide is geometric, since
+   * that is how pitch is heard — an even-sounding glide multiplies rather
+   * than subtracts. */
+  sweepTo?: number;
+  /** How long the slide to `sweepTo` takes, after which the pitch holds
+   * there. Defaults to `0.1`. Ignored without a `sweepTo`. */
+  sweepOver?: number;
   /** Seconds to hold at the sustain level before the release begins, so the
    * voice sounds for `duration + release` in total. Omitted, the voice holds
    * until `stopVoice`. */
@@ -75,7 +88,29 @@ interface ResolvedToneOptions {
   decay: number;
   sustain: number;
   release: number;
+  sweepTo: number | undefined;
+  sweepOver: number;
   duration: number | undefined;
+}
+
+/** Thrown when one of `playTone`'s options is out of range. `option` names
+ * which one, so a caller — or a test — can tell two rules apart without
+ * reading the message.
+ *
+ * It extends `RangeError`, so code that only cares that something was out of
+ * range can keep catching that. Not every bad option throws this one:
+ * `frequency` and `sweepTo` are range-checked by the kernel rather than
+ * here, and arrive as a plain `RangeError`. */
+export class ToneOptionError extends RangeError {
+  readonly option: string;
+
+  /** `requirement` completes the sentence the option name starts, so the
+   * message and the `option` field can't drift apart. */
+  constructor(option: string, requirement: string) {
+    super(`${option} ${requirement}`);
+    this.name = "ToneOptionError";
+    this.option = option;
+  }
 }
 
 /** Applies every default in one place, and rejects what the kernel would
@@ -88,26 +123,34 @@ function resolveToneOptions(options: ToneOptions | undefined): ResolvedToneOptio
     decay: options?.decay ?? 0,
     sustain: options?.sustain ?? 1,
     release: options?.release ?? 0.1,
+    sweepTo: options?.sweepTo,
+    sweepOver: options?.sweepOver ?? 0.1,
     duration: options?.duration,
   };
 
   if (!(resolved.amplitude >= 0 && resolved.amplitude <= 1)) {
-    throw new RangeError("amplitude must be between 0 and 1");
+    throw new ToneOptionError("amplitude", "must be between 0 and 1");
   }
   if (!(resolved.attack >= 0)) {
-    throw new RangeError("attack must not be negative");
+    throw new ToneOptionError("attack", "must not be negative");
   }
   if (!(resolved.decay >= 0)) {
-    throw new RangeError("decay must not be negative");
+    throw new ToneOptionError("decay", "must not be negative");
   }
   if (!(resolved.sustain >= 0 && resolved.sustain <= 1)) {
-    throw new RangeError("sustain must be between 0 and 1");
+    throw new ToneOptionError("sustain", "must be between 0 and 1");
   }
   if (!(resolved.release >= 0)) {
-    throw new RangeError("release must not be negative");
+    throw new ToneOptionError("release", "must not be negative");
+  }
+  // `sweepTo` is a frequency, and frequencies are the kernel's to range-check
+  // — `frequency` itself isn't checked here either. Checking it in both
+  // places is how the two drift into disagreeing about the message.
+  if (!(resolved.sweepOver >= 0)) {
+    throw new ToneOptionError("sweepOver", "must not be negative");
   }
   if (resolved.duration !== undefined && !(resolved.duration > 0)) {
-    throw new RangeError("duration must be greater than zero");
+    throw new ToneOptionError("duration", "must be greater than zero");
   }
   return resolved;
 }
@@ -134,6 +177,7 @@ export function playTone(
     frequency,
     tone.amplitude,
     [tone.attack, tone.decay, tone.sustain, tone.release],
+    tone.sweepTo === undefined ? [] : [tone.sweepTo, tone.sweepOver],
     tone.duration,
   );
 }
