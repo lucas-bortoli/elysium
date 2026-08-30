@@ -190,6 +190,95 @@ if (isNote(raw)) playTone(raw);
 
 ---
 
+## Scheduling ahead
+
+Everything above starts a sound *now*. That is fine for a sound effect, which
+happens when something happens, and useless for anything rhythmic — because
+"now" is always a frame boundary, and frames land 16 to 33 milliseconds apart
+while musical beats almost never do.
+
+A tracker row at 125 BPM falls every 120ms. At 30fps you can have a row every
+100ms or every 133ms and nothing in between; at 60fps you alternate seven and
+eight frames per row, a wobble of ±8% forever. The ear notices rhythmic error
+well inside that, so a beat played from an update ticker is a beat played at
+the wrong moment, and no amount of care in the program will fix it.
+
+So a tone can name the instant it should start:
+
+```ts
+import { currentTime, playTone } from "ely:sound";
+
+const start = currentTime() + 0.1;
+for (let beat = 0; beat < 4; beat++) {
+  playTone("C5", { startAt: start + beat * 0.5, duration: 0.1 });
+}
+```
+
+Those four notes are exactly half a second apart, whatever the frame rate does
+in the meantime — including if a frame takes 200ms.
+
+### The clock is the speaker's, not the wall's
+
+`currentTime` reports **seconds of sound the speaker has actually played**.
+That's a stranger quantity than "the time", and it is the right one for two
+reasons. It only ever moves forward, where a wall clock can jump. And it is
+the sound device's own clock: the device has its own crystal, ticking at
+*nominally* the rate it claims, which is not the oscillator your system clock
+runs on. Measuring against anything else would mean the system continually
+estimating the relationship between two drifting clocks, and every scheduled
+note inheriting the error in that estimate. Measured against this one, the
+conversion is exact.
+
+### Read it once, derive the rest
+
+The reading trails the speaker slightly — it is refreshed each time the device
+asks for more sound, so it can be a few to twenty milliseconds behind.
+
+That costs nothing if a schedule is built the right way, which is to read the
+clock **once** and compute every later instant from it by arithmetic, exactly
+as the example above does. A stale reading then shifts the whole sequence by
+the same small amount, which is inaudible because nothing is being synced
+against it, and every gap *within* the sequence stays exact.
+
+The way to get this wrong is to call `currentTime()` again for each note. Then
+each one inherits a fresh, differently-stale reading, and the errors scatter
+instead of cancelling.
+
+### Why an instant and not a delay
+
+`startAt` is a point in time, not "in this many seconds". The difference
+matters: a delay would start counting when the system got around to the
+request, so every note would separately absorb however long that took, and the
+error would pile up across a sequence. Naming the instant makes the system's
+own latency a constant that applies once.
+
+### Keeping the queue fed
+
+A program doesn't schedule a whole song at once. It keeps a window open —
+around a quarter of a second is plenty — and each frame queues whatever falls
+inside it:
+
+```ts
+addUpdateTicker(() => {
+  while (nextBeat < currentTime() + 0.25) {
+    playTone("C5", { startAt: nextBeat, duration: 0.1 });
+    nextBeat += 0.5;
+  }
+});
+```
+
+The window only has to be comfortably longer than a frame, so that a slow
+frame can't let it run dry. Frames stop needing to be *punctual* and only need
+to be *frequent*.
+
+Two limits bound it. A tone can be scheduled at most **two seconds** ahead,
+because a scheduled voice occupies one of the mixer's slots from the moment
+it's queued, and those slots are shared with every other program. And a tone
+scheduled for a time **already past sounds immediately** rather than throwing
+— a program that drops a frame gets a late note instead of a silent hole.
+
+---
+
 ## Timed and sustaining voices
 
 This is the distinction worth internalising, because it decides who is
@@ -237,6 +326,12 @@ if you hold a great many sustaining voices at once: those don't get quieter on
 their own, so they're what a later sound will eventually take. Give a tone a
 duration whenever you know its length, and it makes room for itself.
 
+Voices waiting on a `startAt` are the exception, and are taken **last** rather
+than first. They're silent, so by loudness alone they'd look like the obvious
+thing to discard — which would mean a program queueing a sequence watched each
+new note eat the ones already waiting. Among those waiting, it's the one
+furthest in the future that gives way first.
+
 ---
 
 ## Every option at a glance
@@ -249,9 +344,10 @@ duration whenever you know its length, and it makes room for itself.
 | `decay` | `0` | ≥ 0 seconds | full → sustain |
 | `sustainLevel` | `1` | 0 to 1 | held level |
 | `release` | `0.1` | ≥ 0 seconds | → silence, once released |
-| `sweepTo` | *none* | 0 to 20000 Hz | pitch slides here |
+| `sweepTo` | *none* | up to what the speaker can sound | pitch slides here |
 | `sweepOver` | `0.1` | ≥ 0 seconds | how long the slide takes |
 | `duration` | *none* | > 0 seconds | omitted, the voice is yours to stop |
+| `startAt` | *now* | within 2s of now | the instant it begins |
 
 Voices **add together** rather than replacing one another, so several loud
 ones at once share the room. The system leaves headroom for that, and a mix
@@ -287,6 +383,7 @@ rules apart without reading the message.
 | `ToneOptionError` | a negative `attack`, `decay`, `release` or `sweepOver` |
 | `ToneOptionError` | a `duration` that isn't greater than zero |
 | `ToneOptionError` | `frequency` or `sweepTo` outside what the speaker can sound |
+| `ToneOptionError` | a `startAt` more than two seconds ahead of now |
 | `TypeError` | a `waveform` that isn't one of the four |
 | `UnknownNoteError` | a note name that isn't one |
 
