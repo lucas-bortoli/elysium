@@ -455,4 +455,3 @@ fn a_note_name_can_be_played_directly() {
     );
     assert_eq!(log.played()[0].frequency_hz, 440.0);
 }
-
