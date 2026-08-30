@@ -1571,14 +1571,14 @@ declare module "ely:sound" {
     amplitude?: number;
     /** Seconds spent rising from silence to full. Defaults to `0.01`. */
     attack?: number;
-    /** Seconds spent falling from full to `sustain` once the attack
+    /** Seconds spent falling from full to `sustainLevel` once the attack
      * finishes. Defaults to `0` — no decay, so the note holds at full. */
     decay?: number;
-    /** A level, from `0` to `1` — not a duration, unlike every other field
-     * here. The fraction of full amplitude the note settles to once its
-     * decay finishes, and holds at until released. Defaults to `1`. `0` is
-     * a note that rings out to silence on its own while still sounding. */
-    sustain?: number;
+    /** The fraction of full amplitude the note settles to once its decay
+     * finishes, `0` to `1`, and holds at until released. Defaults to `1`.
+     * `0` is a note that rings out to silence on its own while still
+     * sounding. */
+    sustainLevel?: number;
     /** Seconds spent falling the rest of the way to silence once released.
      * Defaults to `0.1`. */
     release?: number;
@@ -1596,17 +1596,17 @@ declare module "ely:sound" {
     duration?: number;
   }
 
-  /** Starts `frequency` sounding, returning the voice's id. The result is
-   * absent when the machine has no working sound device or every voice is
-   * already in use — both ordinary conditions, not errors. A tone given a
-   * `duration` outlives the code that started it; one given none holds until
-   * `stopVoice` and is released when the program ends.
-   * @throws {ToneOptionError} if amplitude, attack, decay, sustain, release,
-   * sweepOver or duration is out of range; `option` names which.
-   * @throws {RangeError} if frequency or sweepTo is out of range.
-   * @throws {TypeError} if `waveform` is not one of `Waveform`'s entries. */
+  /** Starts `pitch` — a note name or a frequency in hertz — sounding,
+   * returning the voice's id. The result is absent when the machine has no
+   * working sound device, an ordinary condition rather than an error. A tone
+   * given a `duration` outlives the code that started it; one given none
+   * holds until `stopVoice` and is released when the program ends.
+   * @throws {ToneOptionError} if any option is out of range; `option` names
+   * which.
+   * @throws {TypeError} if `waveform` is not one of `Waveform`'s entries.
+   * @throws {UnknownNoteError} if `pitch` is a string that isn't a note. */
   export function playTone(
-    frequency: number,
+    pitch: Note | number,
     options?: ToneOptions,
   ): Option<VoiceId>;
 
@@ -1624,6 +1624,23 @@ declare module "ely:sound" {
    * @throws {UnknownNoteError} if `note` isn't a note name. */
   export function noteToFrequency(note: Note): number;
 
+  /** One cycle of `waveform` sampled at `phase` (`0` to `1` through the
+   * cycle), in `-1` to `1`. `noiseStep` picks which value of the noise
+   * generator's sequence to use and is ignored by the pitched waveforms.
+   * This is the mixer's own arithmetic, so a drawn waveform is the shape
+   * that will actually sound. */
+  export function waveformSample(
+    waveform: Waveform,
+    phase: number,
+    noiseStep?: number,
+  ): number;
+
+  /** The first `length` values of the noise generator's sequence, each `1`
+   * or `-1`. The generator is clocked once per cycle rather than once per
+   * sample, which is why noise holds one value for a whole cycle and why
+   * frequency sets how fast it churns instead of how high it sounds. */
+  export function noiseSequence(length: number): number[];
+
   export class UnknownNoteError extends Error {
     constructor(note: string);
   }
@@ -1631,8 +1648,7 @@ declare module "ely:sound" {
   /** Thrown when one of `playTone`'s options is out of range. `option` names
    * which one, so two rules can be told apart without reading the message.
    * Extends `RangeError`, so code that only cares that something was out of
-   * range can keep catching that. `frequency` and `sweepTo` are checked by
-   * the kernel instead and arrive as a plain `RangeError`. */
+   * range can keep catching that. */
   export class ToneOptionError extends RangeError {
     readonly option: string;
     constructor(option: string, requirement: string);
