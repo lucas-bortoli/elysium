@@ -9,7 +9,7 @@ declare function __sound_play(
   frequency: number,
   amplitude: number,
   envelope: number[],
-  sweep: number[],
+  sweep: number[] | undefined,
   duration: number | undefined,
 ): Option<number>;
 declare function __sound_stop(id: number): void;
@@ -19,8 +19,14 @@ export type VoiceId = number;
 
 // The shape of a voice's waveform, which is what decides its timbre — what a
 // note sounds like, as opposed to its envelope, which decides how it arrives
-// and leaves. Kept in sync by hand with kernel/audio.rs's `Waveform`, whose
-// `from_id` is the other half of this mapping.
+// and leaves.
+//
+// Named constants rather than a string union, unlike `Note` below: the set is
+// small and the names are arbitrary labels, so there is nothing a string
+// spelling would carry that a constant doesn't. The numbers are the contract
+// with the kernel, whose `from_id` is the other half of this mapping; the
+// mixer's `every_waveform_reaches_the_mixer_as_itself` is what holds the two
+// sides together.
 export const Waveform = {
   /** Hollow and buzzy — the classic chiptune lead. */
   Square: 0,
@@ -41,7 +47,13 @@ type Octave = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 
 /** Every note name the system understands: a letter, an optional sharp or
  * flat, and an octave — `"A4"`, `"C#5"`, `"Eb3"`. Octaves run 0 to 8, which
- * spans everything audible. */
+ * spans everything audible.
+ *
+ * A string union rather than named constants, unlike `Waveform` above: the
+ * set has 189 members and the string *is* the notation a musician already
+ * writes, so `"C#5"` says everything `Note.CSharp5` would and can be built
+ * from parsed data besides. `isNote` is what turns a built one back into a
+ * `Note`. */
 export type Note = `${Letter}${Accidental}${Octave}`;
 
 export interface ToneOptions {
@@ -51,15 +63,14 @@ export interface ToneOptions {
   amplitude?: number;
   /** Seconds spent rising from silence to full. Defaults to `0.01`. */
   attack?: number;
-  /** Seconds spent falling from full to `sustain` once the attack finishes.
-   * Defaults to `0` — no decay, so the note holds at full. */
+  /** Seconds spent falling from full to `sustainLevel` once the attack
+   * finishes. Defaults to `0` — no decay, so the note holds at full. */
   decay?: number;
-  /** A level, from `0` to `1` — not a duration, unlike every other field
-   * here. The fraction of full amplitude the note settles to once its decay
-   * finishes, and holds at until it is released. Defaults to `1`, which
-   * with the default decay of `0` is a note that simply holds. `0` is a
+  /** The fraction of full amplitude the note settles to once its decay
+   * finishes, `0` to `1`, and holds at until it is released. Defaults to `1`,
+   * which with the default decay of `0` is a note that simply holds. `0` is a
    * note that rings out to silence on its own while still sounding. */
-  sustain?: number;
+  sustainLevel?: number;
   /** Seconds spent falling the rest of the way to silence once released.
    * Defaults to `0.1`. */
   release?: number;
@@ -86,7 +97,7 @@ interface ResolvedToneOptions {
   amplitude: number;
   attack: number;
   decay: number;
-  sustain: number;
+  sustainLevel: number;
   release: number;
   sweepTo: number | undefined;
   sweepOver: number;
@@ -95,12 +106,8 @@ interface ResolvedToneOptions {
 
 /** Thrown when one of `playTone`'s options is out of range. `option` names
  * which one, so a caller — or a test — can tell two rules apart without
- * reading the message.
- *
- * It extends `RangeError`, so code that only cares that something was out of
- * range can keep catching that. Not every bad option throws this one:
- * `frequency` and `sweepTo` are range-checked by the kernel rather than
- * here, and arrive as a plain `RangeError`. */
+ * reading the message. It extends `RangeError`, so code that only cares that
+ * something was out of range can keep catching that. */
 export class ToneOptionError extends RangeError {
   readonly option: string;
 
@@ -113,73 +120,86 @@ export class ToneOptionError extends RangeError {
   }
 }
 
-/** Applies every default in one place, and rejects what the kernel would
- * reject, so a program gets the error from the call it made. */
-function resolveToneOptions(options: ToneOptions | undefined): ResolvedToneOptions {
-  const resolved: ResolvedToneOptions = {
+/** Applies every default in one place. Nothing is range-checked here: the
+ * kernel checks every option, and it tags what it throws with the option's
+ * name so `playTone` can re-type it. Checking in both places is how the two
+ * drift into disagreeing about the message. */
+function withDefaults(options: ToneOptions | undefined): ResolvedToneOptions {
+  return {
     waveform: options?.waveform ?? Waveform.Triangle,
     amplitude: options?.amplitude ?? 0.6,
     attack: options?.attack ?? 0.01,
     decay: options?.decay ?? 0,
-    sustain: options?.sustain ?? 1,
+    sustainLevel: options?.sustainLevel ?? 1,
     release: options?.release ?? 0.1,
     sweepTo: options?.sweepTo,
     sweepOver: options?.sweepOver ?? 0.1,
     duration: options?.duration,
   };
-
-  if (!(resolved.amplitude >= 0 && resolved.amplitude <= 1)) {
-    throw new ToneOptionError("amplitude", "must be between 0 and 1");
-  }
-  if (!(resolved.attack >= 0)) {
-    throw new ToneOptionError("attack", "must not be negative");
-  }
-  if (!(resolved.decay >= 0)) {
-    throw new ToneOptionError("decay", "must not be negative");
-  }
-  if (!(resolved.sustain >= 0 && resolved.sustain <= 1)) {
-    throw new ToneOptionError("sustain", "must be between 0 and 1");
-  }
-  if (!(resolved.release >= 0)) {
-    throw new ToneOptionError("release", "must not be negative");
-  }
-  // `sweepTo` is a frequency, and frequencies are the kernel's to range-check
-  // — `frequency` itself isn't checked here either. Checking it in both
-  // places is how the two drift into disagreeing about the message.
-  if (!(resolved.sweepOver >= 0)) {
-    throw new ToneOptionError("sweepOver", "must not be negative");
-  }
-  if (resolved.duration !== undefined && !(resolved.duration > 0)) {
-    throw new ToneOptionError("duration", "must be greater than zero");
-  }
-  return resolved;
 }
 
-/** Starts `frequency` sounding, and returns the voice's id so `stopVoice`
- * can release it later.
+/** Every option name the kernel can tag a rejection with. A message whose
+ * tag isn't one of these isn't a rejected option, so it travels on unchanged
+ * — a bad `waveform` among them, which stays the `TypeError` it is. */
+const TONE_OPTIONS = [
+  "frequency",
+  "amplitude",
+  "attack",
+  "decay",
+  "sustainLevel",
+  "release",
+  "sweepTo",
+  "sweepOver",
+  "duration",
+];
+
+/** Re-throws the kernel's `"<option>: <requirement>"` rejections as a
+ * `ToneOptionError` naming the option, and anything else untouched. */
+function rethrowToneError(err: unknown): never {
+  const raw = err instanceof Error ? err.message : String(err);
+  const separator = raw.indexOf(": ");
+  const option = separator === -1 ? "" : raw.slice(0, separator);
+  if (TONE_OPTIONS.includes(option)) {
+    throw new ToneOptionError(option, raw.slice(separator + 2));
+  }
+  throw err;
+}
+
+/** Starts `pitch` sounding, and returns the voice's id so `stopVoice` can
+ * release it later. `pitch` is a note name or a frequency in hertz —
+ * `playTone("C5")` and `playTone(523.25)` are the same tone.
  *
  * Nothing sounds, and the result is absent, when the machine has no working
- * sound device or when every voice is already in use. Both are ordinary
- * conditions rather than errors: a program that doesn't care can ignore the
- * result entirely.
+ * sound device. That is an ordinary condition rather than an error: a program
+ * that doesn't care can ignore the result entirely.
  *
  * A tone given a `duration` ends on its own, and outlives the code that
  * started it — destroy whatever made the noise and the noise still finishes.
  * A tone given none holds until `stopVoice`, and is released for you when
- * your program ends. */
+ * your program ends.
+ *
+ * TODO: a sounding voice can be started and stopped but not changed. Bending
+ * a held note's pitch or fading its amplitude wants `setVoiceFrequency` and
+ * `setVoiceAmplitude`; until those exist, everything about a voice is fixed
+ * at the moment it starts. */
 export function playTone(
-  frequency: number,
+  pitch: Note | number,
   options?: ToneOptions,
 ): Option<VoiceId> {
-  const tone = resolveToneOptions(options);
-  return __sound_play(
-    tone.waveform,
-    frequency,
-    tone.amplitude,
-    [tone.attack, tone.decay, tone.sustain, tone.release],
-    tone.sweepTo === undefined ? [] : [tone.sweepTo, tone.sweepOver],
-    tone.duration,
-  );
+  const tone = withDefaults(options);
+  const frequency = typeof pitch === "number" ? pitch : noteToFrequency(pitch);
+  try {
+    return __sound_play(
+      tone.waveform,
+      frequency,
+      tone.amplitude,
+      [tone.attack, tone.decay, tone.sustainLevel, tone.release],
+      tone.sweepTo === undefined ? undefined : [tone.sweepTo, tone.sweepOver],
+      tone.duration,
+    );
+  } catch (err) {
+    rethrowToneError(err);
+  }
 }
 
 /** Releases the voice `id` names. It fades over its own release rather than
@@ -233,17 +253,55 @@ export function noteToFrequency(note: Note): number {
   if (match === null) {
     throw new UnknownNoteError(note);
   }
-  const [, letter, accidental, octave] = match;
-  if (letter === undefined || accidental === undefined || octave === undefined) {
-    throw new UnknownNoteError(note);
-  }
-
-  const base = LETTER_SEMITONES[letter];
-  if (base === undefined) {
-    throw new UnknownNoteError(note);
-  }
+  // The pattern is what guarantees these: a match has all three groups, and
+  // its first is one of the seven letters `LETTER_SEMITONES` is keyed by.
+  const [, letter, accidental, octave] = match as unknown as [string, string, string, string];
+  const base = LETTER_SEMITONES[letter]!;
   const shift = accidental === "#" ? 1 : accidental === "b" ? -1 : 0;
   // A4 is semitone 9 of octave 4, so 57 semitones above C0.
   const semitonesFromA4 = base + shift + 12 * Number(octave) - 57;
   return 440 * 2 ** (semitonesFromA4 / 12);
+}
+
+/** One cycle of `waveform` sampled at `phase` (`0` to `1` through the cycle),
+ * in `-1` to `1`. `noiseStep` picks which value of the noise generator's
+ * sequence to use, and is ignored by the three pitched waveforms.
+ *
+ * This is the arithmetic the mixer itself uses, exported so a program drawing
+ * a waveform draws the shape that will actually sound rather than an
+ * impression of it. */
+export function waveformSample(
+  waveform: Waveform,
+  phase: number,
+  noiseStep = 0,
+): number {
+  switch (waveform) {
+    case Waveform.Square:
+      return phase < 0.5 ? 1 : -1;
+    case Waveform.Triangle:
+      return 4 * Math.abs(phase - 0.5) - 1;
+    case Waveform.Sine:
+      return Math.sin(phase * 2 * Math.PI);
+    case Waveform.Noise:
+      return noiseSequence(noiseStep + 1)[noiseStep]!;
+  }
+}
+
+/** The first `length` values of the noise generator's sequence, each `1` or
+ * `-1`.
+ *
+ * The generator is a 15-bit shift register clocked once per cycle rather than
+ * once per sample, which is why noise holds one value for a whole cycle and
+ * why a voice's frequency sets how fast it churns instead of how high it
+ * sounds. The sequence always starts from the same state, so this is what a
+ * voice sounds on the way in; one already sounding has advanced past it. */
+export function noiseSequence(length: number): number[] {
+  let register = 0x7fff;
+  const values: number[] = [];
+  for (let step = 0; step < length; step++) {
+    values.push((register & 1) === 0 ? 1 : -1);
+    const bit = (register ^ (register >> 1)) & 1;
+    register = (register >> 1) | (bit << 14);
+  }
+  return values;
 }

@@ -66,9 +66,13 @@ const MASTER_GAIN: f32 = 0.2;
 /// The state a 15-bit LFSR powers up in; see [`Waveform::Noise`].
 const LFSR_SEED: u16 = 0x7fff;
 
-/// The highest frequency `ely:sound` will accept. Past roughly 20 kHz a tone
-/// is inaudible, and past half the output rate it aliases back down into
-/// something that is audible but isn't the note that was asked for.
+/// The highest frequency `ely:sound` will accept on a device fast enough for
+/// it. Past roughly 20 kHz a tone is inaudible anyway.
+///
+/// Half the output rate is the other limit, and the lower of the two is what
+/// actually applies — see [`Sound::max_frequency_hz`]. Past it a tone
+/// aliases back down into something audible but not the note that was asked
+/// for, which is worse than refusing it.
 const MAX_FREQUENCY_HZ: f32 = 20_000.0;
 
 /// The output rate to ask a device for, clamped into whatever range it
@@ -197,6 +201,116 @@ pub struct Tone {
     pub sweep: Option<Sweep>,
 }
 
+/// Why a set of tone parts was refused: which option was wrong, and what it
+/// should have been.
+///
+/// The two halves stay separate all the way out to `ely:sound`, which
+/// re-types them as a `ToneOptionError` carrying the option name as a field.
+/// A caller — or a test — can then tell two rules apart without reading the
+/// message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToneError {
+    /// The option's name as a program spells it: `sweepTo`, not `to_hz`.
+    pub option: &'static str,
+    /// Completes the sentence the option name starts, so the message and the
+    /// name can't drift apart.
+    pub requirement: String,
+}
+
+impl ToneError {
+    fn new(option: &'static str, requirement: impl Into<String>) -> Self {
+        Self {
+            option,
+            requirement: requirement.into(),
+        }
+    }
+}
+
+/// Checks one duration: finite and not negative.
+fn checked_secs(option: &'static str, secs: f32) -> std::result::Result<f32, ToneError> {
+    if !secs.is_finite() || secs < 0.0 {
+        return Err(ToneError::new(option, "must not be negative"));
+    }
+    Ok(secs)
+}
+
+/// Checks one `0.0..=1.0` level.
+fn checked_level(option: &'static str, level: f32) -> std::result::Result<f32, ToneError> {
+    if !level.is_finite() || !(0.0..=1.0).contains(&level) {
+        return Err(ToneError::new(option, "must be between 0 and 1"));
+    }
+    Ok(level)
+}
+
+/// Checks one frequency against what this device can sound without aliasing.
+fn checked_frequency(
+    option: &'static str,
+    frequency_hz: f32,
+    max_frequency_hz: f32,
+) -> std::result::Result<f32, ToneError> {
+    if !frequency_hz.is_finite() || !(0.0..=max_frequency_hz).contains(&frequency_hz) {
+        return Err(ToneError::new(
+            option,
+            format!("must be between 0 and {max_frequency_hz} Hz"),
+        ));
+    }
+    Ok(frequency_hz)
+}
+
+/// Assembles a [`Tone`] out of the loose numbers a program passed, refusing
+/// anything the mixer shouldn't see.
+///
+/// This is the only place tone options are range-checked. `ely:sound` applies
+/// defaults and does no checking of its own, so there is one statement of
+/// each rule and one wording for each message.
+///
+/// The finiteness checks are the load-bearing ones: a NaN frequency never
+/// advances past its phase wrap, so the voice's every sample is NaN, and it
+/// poisons the whole mix for as long as it sounds.
+#[allow(clippy::too_many_arguments)]
+pub fn tone_from_parts(
+    waveform: u8,
+    frequency_hz: f32,
+    amplitude: f32,
+    envelope: [f32; 4],
+    sweep: Option<[f32; 2]>,
+    duration_secs: Option<f32>,
+    max_frequency_hz: f32,
+) -> std::result::Result<Tone, ToneError> {
+    let Some(waveform) = Waveform::from_id(waveform) else {
+        return Err(ToneError::new("waveform", "is not one of the four"));
+    };
+    let [attack_secs, decay_secs, sustain_level, release_secs] = envelope;
+
+    let sweep = match sweep {
+        Some([to_hz, over_secs]) => Some(Sweep {
+            to_hz: checked_frequency("sweepTo", to_hz, max_frequency_hz)?,
+            over_secs: checked_secs("sweepOver", over_secs)?,
+        }),
+        None => None,
+    };
+
+    if let Some(duration) = duration_secs
+        && (!duration.is_finite() || duration <= 0.0)
+    {
+        return Err(ToneError::new("duration", "must be greater than zero"));
+    }
+
+    Ok(Tone {
+        waveform,
+        frequency_hz: checked_frequency("frequency", frequency_hz, max_frequency_hz)?,
+        amplitude: checked_level("amplitude", amplitude)?,
+        envelope: Envelope {
+            attack_secs: checked_secs("attack", attack_secs)?,
+            decay_secs: checked_secs("decay", decay_secs)?,
+            sustain_level: checked_level("sustainLevel", sustain_level)?,
+            release_secs: checked_secs("release", release_secs)?,
+            duration_secs,
+        },
+        sweep,
+    })
+}
+
 /// One sounding voice: a waveform, where it currently is in its cycle, and
 /// how far through its envelope it has travelled.
 struct Voice {
@@ -306,9 +420,15 @@ impl Voice {
         self.phase += self.frequency_at(self.elapsed_secs) * dt_secs;
         if self.phase >= 1.0 {
             // Clocked per cycle rather than per sample, so frequency
-            // pitches the noise — see `advance_lfsr`.
-            self.lfsr = advance_lfsr(self.lfsr);
-            self.phase -= self.phase.floor();
+            // pitches the noise — see `advance_lfsr`. One step per whole
+            // cycle crossed, since a high enough voice can cross several
+            // inside one sample and the register has to keep up with the
+            // pitch it is being asked for.
+            let cycles = self.phase.floor();
+            for _ in 0..cycles as u32 {
+                self.lfsr = advance_lfsr(self.lfsr);
+            }
+            self.phase -= cycles;
         }
 
         self.elapsed_secs += dt_secs;
@@ -453,6 +573,10 @@ impl Mixer {
 /// stops playback.
 pub struct Sound {
     commands: mpsc::Sender<Command>,
+    /// The highest frequency this device can sound without aliasing: the
+    /// lower of [`MAX_FREQUENCY_HZ`] and half the rate the output stream
+    /// actually negotiated.
+    max_frequency_hz: f32,
     next_id: Cell<VoiceId>,
     _stream: Option<cpal::Stream>,
 }
@@ -490,6 +614,11 @@ impl Sound {
         let _ = self.commands.send(Command::Stop(id));
     }
 
+    /// The highest frequency this device will accept.
+    pub fn max_frequency_hz(&self) -> f32 {
+        self.max_frequency_hz
+    }
+
     /// Releases every sustaining voice `owner` started, ringing each out
     /// over its own release. Called when a VM goes away, so a program that
     /// faulted or exited holding a note doesn't leave it droning for the
@@ -522,124 +651,70 @@ pub fn bootstrap_sound_bindings(
                   frequency_hz: f32,
                   amplitude: f32,
                   envelope: Vec<f32>,
-                  sweep: Vec<f32>,
+                  sweep: Option<Vec<f32>>,
                   duration_secs: Option<f32>|
                   -> Result<Option<VoiceId>> {
-                // Everything is checked before the mixer sees any of it. The
-                // finiteness checks are the load-bearing ones: a NaN
-                // frequency never advances past its phase wrap, so the
-                // voice's every sample is NaN, and it poisons the whole
-                // mix for as long as it sounds.
-                let Some(waveform) = Waveform::from_id(waveform) else {
-                    return Err(rquickjs::Exception::throw_type(
-                        &ctx,
-                        &format!("{waveform} is not a valid waveform"),
-                    ));
-                };
-                if !frequency_hz.is_finite() || !(0.0..=MAX_FREQUENCY_HZ).contains(&frequency_hz) {
-                    return Err(rquickjs::Exception::throw_range(
-                        &ctx,
-                        &format!("frequency must be between 0 and {MAX_FREQUENCY_HZ} Hz"),
-                    ));
-                }
-                if !amplitude.is_finite() || !(0.0..=1.0).contains(&amplitude) {
-                    return Err(rquickjs::Exception::throw_range(
-                        &ctx,
-                        "amplitude must be between 0 and 1",
-                    ));
-                }
                 // The four stages arrive as one envelope rather than four
                 // loose floats — not because the arguments wouldn't fit, but
                 // because they are one thing, the same way a source rect
                 // crosses as one array in `__framebuffer_draw_image_transformed`.
-                let [attack_secs, decay_secs, sustain_level, release_secs] =
-                    <[f32; 4]>::try_from(envelope.as_slice()).map_err(|_| {
-                        rquickjs::Exception::throw_type(&ctx, "an envelope needs four numbers")
-                    })?;
-                if !attack_secs.is_finite() || attack_secs < 0.0 {
-                    return Err(rquickjs::Exception::throw_range(
-                        &ctx,
-                        "attack must not be negative",
-                    ));
-                }
-                if !decay_secs.is_finite() || decay_secs < 0.0 {
-                    return Err(rquickjs::Exception::throw_range(
-                        &ctx,
-                        "decay must not be negative",
-                    ));
-                }
-                if !sustain_level.is_finite() || !(0.0..=1.0).contains(&sustain_level) {
-                    return Err(rquickjs::Exception::throw_range(
-                        &ctx,
-                        "sustain must be between 0 and 1",
-                    ));
-                }
-                if !release_secs.is_finite() || release_secs < 0.0 {
-                    return Err(rquickjs::Exception::throw_range(
-                        &ctx,
-                        "release must not be negative",
-                    ));
-                }
-                // Empty when the note holds its pitch, which is the common
-                // case, so it costs nothing to say nothing.
-                let sweep = match sweep.as_slice() {
-                    [] => None,
-                    [to_hz, over_secs] => Some(Sweep {
-                        to_hz: *to_hz,
-                        over_secs: *over_secs,
-                    }),
-                    _ => {
-                        return Err(rquickjs::Exception::throw_type(
-                            &ctx,
-                            "a sweep needs a frequency and a time",
-                        ));
-                    }
-                };
-                if let Some(sweep) = sweep {
-                    if !sweep.to_hz.is_finite() || !(0.0..=MAX_FREQUENCY_HZ).contains(&sweep.to_hz)
-                    {
-                        return Err(rquickjs::Exception::throw_range(
-                            &ctx,
-                            &format!("sweepTo must be between 0 and {MAX_FREQUENCY_HZ} Hz"),
-                        ));
-                    }
-                    if !sweep.over_secs.is_finite() || sweep.over_secs < 0.0 {
-                        return Err(rquickjs::Exception::throw_range(
-                            &ctx,
-                            "sweepOver must not be negative",
-                        ));
-                    }
-                }
+                let envelope = <[f32; 4]>::try_from(envelope.as_slice()).map_err(|_| {
+                    rquickjs::Exception::throw_type(&ctx, "an envelope needs four numbers")
+                })?;
+                // Absent when the note holds its pitch, which is the common
+                // case. A sweep's target and its time are one thing, like the
+                // envelope's four stages, so they cross together or not at
+                // all.
+                let sweep = sweep
+                    .map(|sweep| {
+                        <[f32; 2]>::try_from(sweep.as_slice()).map_err(|_| {
+                            rquickjs::Exception::throw_type(
+                                &ctx,
+                                "a sweep needs a frequency and a time",
+                            )
+                        })
+                    })
+                    .transpose()?;
 
-                if let Some(duration) = duration_secs
-                    && (!duration.is_finite() || duration <= 0.0)
-                {
-                    return Err(rquickjs::Exception::throw_range(
+                // A machine with no device still range-checks every option,
+                // so a program gets the same errors whether or not anything
+                // can sound. Only the ceiling differs, and 20 kHz is the one
+                // no real device lowers by much.
+                let max_frequency_hz = sound
+                    .as_ref()
+                    .map_or(MAX_FREQUENCY_HZ, |sound| sound.max_frequency_hz());
+
+                let tone = tone_from_parts(
+                    waveform,
+                    frequency_hz,
+                    amplitude,
+                    envelope,
+                    sweep,
+                    duration_secs,
+                    max_frequency_hz,
+                )
+                .map_err(|err| {
+                    // A bad waveform names no point on any scale, so it is a
+                    // type error and stays untagged: `ely:sound` re-types
+                    // only what it can report as an out-of-range option.
+                    if err.option == "waveform" {
+                        return rquickjs::Exception::throw_type(
+                            &ctx,
+                            &format!("{} {}", err.option, err.requirement),
+                        );
+                    }
+                    // Tagged `option: requirement`, which `ely:sound` splits
+                    // back apart into a `ToneOptionError`.
+                    rquickjs::Exception::throw_range(
                         &ctx,
-                        "duration must be greater than zero",
-                    ));
-                }
+                        &format!("{}: {}", err.option, err.requirement),
+                    )
+                })?;
 
                 let Some(sound) = &sound else {
                     return Ok(None);
                 };
-                let id = sound.play(
-                    owner,
-                    Tone {
-                        waveform,
-                        frequency_hz,
-                        amplitude,
-                        envelope: Envelope {
-                            attack_secs,
-                            decay_secs,
-                            sustain_level,
-                            release_secs,
-                            duration_secs,
-                        },
-                        sweep,
-                    },
-                );
-                Ok(id)
+                Ok(sound.play(owner, tone))
             },
         )?;
     }
@@ -726,6 +801,7 @@ pub fn start() -> Option<Sound> {
     eprintln!("[sound] output ready ({sample_rate} Hz, {channels} channels)");
     Some(Sound {
         commands,
+        max_frequency_hz: MAX_FREQUENCY_HZ.min(sample_rate / 2.0),
         next_id: Cell::new(1),
         _stream: Some(stream),
     })
@@ -805,6 +881,7 @@ impl Sound {
         let (commands, incoming) = mpsc::channel();
         let sound = Sound {
             commands,
+            max_frequency_hz: MAX_FREQUENCY_HZ,
             next_id: Cell::new(1),
             _stream: None,
         };
@@ -821,8 +898,8 @@ impl Sound {
 #[cfg(test)]
 mod tests {
     use super::{
-        Envelope, MASTER_GAIN, MAX_VOICES, Mixer, Sound, Sweep, Tone, Voice, VoiceId, Waveform,
-        advance_lfsr,
+        Envelope, LFSR_SEED, MASTER_GAIN, MAX_FREQUENCY_HZ, MAX_VOICES, Mixer, Sound, Sweep, Tone,
+        Voice, VoiceId, Waveform, advance_lfsr,
     };
 
     /// Every test here is about the mix rather than about ownership, so
@@ -1431,6 +1508,131 @@ mod tests {
             (middle - 200.0).abs() < 1.0,
             "half way should be 200 Hz, got {middle}"
         );
+    }
+
+    /// The loose numbers a program passes, in the order `tone_from_parts`
+    /// takes them: waveform, frequency, amplitude, envelope, sweep, duration.
+    type Parts = (u8, f32, f32, [f32; 4], Option<[f32; 2]>, Option<f32>);
+
+    /// Valid parts, for a test that wants to break exactly one of them.
+    fn parts() -> Parts {
+        (1, 440.0, 0.6, [0.01, 0.0, 1.0, 0.1], None, None)
+    }
+
+    /// The option `tone_from_parts` blamed, or `""` if it accepted them.
+    fn blamed(tone: std::result::Result<Tone, super::ToneError>) -> &'static str {
+        tone.err().map_or("", |err| err.option)
+    }
+
+    #[test]
+    fn valid_parts_become_a_tone() {
+        let (waveform, frequency, amplitude, envelope, sweep, duration) = parts();
+        let tone = super::tone_from_parts(
+            waveform,
+            frequency,
+            amplitude,
+            envelope,
+            sweep,
+            duration,
+            MAX_FREQUENCY_HZ,
+        )
+        .expect("valid parts");
+        assert_eq!(tone.waveform, Waveform::Triangle);
+        assert_eq!(tone.frequency_hz, 440.0);
+        assert_eq!(tone.envelope.sustain_level, 1.0);
+    }
+
+    #[test]
+    fn each_bad_part_is_blamed_on_the_option_a_program_named() {
+        let (w, f, a, e, s, d) = parts();
+        let check = |waveform, frequency, amplitude, envelope, sweep, duration| {
+            blamed(super::tone_from_parts(
+                waveform,
+                frequency,
+                amplitude,
+                envelope,
+                sweep,
+                duration,
+                MAX_FREQUENCY_HZ,
+            ))
+        };
+
+        assert_eq!(check(9, f, a, e, s, d), "waveform");
+        assert_eq!(check(w, 40_000.0, a, e, s, d), "frequency");
+        assert_eq!(check(w, f, 2.0, e, s, d), "amplitude");
+        assert_eq!(check(w, f, a, [-1.0, 0.0, 1.0, 0.1], s, d), "attack");
+        assert_eq!(check(w, f, a, [0.0, -1.0, 1.0, 0.1], s, d), "decay");
+        assert_eq!(check(w, f, a, [0.0, 0.0, 2.0, 0.1], s, d), "sustainLevel");
+        assert_eq!(check(w, f, a, [0.0, 0.0, 1.0, -1.0], s, d), "release");
+        assert_eq!(check(w, f, a, e, Some([40_000.0, 0.1]), d), "sweepTo");
+        assert_eq!(check(w, f, a, e, Some([200.0, -1.0]), d), "sweepOver");
+        assert_eq!(check(w, f, a, e, s, Some(0.0)), "duration");
+    }
+
+    #[test]
+    fn nothing_that_is_not_a_number_gets_through() {
+        // A NaN anywhere would poison every sample of the whole mix for as
+        // long as the voice sounded.
+        let (w, f, a, e, s, d) = parts();
+        let nan = f32::NAN;
+        assert_eq!(
+            blamed(super::tone_from_parts(w, nan, a, e, s, d, MAX_FREQUENCY_HZ)),
+            "frequency"
+        );
+        assert_eq!(
+            blamed(super::tone_from_parts(w, f, nan, e, s, d, MAX_FREQUENCY_HZ)),
+            "amplitude"
+        );
+        assert_eq!(
+            blamed(super::tone_from_parts(
+                w,
+                f,
+                a,
+                [nan, 0.0, 1.0, 0.1],
+                s,
+                d,
+                MAX_FREQUENCY_HZ
+            )),
+            "attack"
+        );
+    }
+
+    #[test]
+    fn a_frequency_is_checked_against_what_the_device_can_sound() {
+        let (w, _, a, e, s, d) = parts();
+        // A device running at 16 kHz can only carry 8 kHz without aliasing,
+        // whatever the fixed ceiling says.
+        assert_eq!(
+            blamed(super::tone_from_parts(w, 12_000.0, a, e, s, d, 8_000.0)),
+            "frequency",
+            "past half the output rate it would alias back down"
+        );
+        assert_eq!(
+            blamed(super::tone_from_parts(
+                w,
+                12_000.0,
+                a,
+                e,
+                s,
+                d,
+                MAX_FREQUENCY_HZ
+            )),
+            "",
+            "and the same tone is fine on a faster device"
+        );
+    }
+
+    #[test]
+    fn noise_churns_once_per_cycle_even_when_a_sample_spans_several() {
+        // Three cycles per sample: the register has to step three times, or
+        // the noise stops churning at the pitch it was asked for.
+        let mut voice = Voice::new(1, OWNER, tone(Waveform::Noise, 3000.0));
+        voice.advance(1.0 / 1000.0);
+        let mut expected = LFSR_SEED;
+        for _ in 0..3 {
+            expected = advance_lfsr(expected);
+        }
+        assert_eq!(voice.lfsr, expected);
     }
 
     #[test]
