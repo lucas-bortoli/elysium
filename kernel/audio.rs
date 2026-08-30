@@ -142,23 +142,31 @@ fn advance_lfsr(lfsr: u16) -> u16 {
 
 /// The shape of a note's amplitude over its life, multiplied against the
 /// waveform sample by sample: it rises from silence across `attack_secs`,
-/// holds at full, then falls back to silence across `release_secs`.
+/// falls from full to `sustain_level` across `decay_secs`, holds there, then
+/// falls the rest of the way to silence across `release_secs`.
 ///
 /// Its job is that a waveform switched on at full amplitude is a step
 /// discontinuity in the signal, heard as a click at both ends of every note.
 /// Even a ten-millisecond attack removes that entirely.
 ///
-/// There is no decay stage and no sustain level: a note holds at full until
-/// it releases. The fuller ADSR model adds a decay falling to a held level
-/// below full, which is what gives a struck string its loud attack settling
-/// into a quieter held tone — a shape this envelope can't express.
+/// The decay and the sustain level are what make a struck or plucked note
+/// read as struck: a loud attack settling into a quieter held tone. A
+/// `sustain_level` of `1.0` with no decay is a note that simply holds, which
+/// is the plainest shape and the one `ely:sound` defaults to. A level of
+/// `0.0` is a note that rings out to silence on its own — still a sounding
+/// voice, occupying a slot until it is released or its duration ends, but
+/// inaudible long before then.
 #[derive(Debug, Clone, Copy)]
 pub struct Envelope {
     pub attack_secs: f32,
+    pub decay_secs: f32,
+    /// The fraction of full amplitude the note settles to once its decay is
+    /// done — a level, unlike every other field here, which are durations.
+    pub sustain_level: f32,
     pub release_secs: f32,
-    /// How long the note holds at full amplitude before its release begins,
-    /// so a voice sounds for `duration_secs + release_secs` in total.
-    /// `None` holds until [`Audio::stop`].
+    /// How long the note holds at its sustain level before its release
+    /// begins, so a voice sounds for `duration_secs + release_secs` in
+    /// total. `None` holds until [`Audio::stop`].
     pub duration_secs: Option<f32>,
 }
 
@@ -206,30 +214,34 @@ impl Voice {
                 return 0.0;
             }
             let through = (self.elapsed_secs - since) / release;
-            return self.level_at_release_start() * (1.0 - through).clamp(0.0, 1.0);
+            return self.level_at(since) * (1.0 - through).clamp(0.0, 1.0);
         }
 
-        let attack = self.tone.envelope.attack_secs;
-        if attack > 0.0 && self.elapsed_secs < attack {
-            return self.elapsed_secs / attack;
-        }
-        1.0
+        self.level_at(self.elapsed_secs)
     }
 
-    /// The envelope value the release started from. A voice stopped during
-    /// its attack releases from however far it got, so cutting a note short
-    /// still ramps down from where it actually was instead of jumping to
-    /// full first.
-    fn level_at_release_start(&self) -> f32 {
-        let Some(since) = self.releasing_since else {
-            return 1.0;
-        };
-        let attack = self.tone.envelope.attack_secs;
-        if attack > 0.0 && since < attack {
-            since / attack
-        } else {
-            1.0
+    /// The envelope's value `elapsed` seconds in, before any release: rising
+    /// through the attack, falling through the decay, then holding at the
+    /// sustain level.
+    ///
+    /// This is also the level a release starts from, which is why it takes
+    /// the instant rather than reading `elapsed_secs`. A voice cut short
+    /// part-way up its attack or part-way down its decay rings out from
+    /// where it actually was, instead of jumping to full first.
+    fn level_at(&self, elapsed: f32) -> f32 {
+        let envelope = &self.tone.envelope;
+
+        if envelope.attack_secs > 0.0 && elapsed < envelope.attack_secs {
+            return elapsed / envelope.attack_secs;
         }
+
+        let after_attack = elapsed - envelope.attack_secs;
+        if envelope.decay_secs > 0.0 && after_attack < envelope.decay_secs {
+            let through = after_attack / envelope.decay_secs;
+            return 1.0 + (envelope.sustain_level - 1.0) * through;
+        }
+
+        envelope.sustain_level
     }
 
     /// Advances the waveform and the envelope by one sample, entering the
@@ -463,8 +475,7 @@ pub fn bootstrap_audio_bindings(
                   waveform: u8,
                   frequency_hz: f32,
                   amplitude: f32,
-                  attack_secs: f32,
-                  release_secs: f32,
+                  envelope: Vec<f32>,
                   duration_secs: Option<f32>|
                   -> Result<Option<VoiceId>> {
                 // Everything is checked before the mixer sees any of it. The
@@ -490,10 +501,30 @@ pub fn bootstrap_audio_bindings(
                         "amplitude must be between 0 and 1",
                     ));
                 }
+                // The four stages arrive as one envelope rather than four
+                // loose floats — not because the arguments wouldn't fit, but
+                // because they are one thing, the same way a source rect
+                // crosses as one array in `__framebuffer_draw_image_transformed`.
+                let [attack_secs, decay_secs, sustain_level, release_secs] =
+                    <[f32; 4]>::try_from(envelope.as_slice()).map_err(|_| {
+                        rquickjs::Exception::throw_type(&ctx, "an envelope needs four numbers")
+                    })?;
                 if !attack_secs.is_finite() || attack_secs < 0.0 {
                     return Err(rquickjs::Exception::throw_range(
                         &ctx,
                         "attack must not be negative",
+                    ));
+                }
+                if !decay_secs.is_finite() || decay_secs < 0.0 {
+                    return Err(rquickjs::Exception::throw_range(
+                        &ctx,
+                        "decay must not be negative",
+                    ));
+                }
+                if !sustain_level.is_finite() || !(0.0..=1.0).contains(&sustain_level) {
+                    return Err(rquickjs::Exception::throw_range(
+                        &ctx,
+                        "sustain must be between 0 and 1",
                     ));
                 }
                 if !release_secs.is_finite() || release_secs < 0.0 {
@@ -520,6 +551,8 @@ pub fn bootstrap_audio_bindings(
                     amplitude,
                     envelope: Envelope {
                         attack_secs,
+                        decay_secs,
+                        sustain_level,
                         release_secs,
                         duration_secs,
                     },
@@ -708,6 +741,8 @@ mod tests {
             amplitude: 1.0,
             envelope: Envelope {
                 attack_secs: 0.0,
+                decay_secs: 0.0,
+                sustain_level: 1.0,
                 release_secs: 0.0,
                 duration_secs: None,
             },
@@ -858,7 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn a_voice_holds_full_amplitude_between_its_attack_and_its_duration() {
+    fn a_voice_with_no_decay_holds_full_amplitude_until_its_duration() {
         let mut shaped = tone(Waveform::Square, 0.0);
         shaped.envelope.attack_secs = 0.005;
         shaped.envelope.duration_secs = Some(0.02);
@@ -872,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn a_voice_decays_to_silence_across_its_release() {
+    fn a_voice_fades_to_silence_across_its_release() {
         let mut shaped = tone(Waveform::Square, 0.0);
         shaped.envelope.duration_secs = Some(0.005);
         shaped.envelope.release_secs = 0.01;
@@ -1041,6 +1076,103 @@ mod tests {
         for sample in out {
             assert!((-1.0..=1.0).contains(&sample), "{sample} left the range");
         }
+    }
+
+    #[test]
+    fn a_voice_falls_from_full_to_its_sustain_level_across_its_decay() {
+        let mut shaped = tone(Waveform::Square, 0.0);
+        shaped.envelope.decay_secs = 0.01; // ten samples at 1000 Hz
+        shaped.envelope.sustain_level = 0.4;
+        let samples = unscaled(render_one(shaped, 10));
+
+        assert!((samples[0] - 1.0).abs() < 1e-5, "starts at full");
+        for window in samples.windows(2) {
+            assert!(window[1] < window[0], "the decay should fall throughout");
+        }
+        assert!(
+            (samples[9] - 0.46).abs() < 0.02,
+            "and arrives at the sustain level, got {}",
+            samples[9]
+        );
+    }
+
+    #[test]
+    fn a_voice_holds_its_sustain_level_once_its_decay_is_done() {
+        let mut shaped = tone(Waveform::Square, 0.0);
+        shaped.envelope.decay_secs = 0.005;
+        shaped.envelope.sustain_level = 0.4;
+        let samples = unscaled(render_one(shaped, 30));
+
+        for &sample in &samples[6..] {
+            assert!(
+                (sample - 0.4).abs() < 1e-5,
+                "{sample} is not the sustain level"
+            );
+        }
+    }
+
+    #[test]
+    fn a_release_from_sustain_starts_at_the_sustain_level_rather_than_full() {
+        // The shape the old two-stage envelope could not express: a note
+        // that has already settled quieter releases from there, not from
+        // full.
+        let mut shaped = tone(Waveform::Square, 0.0);
+        shaped.envelope.decay_secs = 0.002;
+        shaped.envelope.sustain_level = 0.25;
+        shaped.envelope.duration_secs = Some(0.01);
+        shaped.envelope.release_secs = 0.01;
+        let samples = unscaled(render_one(shaped, 12));
+
+        assert!(
+            (samples[10] - 0.25).abs() < 0.03,
+            "the release begins at the sustain level, got {}",
+            samples[10]
+        );
+    }
+
+    #[test]
+    fn a_voice_stopped_mid_decay_releases_from_where_it_actually_was() {
+        let mut shaped = tone(Waveform::Square, 0.0);
+        shaped.envelope.decay_secs = 0.02;
+        shaped.envelope.sustain_level = 0.0;
+        shaped.envelope.release_secs = 0.01;
+
+        let mut mixer = Mixer::new();
+        mixer.add(Voice::new(1, shaped));
+        let mut before = vec![0.0; 10];
+        mixer.render(&mut before, 1, 1000.0);
+        mixer.stop(1);
+        let mut after = vec![0.0; 10];
+        mixer.render(&mut after, 1, 1000.0);
+
+        // Half way down the decay, so neither full nor silent — and no step
+        // across the stop, which is the click the envelope exists to avoid.
+        assert!(
+            (after[0] - before[9]).abs() < 0.05,
+            "stopping stepped from {} to {}",
+            before[9],
+            after[0]
+        );
+    }
+
+    #[test]
+    fn a_voice_with_no_sustain_goes_silent_while_it_is_still_sounding() {
+        // A bell that has rung out is still a voice: it holds its slot until
+        // something releases it, long after there is anything to hear.
+        let mut shaped = tone(Waveform::Square, 0.0);
+        shaped.envelope.decay_secs = 0.005;
+        shaped.envelope.sustain_level = 0.0;
+        let mut mixer = Mixer::new();
+        mixer.add(Voice::new(1, shaped));
+
+        let mut out = vec![0.0; 40];
+        mixer.render(&mut out, 1, 1000.0);
+
+        assert!(
+            out[20..].iter().all(|&s| s.abs() < 1e-5),
+            "it should have rung out"
+        );
+        assert_eq!(mixer.active(), 1, "but it is still a sounding voice");
     }
 
     #[test]

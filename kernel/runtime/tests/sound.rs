@@ -18,7 +18,8 @@ fn playing_a_tone_sends_the_mixer_exactly_what_the_program_asked_for() {
     let (_runtime, log) = eval_with_audio(
         "import { playTone, Waveform } from 'ely:sound'; \
          playTone(440, { waveform: Waveform.Square, amplitude: 0.5, \
-                         attack: 0.02, release: 0.3, duration: 0.4 });",
+                         attack: 0.02, decay: 0.05, sustain: 0.3, \
+                         release: 0.3, duration: 0.4 });",
     );
     let played = log.played();
     assert_eq!(played.len(), 1);
@@ -27,6 +28,8 @@ fn playing_a_tone_sends_the_mixer_exactly_what_the_program_asked_for() {
     assert_eq!(tone.frequency_hz, 440.0);
     assert_eq!(tone.amplitude, 0.5);
     assert_eq!(tone.envelope.attack_secs, 0.02);
+    assert_eq!(tone.envelope.decay_secs, 0.05);
+    assert_eq!(tone.envelope.sustain_level, 0.3);
     assert_eq!(tone.envelope.release_secs, 0.3);
     assert_eq!(tone.envelope.duration_secs, Some(0.4));
 }
@@ -39,6 +42,11 @@ fn an_unspecified_tone_takes_the_documented_defaults() {
     assert_eq!(tone.waveform, Waveform::Triangle);
     assert_eq!(tone.amplitude, 0.6);
     assert_eq!(tone.envelope.attack_secs, 0.01);
+    assert_eq!(tone.envelope.decay_secs, 0.0, "no decay by default");
+    assert_eq!(
+        tone.envelope.sustain_level, 1.0,
+        "full sustain is a note that simply holds"
+    );
     assert_eq!(tone.envelope.release_secs, 0.1);
     assert_eq!(tone.envelope.duration_secs, None, "no duration sustains");
 }
@@ -195,8 +203,8 @@ fn a_frequency_outside_the_audible_range_is_rejected() {
 }
 
 #[test]
-fn a_negative_attack_or_release_is_rejected() {
-    for option in ["attack: -1", "release: -1"] {
+fn a_negative_attack_decay_or_release_is_rejected() {
+    for option in ["attack: -1", "decay: -1", "release: -1"] {
         let (threw, correct) = throws(&format!("playTone(440, {{ {option} }});"), "RangeError");
         assert!(threw, "{option} should be rejected");
         assert!(correct, "and as a RangeError");
@@ -211,6 +219,20 @@ fn a_zero_or_negative_duration_is_rejected() {
             "RangeError",
         );
         assert!(threw, "duration {duration} should be rejected");
+        assert!(correct, "and as a RangeError");
+    }
+}
+
+#[test]
+fn a_sustain_outside_zero_to_one_is_rejected() {
+    // The one envelope field that is a level rather than a duration, so it
+    // is bounded on both sides where the others are only bounded below.
+    for sustain in ["-0.1", "1.1", "NaN"] {
+        let (threw, correct) = throws(
+            &format!("playTone(440, {{ sustain: {sustain} }});"),
+            "RangeError",
+        );
+        assert!(threw, "sustain {sustain} should be rejected");
         assert!(correct, "and as a RangeError");
     }
 }
@@ -247,6 +269,8 @@ fn every_valid_combination_of_options_is_accepted() {
              playTone(20000, { amplitude: 1 }); \
              playTone(440, { attack: 0, release: 0 }); \
              playTone(440, { waveform: Waveform.Noise, duration: 10 }); \
+             playTone(440, { decay: 0, sustain: 1 }); \
+             playTone(440, { decay: 0.5, sustain: 0 }); \
          } catch (err) { globalThis.error = String(err); }",
     );
     assert_eq!(global::<String>(&runtime, "error"), "none");
