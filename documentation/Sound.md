@@ -37,12 +37,39 @@ share the room — the system leaves headroom for that, and a mix that would
 overflow is held at the limit rather than distorting.
 
 Its **envelope** is the shape of its loudness over time: it rises from silence
-across the `attack`, holds, then falls back to silence across the `release`.
-That exists for a concrete reason. A waveform switched on at full volume is an
-abrupt step in the signal, and a step is heard as a click, whatever note
-follows it. Even a hundredth of a second of attack removes that entirely. A
-note holds at full until it releases; there is no separate quieter level to
-settle into, which is the thing that would make a plucked string sound plucked.
+across the `attack`, falls from full to its `sustain` level across the
+`decay`, holds there, then falls the rest of the way to silence across the
+`release`.
+
+```
+1.0 |    /\
+    |   /  \______________
+    |  /   ^ sustain level \
+    | /                     \
+0.0 |/_______________________\___
+      A   D       S           R
+    note-on                note-off
+```
+
+That is a shape rather than a plot: the attack, decay and release are fixed
+lengths of time, but the sustain stretches for however long the note is held,
+so the horizontal axis isn't a clock.
+
+The envelope exists for a concrete reason. A waveform switched on at full
+volume is an abrupt step in the signal, and a step is heard as a click,
+whatever note follows it. Even a hundredth of a second of attack removes that
+entirely.
+
+The decay and the sustain level are what make a plucked string sound plucked
+— a loud attack settling immediately into a quieter tone that holds. Note
+that `sustain` is a level between 0 and 1, while `attack`, `decay` and
+`release` are all durations in seconds; it is the one setting here measured
+in something other than time. A sustain of 1 with no decay is a note that
+simply holds, which is the plainest shape and what you get by default. A
+sustain of 0 is a note that rings out to silence on its own — and it is
+**still a sounding voice** after it goes quiet, holding its place until it is
+released or its duration ends. A program that held that note is still holding
+it.
 
 ## Naming notes
 
@@ -95,9 +122,9 @@ release of its sustaining voices when it ends.
 ## Errors
 
 `playTone` throws a `RangeError` for an amplitude outside 0 to 1, a frequency
-that isn't a number between 0 and 20000, a negative attack or release, or a
-duration that isn't greater than zero. It throws a `TypeError` for a waveform
-that isn't one of the four.
+that isn't a number between 0 and 20000, a negative attack, decay or release,
+a sustain outside 0 to 1, or a duration that isn't greater than zero. It
+throws a `TypeError` for a waveform that isn't one of the four.
 
 `noteToFrequency` throws an `UnknownNoteError` for a name that isn't a note.
 Written literally, such a name is rejected before the program runs, so this is
