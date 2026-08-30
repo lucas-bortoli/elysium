@@ -8,8 +8,7 @@ declare function __sound_play(
   waveform: number,
   frequency: number,
   amplitude: number,
-  attack: number,
-  release: number,
+  envelope: number[],
   duration: number | undefined,
 ): Option<number>;
 declare function __sound_stop(id: number): void;
@@ -51,12 +50,21 @@ export interface ToneOptions {
   amplitude?: number;
   /** Seconds spent rising from silence to full. Defaults to `0.01`. */
   attack?: number;
-  /** Seconds spent falling back to silence once released. Defaults to
-   * `0.1`. */
+  /** Seconds spent falling from full to `sustain` once the attack finishes.
+   * Defaults to `0` — no decay, so the note holds at full. */
+  decay?: number;
+  /** A level, from `0` to `1` — not a duration, unlike every other field
+   * here. The fraction of full amplitude the note settles to once its decay
+   * finishes, and holds at until it is released. Defaults to `1`, which
+   * with the default decay of `0` is a note that simply holds. `0` is a
+   * note that rings out to silence on its own while still sounding. */
+  sustain?: number;
+  /** Seconds spent falling the rest of the way to silence once released.
+   * Defaults to `0.1`. */
   release?: number;
-  /** Seconds to hold at full before the release begins, so the voice sounds
-   * for `duration + release` in total. Omitted, the voice holds until
-   * `stopVoice`. */
+  /** Seconds to hold at the sustain level before the release begins, so the
+   * voice sounds for `duration + release` in total. Omitted, the voice holds
+   * until `stopVoice`. */
   duration?: number;
 }
 
@@ -64,6 +72,8 @@ interface ResolvedToneOptions {
   waveform: Waveform;
   amplitude: number;
   attack: number;
+  decay: number;
+  sustain: number;
   release: number;
   duration: number | undefined;
 }
@@ -75,6 +85,8 @@ function resolveToneOptions(options: ToneOptions | undefined): ResolvedToneOptio
     waveform: options?.waveform ?? Waveform.Triangle,
     amplitude: options?.amplitude ?? 0.6,
     attack: options?.attack ?? 0.01,
+    decay: options?.decay ?? 0,
+    sustain: options?.sustain ?? 1,
     release: options?.release ?? 0.1,
     duration: options?.duration,
   };
@@ -84,6 +96,12 @@ function resolveToneOptions(options: ToneOptions | undefined): ResolvedToneOptio
   }
   if (!(resolved.attack >= 0)) {
     throw new RangeError("attack must not be negative");
+  }
+  if (!(resolved.decay >= 0)) {
+    throw new RangeError("decay must not be negative");
+  }
+  if (!(resolved.sustain >= 0 && resolved.sustain <= 1)) {
+    throw new RangeError("sustain must be between 0 and 1");
   }
   if (!(resolved.release >= 0)) {
     throw new RangeError("release must not be negative");
@@ -115,8 +133,7 @@ export function playTone(
     tone.waveform,
     frequency,
     tone.amplitude,
-    tone.attack,
-    tone.release,
+    [tone.attack, tone.decay, tone.sustain, tone.release],
     tone.duration,
   );
 }

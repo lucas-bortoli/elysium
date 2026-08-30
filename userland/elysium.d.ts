@@ -1571,10 +1571,19 @@ declare module "ely:sound" {
     amplitude?: number;
     /** Seconds spent rising from silence to full. Defaults to `0.01`. */
     attack?: number;
-    /** Seconds spent falling back to silence once released. Defaults to `0.1`. */
+    /** Seconds spent falling from full to `sustain` once the attack
+     * finishes. Defaults to `0` — no decay, so the note holds at full. */
+    decay?: number;
+    /** A level, from `0` to `1` — not a duration, unlike every other field
+     * here. The fraction of full amplitude the note settles to once its
+     * decay finishes, and holds at until released. Defaults to `1`. `0` is
+     * a note that rings out to silence on its own while still sounding. */
+    sustain?: number;
+    /** Seconds spent falling the rest of the way to silence once released.
+     * Defaults to `0.1`. */
     release?: number;
-    /** Seconds to hold at full before the release begins. Omitted, the voice
-     * holds until `stopVoice`. */
+    /** Seconds to hold at the sustain level before the release begins.
+     * Omitted, the voice holds until `stopVoice`. */
     duration?: number;
   }
 
@@ -1583,8 +1592,8 @@ declare module "ely:sound" {
    * already in use — both ordinary conditions, not errors. A tone given a
    * `duration` outlives the code that started it; one given none holds until
    * `stopVoice` and is released when the program ends.
-   * @throws {RangeError} if amplitude, frequency, attack, release or
-   * duration is out of range.
+   * @throws {RangeError} if amplitude, frequency, attack, decay, sustain,
+   * release or duration is out of range.
    * @throws {TypeError} if `waveform` is not one of `Waveform`'s entries. */
   export function playTone(
     frequency: number,
