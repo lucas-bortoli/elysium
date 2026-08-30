@@ -1,5 +1,5 @@
-// The sound device: a keyboard you can play, and four shapes to play it
-// with.
+// The sound device: a keyboard you can play, four shapes to play it with,
+// and an octave you can move it to.
 //
 // The distinction worth watching here is who ends a note. A tone started
 // without a duration sustains until someone stops it, and the program that
@@ -27,7 +27,7 @@ import type { Vector2d } from "ely:math";
 import { Key, isKeyDown, wasKeyPressed, wasKeyReleased } from "ely:input";
 import { addUpdateTicker } from "ely:lifecycle";
 import { hasValue } from "ely:container";
-import { Waveform, noteToFrequency, playTone, stopVoice } from "ely:sound";
+import { Waveform, isNote, noteToFrequency, playTone, stopVoice } from "ely:sound";
 import type { Note, VoiceId } from "ely:sound";
 
 /** One waveform, and the digit that selects it. */
@@ -38,38 +38,47 @@ const SHAPES: { waveform: Waveform; key: Key; label: string }[] = [
   { waveform: Waveform.Noise, key: Key.Digit4, label: "4  noise" },
 ];
 
-/** One playable note. The note names are checked as they're written — `Note`
- * is a closed type, so a typo here is a compile error rather than something
- * that throws when you press the key. */
+/** One playable key: which pitch it sounds, and which computer key plays it.
+ * The octave isn't here — it moves, so a pad's note name is built when it's
+ * needed rather than written out. */
 interface Pad {
   key: Key;
-  note: Note;
+  /** The note's letter and accidental, without an octave. */
+  pitch: string;
+  /** How many octaves above the base this sits. Only the C closing the row
+   * is above it. */
+  above: number;
   label: string;
 }
 
 const WHITE: Pad[] = [
-  { key: Key.KeyA, note: "C4", label: "A" },
-  { key: Key.KeyS, note: "D4", label: "S" },
-  { key: Key.KeyD, note: "E4", label: "D" },
-  { key: Key.KeyF, note: "F4", label: "F" },
-  { key: Key.KeyG, note: "G4", label: "G" },
-  { key: Key.KeyH, note: "A4", label: "H" },
-  { key: Key.KeyJ, note: "B4", label: "J" },
-  { key: Key.KeyK, note: "C5", label: "K" },
+  { key: Key.KeyA, pitch: "C", above: 0, label: "A" },
+  { key: Key.KeyS, pitch: "D", above: 0, label: "S" },
+  { key: Key.KeyD, pitch: "E", above: 0, label: "D" },
+  { key: Key.KeyF, pitch: "F", above: 0, label: "F" },
+  { key: Key.KeyG, pitch: "G", above: 0, label: "G" },
+  { key: Key.KeyH, pitch: "A", above: 0, label: "H" },
+  { key: Key.KeyJ, pitch: "B", above: 0, label: "J" },
+  { key: Key.KeyK, pitch: "C", above: 1, label: "K" },
 ];
 
 /** The sharps sit on the seams between white keys, and there is no seam
  * between E and F or between B and C — those two gaps are what make this
  * read as a piano rather than a second row of buttons. */
 const BLACK: (Pad & { seam: number })[] = [
-  { key: Key.KeyW, note: "C#4", label: "W", seam: 0 },
-  { key: Key.KeyE, note: "D#4", label: "E", seam: 1 },
-  { key: Key.KeyT, note: "F#4", label: "T", seam: 3 },
-  { key: Key.KeyY, note: "G#4", label: "Y", seam: 4 },
-  { key: Key.KeyU, note: "A#4", label: "U", seam: 5 },
+  { key: Key.KeyW, pitch: "C#", above: 0, label: "W", seam: 0 },
+  { key: Key.KeyE, pitch: "D#", above: 0, label: "E", seam: 1 },
+  { key: Key.KeyT, pitch: "F#", above: 0, label: "T", seam: 3 },
+  { key: Key.KeyY, pitch: "G#", above: 0, label: "Y", seam: 4 },
+  { key: Key.KeyU, pitch: "A#", above: 0, label: "U", seam: 5 },
 ];
 
 const PADS: Pad[] = [...WHITE, ...BLACK];
+
+/** The row covers the base octave and the C above it, so the base stops one
+ * short of the highest octave a note name can name. */
+const LOWEST_OCTAVE = 0;
+const HIGHEST_OCTAVE = 7;
 
 const PICKER_X = 96;
 const PICKER_Y = 52;
@@ -109,6 +118,18 @@ const NOISE: number[] = (() => {
   return values;
 })();
 
+/** The note `pad` sounds with the keyboard based at `octave`.
+ *
+ * The name is assembled here rather than written out, which makes it an
+ * ordinary string as far as the checker is concerned — `isNote` is what turns
+ * it back into a `Note` that `noteToFrequency` will accept. Clamping the base
+ * means the guard never actually rejects anything, but it is the only honest
+ * way to hand a built name to an API that takes a closed type. */
+function noteFor(pad: Pad, octave: number): Note | undefined {
+  const name = `${pad.pitch}${octave + pad.above}`;
+  return isNote(name) ? name : undefined;
+}
+
 /** One cycle of `waveform` at `phase`, using the same arithmetic the mixer
  * does, so the trace is the shape being played rather than an impression of
  * it. */
@@ -131,6 +152,8 @@ function trace(waveform: Waveform): Vector2d[] {
 }
 
 let selected: Waveform = Waveform.Triangle;
+/** Which octave the row of white keys starts on. */
+let octave = 4;
 /** The selected shape's trace, rebuilt only when the shape changes — a frame
  * that redrew it would spend more time building points than on everything
  * else this program does put together. */
@@ -147,16 +170,24 @@ addUpdateTicker(() => {
     }
   }
 
+  // Held voices keep the pitch they started on, the same way they keep their
+  // shape — a voice's frequency is fixed when it starts.
+  if (wasKeyPressed(Key.ArrowLeft)) octave = Math.max(LOWEST_OCTAVE, octave - 1);
+  if (wasKeyPressed(Key.ArrowRight)) octave = Math.min(HIGHEST_OCTAVE, octave + 1);
+
   for (const pad of PADS) {
     if (wasKeyPressed(pad.key)) {
       // No duration, so the voice holds until it's stopped below. A held
       // voice keeps the shape it started with; picking another only affects
       // the next key pressed.
-      const voice = playTone(noteToFrequency(pad.note), { waveform: selected });
-      // Absent means nothing sounded — no output device, or every voice
-      // already in use. Neither is an error: the key simply has no voice to
-      // stop later.
-      if (hasValue(voice)) voices.set(pad.key, voice);
+      const note = noteFor(pad, octave);
+      if (note !== undefined) {
+        const voice = playTone(noteToFrequency(note), { waveform: selected });
+        // Absent means nothing sounded — no output device, or every voice
+        // already in use. Neither is an error: the key simply has no voice to
+        // stop later.
+        if (hasValue(voice)) voices.set(pad.key, voice);
+      }
     }
 
     if (wasKeyReleased(pad.key)) {
@@ -199,12 +230,15 @@ addDrawHandler(() => {
   drawPolyline(traced, Color.Rose400, 2);
 
   drawText(PICKER_X, 206, "hold a key to sustain — let go to hear the release", Color.Slate400);
+  drawText(SCOPE_X + SCOPE_W, 206, `← octave ${octave} →`, Color.Slate300, {
+    align: "right",
+  });
 
   for (const [index, pad] of WHITE.entries()) {
     const x = KEYS_X + index * WHITE_PITCH;
     const down = isKeyDown(pad.key);
     fillRoundedRectangle(x, WHITE_Y, WHITE_W, WHITE_H, 4, down ? Color.Teal500 : Color.Slate200);
-    drawText(x + WHITE_W / 2, WHITE_Y + WHITE_H - 34, pad.note, Color.Slate900, {
+    drawText(x + WHITE_W / 2, WHITE_Y + WHITE_H - 34, noteFor(pad, octave) ?? "", Color.Slate900, {
       align: "center",
     });
     drawText(x + WHITE_W / 2, WHITE_Y + WHITE_H - 18, pad.label, Color.Slate600, {
@@ -216,7 +250,7 @@ addDrawHandler(() => {
     const x = KEYS_X + (pad.seam + 1) * WHITE_PITCH - 4 - BLACK_W / 2;
     const down = isKeyDown(pad.key);
     fillRoundedRectangle(x, WHITE_Y, BLACK_W, BLACK_H, 3, down ? Color.Teal300 : Color.Slate800);
-    drawText(x + BLACK_W / 2, WHITE_Y + 6, pad.note, down ? Color.Slate900 : Color.Slate400, {
+    drawText(x + BLACK_W / 2, WHITE_Y + 6, noteFor(pad, octave) ?? "", down ? Color.Slate900 : Color.Slate400, {
       align: "center",
     });
     drawText(x + BLACK_W / 2, WHITE_Y + 22, pad.label, down ? Color.Slate900 : Color.Slate600, {
