@@ -3,19 +3,18 @@
 A program describes a tone — a shape, a pitch, how loud, how it begins and
 ends — and the system sounds it. Several can sound at once: the kernel mixes
 every voice currently playing into the one stream the speaker plays, the same
-way every program's drawing lands on the one screen ([1]).
+way every program's drawing lands on the one screen ([1]). Sound is per-VM
+only in what happens when a program ends ([2]); while several are running,
+they all reach the same speaker ([3]).
 
 ```ts
 import { addUpdateTicker } from "ely:lifecycle";
 import { Key, wasKeyPressed } from "ely:input";
-import { Waveform, noteToFrequency, playTone } from "ely:sound";
+import { Waveform, playTone } from "ely:sound";
 
 addUpdateTicker(() => {
   if (wasKeyPressed(Key.Space)) {
-    playTone(noteToFrequency("C5"), {
-      waveform: Waveform.Square,
-      duration: 0.15,
-    });
+    playTone("C5", { waveform: Waveform.Square, duration: 0.15 });
   }
 });
 ```
@@ -77,12 +76,12 @@ The envelope is the shape of a note's **loudness over time**, in four stages:
 |---|---|---|---|
 | **A**ttack | `attack` | seconds | rises from silence to full |
 | **D**ecay | `decay` | seconds | falls from full to the sustain level |
-| **S**ustain | `sustain` | **a level, 0 to 1** | the level held until release |
+| **S**ustain | `sustainLevel` | a level, 0 to 1 | the level held until release |
 | **R**elease | `release` | seconds | falls from wherever it is to silence |
 
-⚠️ **`sustain` is a level, not a duration.** It's the one setting here
-measured in something other than seconds, and mixing it up is the easiest
-mistake to make with this API.
+Three of the four are lengths of time; the sustain is the level they move
+between. Its name says so, which is the only reason it's safe to have one
+option here measured in something other than seconds.
 
 ### Why an attack exists at all
 
@@ -94,20 +93,20 @@ it.
 
 ### What decay and sustain buy you
 
-They're what make a plucked string sound plucked: a loud attack settling
-immediately into a quieter tone that holds.
+Between them they're what makes a plucked string sound plucked: a loud attack
+settling immediately into a quieter tone that holds. Leave both alone — no
+decay, and a sustain level of `1` — and you get the plainest shape there is, a
+note that simply holds for as long as it's held, which is why that's the
+default. Give it a short decay down to a low sustain and it snaps and then
+rings quietly, which is a pluck. Stretch the decay out and take the sustain to
+`0` and it rings out to silence entirely on its own, which is a bell. Stretch
+the decay but keep the sustain high and it swells and settles, which is a pad.
 
-| `decay` | `sustain` | result |
-|---|---|---|
-| `0` | `1` | a note that simply holds — the plainest shape, and the default |
-| short | low | a pluck: snaps, then rings quietly |
-| long | `0` | a bell: rings out to silence on its own |
-| long | high | a pad: swells and settles |
-
-A `sustain` of `0` is worth dwelling on. The note rings out to silence by
-itself — but it is **still a sounding voice** afterwards, holding one of the
-mixer's slots until it is released or its duration ends. A program that held
-that note is still holding it, long after there's anything to hear.
+A sustain of `0` is worth dwelling on, because it separates *being audible*
+from *being a voice*. The note rings out to silence by itself — but it is
+still a sounding voice afterwards, holding one of the mixer's slots until it
+is released or its duration ends. A program that held that note is still
+holding it, long after there's anything left to hear.
 
 ---
 
@@ -137,24 +136,28 @@ None of these are samples; they're the primitives above, arranged.
 
 | | waveform | frequency | sweep | envelope |
 |---|---|---|---|---|
-| kick | `Sine` | 150 | → 50 over 0.08 | attack 0.001, decay 0.25, sustain 0 |
-| snare | `Noise` | 2000 | — | attack 0.001, decay 0.15, sustain 0 |
-| hi-hat | `Noise` | 8000 | — | attack 0.001, decay 0.04, sustain 0 |
-| zap | `Square` | 900 | → 120 over 0.18 | attack 0.001, decay 0.3, sustain 0 |
+| kick | `Sine` | 150 | → 50 over 0.08 | attack 0.001, decay 0.25, sustainLevel 0 |
+| snare | `Noise` | 2000 | — | attack 0.001, decay 0.15, sustainLevel 0 |
+| hi-hat | `Noise` | 8000 | — | attack 0.001, decay 0.04, sustainLevel 0 |
+| zap | `Square` | 900 | → 120 over 0.18 | attack 0.001, decay 0.3, sustainLevel 0 |
 
-Every one has a near-instant attack and a sustain of `0` — percussion *is*
-that shape. Only the kick and the zap need a sweep; the snare and hi-hat are
+Every one has a near-instant attack and a sustain level of `0` — percussion
+*is* that shape. Only the kick and the zap need a sweep; the snare and hi-hat are
 the same generator at two churn rates.
 
 ---
 
 ## Naming notes
 
-`noteToFrequency` turns a note name into the frequency to play it at:
+`playTone` takes a note name wherever it takes a frequency:
 
 ```ts
-playTone(noteToFrequency("C#5"));
+playTone("C#5");
 ```
+
+`noteToFrequency` is the same conversion on its own, for when you want the
+number — to detune it, to transpose by a fraction of a semitone, or to hand it
+to something else.
 
 Names are a letter, an optional sharp or flat, and an octave from `0` to `8`.
 They're a **closed set** — checked as you write them, so a misspelled note is
@@ -182,44 +185,39 @@ itself — is just a string as far as the checker is concerned. `isNote` says
 whether one is a real note name, and narrows it so it can be played:
 
 ```ts
-if (isNote(raw)) playTone(noteToFrequency(raw));
+if (isNote(raw)) playTone(raw);
 ```
 
 ---
 
 ## Timed and sustaining voices
 
-**This is the distinction worth internalising**, because it decides who is
-responsible for ending a sound.
+This is the distinction worth internalising, because it decides who is
+responsible for ending a sound, and giving a tone a `duration` is the whole
+of it.
 
-| | `duration` given | `duration` omitted |
-|---|---|---|
-| ends when | its duration runs out | you call `stopVoice` |
-| outlives its program? | **yes** | no — released when the program ends |
-| can you stop it early? | no | yes, that's the point |
-| use for | sound effects | held notes, drones |
+A tone given one ends when that duration runs out, and it outlives the code
+that started it: destroy whatever made the noise and the noise still finishes.
+That's exactly what a sound effect has to do, and it's why you can't stop one
+early — there's nothing left holding it by the time you'd want to. Fire and
+forget.
 
-A tone given a **duration** outlives the code that started it. Destroy
-whatever made the noise and the noise still finishes — which is exactly what
-a sound effect has to do.
-
-A tone given **no duration** is yours until you release it. If your program
-ends, cleanly or by faulting, the system releases it for you. Without that, a
-program that stopped running would leave a note droning for as long as
-Elysium stayed up.
+A tone given no duration is yours until you release it with `stopVoice`, which
+is the point of it: held notes and drones are sounds whose length isn't known
+when they start. The obligation that comes with that is real but small, because
+if your program ends — cleanly or by faulting — the system releases what you
+were still holding. Without that, a program that stopped running would leave a
+note droning for as long as Elysium stayed up.
 
 ---
 
 ## When a sound doesn't play
 
-`playTone` reports nothing rather than failing, in two ordinary situations:
-
-- the machine has **no working sound device**, or
-- **every voice is already in use**.
-
-Neither is an error and neither needs handling. A program that doesn't care
-can ignore the result entirely and carry on, silently, on a machine with no
-speakers.
+`playTone` reports nothing rather than failing, in exactly one situation: the
+machine has **no working sound device**. That isn't an error and doesn't need
+handling — a program that doesn't care can ignore the result entirely and
+carry on, silently, on a machine with no speakers. If a device exists, a tone
+you asked for sounds.
 
 ## One speaker, shared
 
@@ -227,6 +225,17 @@ A voice id can be stopped by whoever holds it. There is no per-program
 ownership of sound, deliberately — it is one speaker, shared by everything
 running, exactly as it is one screen. The only thing tied to a program is the
 release of its sustaining voices when it ends.
+
+That sharing has a limit, and the limit bites the same way. Something like
+thirty voices can sound at once; a tone started past that takes the slot of
+whichever voice is currently faintest — one part-way through its release, or
+one that has rung out to a low sustain level. Something has to give at the
+ceiling, and quietly refusing the new sound would make a program's own audio
+vanish for reasons it can neither see nor predict, so the system sacrifices
+what a listener is least likely to miss instead. In practice this only matters
+if you hold a great many sustaining voices at once: those don't get quieter on
+their own, so they're what a later sound will eventually take. Give a tone a
+duration whenever you know its length, and it makes room for itself.
 
 ---
 
@@ -238,7 +247,7 @@ release of its sustaining voices when it ends.
 | `amplitude` | `0.6` | 0 to 1 | loudness within the mix |
 | `attack` | `0.01` | ≥ 0 seconds | silence → full |
 | `decay` | `0` | ≥ 0 seconds | full → sustain |
-| `sustain` | `1` | 0 to 1 **(a level)** | held level |
+| `sustainLevel` | `1` | 0 to 1 | held level |
 | `release` | `0.1` | ≥ 0 seconds | → silence, once released |
 | `sweepTo` | *none* | 0 to 20000 Hz | pitch slides here |
 | `sweepOver` | `0.1` | ≥ 0 seconds | how long the slide takes |
@@ -248,38 +257,47 @@ Voices **add together** rather than replacing one another, so several loud
 ones at once share the room. The system leaves headroom for that, and a mix
 that would overflow is held at the limit rather than distorting.
 
+Two more functions come out of the same box, for drawing rather than
+sounding. `waveformSample` gives one cycle of a waveform at a point through
+it, and `noiseSequence` gives the noise generator's first values; both are the
+mixer's own arithmetic, so a waveform you draw is the shape that will
+actually sound.
+
 ## Errors
 
-Most bad options throw a **`ToneOptionError`**, which extends `RangeError`
-and carries an `option` field naming which one you got wrong:
+An option out of range throws a **`ToneOptionError`**, which extends
+`RangeError` and carries an `option` field naming which one you got wrong:
 
 ```ts
 try {
-  playTone(440, { sustain: 5 });
+  playTone(440, { sustainLevel: 5 });
 } catch (err) {
   if (err instanceof ToneOptionError) {
-    print(`bad ${err.option}`); // "bad sustain"
+    print(`bad ${err.option}`); // "bad sustainLevel"
   }
 }
 ```
 
+Every option reports itself this way, so a program — or a test — can tell two
+rules apart without reading the message.
+
 | thrown | when |
 |---|---|
-| `ToneOptionError` | `amplitude` or `sustain` outside 0 to 1 |
+| `ToneOptionError` | `amplitude` or `sustainLevel` outside 0 to 1 |
 | `ToneOptionError` | a negative `attack`, `decay`, `release` or `sweepOver` |
 | `ToneOptionError` | a `duration` that isn't greater than zero |
-| `RangeError` | `frequency` or `sweepTo` outside 0 to 20000 Hz |
+| `ToneOptionError` | `frequency` or `sweepTo` outside what the speaker can sound |
 | `TypeError` | a `waveform` that isn't one of the four |
-| `UnknownNoteError` | `noteToFrequency` given a name that isn't a note |
+| `UnknownNoteError` | a note name that isn't one |
 
-`frequency` and `sweepTo` are the exception: they're range-checked by the
-kernel rather than by the module, so they arrive as a plain `RangeError` with
-no `option` to read. Checking them in both places is how the two would drift
-into disagreeing about the message.
+The ceiling on `frequency` and `sweepTo` is the only rule that isn't a fixed
+number. Around 20 kHz is inaudible, but a slow output device has a lower limit
+of its own: past half the rate it runs at, a tone folds back down into
+something audible that isn't the note you asked for, so the system refuses it
+rather than misplaying it. The error message carries the actual limit.
 
-`UnknownNoteError` is reachable only for a name built at runtime — one
-written literally is rejected before the program runs. Check it with `isNote`
-first.
+`UnknownNoteError` is reachable only for a name built at runtime — one written
+literally is rejected before the program runs. Check it with `isNote` first.
 
 # References
 
