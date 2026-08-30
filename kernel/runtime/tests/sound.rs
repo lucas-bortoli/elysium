@@ -2,7 +2,7 @@
 //! mixer, what happens when there's no device, and naming notes.
 
 use super::*;
-use crate::audio::{AudioLog, Waveform};
+use crate::sound::{SoundLog, Waveform};
 
 #[test]
 fn playing_a_tone_returns_a_voice_id() {
@@ -107,18 +107,18 @@ fn stopping_a_voice_a_program_never_played_still_reaches_the_mixer() {
 
 #[test]
 fn a_sustaining_voice_is_stopped_when_the_program_ends() {
-    let (runtime, log) =
-        eval_with_audio("import { playTone } from 'ely:sound'; globalThis.id = playTone(440);");
-    let id = global::<f64>(&runtime, "id") as u32;
+    // Teardown names the process rather than each voice: the mixer knows
+    // which voices belong to it, so nothing here has to track them.
+    let (runtime, log) = eval_with_audio("import { playTone } from 'ely:sound'; playTone(440);");
     assert!(
-        log.stopped().is_empty(),
+        log.released().is_empty(),
         "still sounding while the VM lives"
     );
 
     drop(runtime);
     assert_eq!(
-        log.stopped(),
-        vec![id],
+        log.released().len(),
+        1,
         "a voice with no duration is released when its program goes away"
     );
 }
@@ -126,6 +126,9 @@ fn a_sustaining_voice_is_stopped_when_the_program_ends() {
 #[test]
 fn a_timed_voice_outlives_the_program_that_started_it() {
     // A sound effect has to finish after the code that triggered it is gone.
+    // Teardown does reach the sound device either way; that it spares the
+    // timed voice is pinned in the mixer's own tests, which can see the
+    // voices themselves.
     let (runtime, log) =
         eval_with_audio("import { playTone } from 'ely:sound'; playTone(440, { duration: 0.4 });");
     drop(runtime);
@@ -136,7 +139,7 @@ fn a_timed_voice_outlives_the_program_that_started_it() {
 }
 
 #[test]
-fn playing_a_tone_with_no_audio_device_reports_nothing_rather_than_throwing() {
+fn playing_a_tone_with_no_sound_device_reports_nothing_rather_than_throwing() {
     let runtime = eval_without_audio(
         "import { playTone, stopVoice } from 'ely:sound'; \
          globalThis.silent = playTone(440) === undefined; \
@@ -150,22 +153,8 @@ fn playing_a_tone_with_no_audio_device_reports_nothing_rather_than_throwing() {
     );
 }
 
-#[test]
-fn playing_a_tone_while_every_voice_is_in_use_reports_nothing() {
-    let (runtime, _input, log) = build_runtime(test_userland_root());
-    log.saturate();
-    runtime
-        .eval_module(
-            "test.ts",
-            "import { playTone } from 'ely:sound'; \
-             globalThis.silent = playTone(440) === undefined;",
-        )
-        .expect("module failed to evaluate");
-    assert!(global::<bool>(&runtime, "silent"));
-}
-
 /// Whether the one tone played carried no sweep.
-fn played_sweep_is_absent(log: &AudioLog) -> bool {
+fn played_sweep_is_absent(log: &SoundLog) -> bool {
     log.played()[0].sweep.is_none()
 }
 

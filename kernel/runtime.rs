@@ -17,7 +17,7 @@ use crate::framebuffer::{self, DrawCommand};
 use crate::image::{self, ImageTable};
 use crate::input::{self, Input};
 use crate::process::{self, ProcessChannel, ProcessId};
-use crate::sound::{self, Sound, VoiceTable};
+use crate::sound::{self, Sound};
 use crate::timers::{TimerArgs, TimerQueue, bootstrap_timers};
 use crate::transform;
 
@@ -141,14 +141,12 @@ pub struct ElysiumRuntime {
     /// `Drop` purely so VM teardown has one obvious place every resource
     /// gets released.
     images: Rc<ImageTable>,
-    /// The sustaining voices `ely:sound`'s `playTone` started for this VM.
-    /// Holds no `Persistent` values, like `images` above — grouped with them
-    /// so VM teardown has one place every resource gets released. A voice
-    /// left sounding by a program that has gone away would otherwise drone
-    /// on for the life of the kernel.
-    voices: Rc<VoiceTable>,
+    /// The process this VM runs, so `Drop` can name whose sustaining voices
+    /// the sound device should release.
+    id: ProcessId,
     /// This VM's handle on the shared output device, kept so `Drop` can
-    /// silence `voices`. `None` when the machine has no working device.
+    /// release the sustaining voices this process started. `None` when the
+    /// machine has no working device.
     sound: Option<Rc<Sound>>,
     guard: Rc<GuardState>,
     /// Canonicalized once in [`Self::new`]; shared by `ely:image`'s
@@ -217,7 +215,6 @@ impl ElysiumRuntime {
         let message_handler = Rc::new(RefCell::new(None));
         let exit_requested = Rc::new(Cell::new(false));
         let images = Rc::new(ImageTable::new());
-        let voices = Rc::new(VoiceTable::new());
 
         context.with(|ctx| -> Result<()> {
             bind(&ctx, "print", print)?;
@@ -232,7 +229,7 @@ impl ElysiumRuntime {
             bootstrap_timers(&ctx, Rc::clone(&timers), Rc::clone(&microtasks))?;
             bootstrap_post_init_handlers(&ctx, Rc::clone(&post_init_handlers))?;
             image::bootstrap_image_bindings(&ctx, Rc::clone(&images), userland_root.clone())?;
-            sound::bootstrap_sound_bindings(&ctx, sound.clone(), Rc::clone(&voices))?;
+            sound::bootstrap_sound_bindings(&ctx, sound.clone(), self_id)?;
             filesystem::bootstrap_filesystem_bindings(&ctx, userland_root.clone())?;
             process::bootstrap_process_bindings(
                 &ctx,
@@ -258,8 +255,8 @@ impl ElysiumRuntime {
             userland_root,
             exit_requested,
             images,
-            voices,
             sound,
+            id: self_id,
         })
     }
 
@@ -487,7 +484,7 @@ impl Drop for ElysiumRuntime {
             *self.message_handler.borrow_mut() = None;
             self.images.clear_all();
             if let Some(sound) = &self.sound {
-                self.voices.stop_all(sound);
+                sound.release_sustaining(self.id);
             }
         });
     }

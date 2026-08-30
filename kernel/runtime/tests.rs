@@ -25,7 +25,7 @@ use crate::process::ProcessChannel;
 
 pub(super) use super::{Devices, ElysiumRuntime, GuardedError, remap_deadlock_error};
 
-use crate::audio::{Audio, AudioLog};
+use crate::sound::{Sound, SoundLog};
 
 mod container;
 mod filesystem;
@@ -41,17 +41,17 @@ mod text;
 mod timers;
 
 /// Builds an `ElysiumRuntime` against `root` with a fresh scale cell,
-/// `Input`, and a detached `Audio`, apart from any process (id 0, a
+/// `Input`, and a detached `Sound`, apart from any process (id 0, a
 /// throwaway channel, no arguments).
 ///
-/// The returned [`AudioLog`] owns the receiving end of the audio command
+/// The returned [`SoundLog`] owns the receiving end of the audio command
 /// channel, so it has to outlive the runtime — drop it first and every
 /// later `playTone` reports the audio thread as gone. Helpers that discard
 /// it are fine only because their tests never play anything.
-fn build_runtime(root: PathBuf) -> (ElysiumRuntime, Rc<Input>, AudioLog) {
+fn build_runtime(root: PathBuf) -> (ElysiumRuntime, Rc<Input>, SoundLog) {
     let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
     let input = Rc::new(Input::new(Rc::clone(&scale)));
-    let (audio, audio_log) = Audio::detached();
+    let (audio, audio_log) = Sound::detached();
     let devices = Devices::new(
         Rc::new(RefCell::new(Vec::new())),
         Rc::clone(&input),
@@ -131,7 +131,7 @@ fn test_scratch_root() -> PathBuf {
 /// Like [`eval`], but hands back the log of everything the VM asked the audio
 /// device to do, for `ely:sound`'s tests. The log must outlive the runtime —
 /// see [`build_runtime`].
-fn eval_with_audio(source: &str) -> (ElysiumRuntime, AudioLog) {
+fn eval_with_audio(source: &str) -> (ElysiumRuntime, SoundLog) {
     let (runtime, _input, audio_log) = build_runtime(test_userland_root());
     runtime
         .eval_module("test.ts", source)
