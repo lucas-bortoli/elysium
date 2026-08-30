@@ -32,7 +32,15 @@ import type { Vector2d } from "ely:math";
 import { Key, isKeyDown, wasKeyPressed } from "ely:input";
 import { addUpdateTicker } from "ely:lifecycle";
 import { hasValue } from "ely:container";
-import { Waveform, isNote, noiseSequence, playTone, stopVoice, waveformSample } from "ely:sound";
+import {
+  Waveform,
+  currentTime,
+  isNote,
+  noiseSequence,
+  playTone,
+  stopVoice,
+  waveformSample,
+} from "ely:sound";
 import type { ToneOptions } from "ely:sound";
 import type { Note, VoiceId } from "ely:sound";
 
@@ -291,6 +299,33 @@ function trace(waveform: Waveform): Vector2d[] {
   return points;
 }
 
+/** The metronome, which is the one thing here that couldn't be built out of
+ * key presses alone.
+ *
+ * A frame lands every 16 to 33 milliseconds and a beat almost never does, so
+ * a click played from an update ticker is a click played at the wrong moment
+ * — audibly uneven, and no amount of care in this file would fix it. Instead
+ * each click names the instant it should sound, and the ticker only has to
+ * stay far enough ahead to keep the queue fed.
+ *
+ * That's the whole pattern: read the clock once, derive every beat from it by
+ * arithmetic, and queue anything falling inside the next `LOOKAHEAD`. The
+ * reading trails the speaker a little, which moves the first beat by an
+ * inaudible amount and leaves every gap after it exact. */
+const BEATS_PER_BAR = 4;
+const BEAT_SECONDS = 0.5;
+/** How far ahead to queue. Comfortably more than a frame, so a slow frame
+ * can't leave a gap, and comfortably inside the two seconds the system
+ * allows. */
+const LOOKAHEAD = 0.25;
+
+let metronome = false;
+/** The instant of the next click to queue, on `currentTime`'s clock. Advances
+ * by exactly `BEAT_SECONDS` each time, so nothing accumulates. */
+let nextBeat = 0;
+/** Counts through the bar, so the downbeat can be the one that stands out. */
+let beatInBar = 0;
+
 let selected: Waveform = Waveform.Triangle;
 /** The envelope every new voice is given. Index 0 is `organ`, which is a
  * plain hold — so the example starts sounding as it did before envelopes
@@ -313,7 +348,37 @@ function release(key: Key): void {
   voices.delete(key);
 }
 
+/** Queues every click falling inside the lookahead window. Called each frame,
+ * but what it produces doesn't depend on when it runs — only that it runs
+ * often enough. */
+function queueClicks(): void {
+  while (nextBeat < currentTime() + LOOKAHEAD) {
+    const downbeat = beatInBar === 0;
+    playTone(downbeat ? 1600 : 1000, {
+      waveform: Waveform.Noise,
+      amplitude: downbeat ? 0.7 : 0.35,
+      attack: 0.001,
+      decay: 0.03,
+      sustainLevel: 0,
+      duration: 0.04,
+      startAt: nextBeat,
+    });
+    nextBeat += BEAT_SECONDS;
+    beatInBar = (beatInBar + 1) % BEATS_PER_BAR;
+  }
+}
+
 addUpdateTicker(() => {
+  if (wasKeyPressed(Key.Space)) {
+    metronome = !metronome;
+    if (metronome) {
+      // A moment's head start, so the first click isn't already late.
+      nextBeat = currentTime() + 0.1;
+      beatInBar = 0;
+    }
+  }
+  if (metronome) queueClicks();
+
   for (const shape of SHAPES) {
     if (wasKeyPressed(shape.key)) {
       selected = shape.waveform;
@@ -414,6 +479,12 @@ addDrawHandler(() => {
   drawPolyline(preset.points, Color.Amber400, 2);
 
   drawText(PICKER_X, 206, "hold a key to sustain — let go to hear the release", Color.Slate400);
+  drawText(
+    PICKER_X,
+    getHeight() - 24,
+    metronome ? "space  metronome on" : "space  metronome off",
+    metronome ? Color.Amber300 : Color.Slate600,
+  );
   drawText(CONTENT_RIGHT, 206, `← octave ${octave} →`, Color.Slate300, {
     align: "right",
   });
