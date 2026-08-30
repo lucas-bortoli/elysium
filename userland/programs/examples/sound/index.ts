@@ -32,7 +32,7 @@ import type { Vector2d } from "ely:math";
 import { Key, isKeyDown, wasKeyPressed } from "ely:input";
 import { addUpdateTicker } from "ely:lifecycle";
 import { hasValue } from "ely:container";
-import { Waveform, isNote, noteToFrequency, playTone, stopVoice } from "ely:sound";
+import { Waveform, isNote, noiseSequence, playTone, stopVoice, waveformSample } from "ely:sound";
 import type { ToneOptions } from "ely:sound";
 import type { Note, VoiceId } from "ely:sound";
 
@@ -43,8 +43,6 @@ const SHAPES: { waveform: Waveform; key: Key; label: string }[] = [
   { waveform: Waveform.Sine, key: Key.Digit3, label: "3  sine" },
   { waveform: Waveform.Noise, key: Key.Digit4, label: "4  noise" },
 ];
-
-
 
 /** Percussion, on its own four keys. These ignore the piano's note and
  * octave entirely — a drum isn't a pitch, it's a shape.
@@ -59,37 +57,60 @@ const SHAPES: { waveform: Waveform; key: Key; label: string }[] = [
 const DRUMS: {
   key: Key;
   label: string;
-  waveform: Waveform;
   frequency: number;
   options: ToneOptions;
 }[] = [
   {
     key: Key.KeyZ,
     label: "Z kick",
-    waveform: Waveform.Sine,
     frequency: 150,
-    options: { sweepTo: 50, sweepOver: 0.08, attack: 0.001, decay: 0.25, sustain: 0, duration: 0.3 },
+    options: {
+      waveform: Waveform.Sine,
+      sweepTo: 50,
+      sweepOver: 0.08,
+      attack: 0.001,
+      decay: 0.25,
+      sustainLevel: 0,
+      duration: 0.3,
+    },
   },
   {
     key: Key.KeyX,
     label: "X snare",
-    waveform: Waveform.Noise,
     frequency: 2000,
-    options: { attack: 0.001, decay: 0.15, sustain: 0, duration: 0.2 },
+    options: {
+      waveform: Waveform.Noise,
+      attack: 0.001,
+      decay: 0.15,
+      sustainLevel: 0,
+      duration: 0.2,
+    },
   },
   {
     key: Key.KeyC,
     label: "C hat",
-    waveform: Waveform.Noise,
     frequency: 8000,
-    options: { attack: 0.001, decay: 0.04, sustain: 0, duration: 0.06 },
+    options: {
+      waveform: Waveform.Noise,
+      attack: 0.001,
+      decay: 0.04,
+      sustainLevel: 0,
+      duration: 0.06,
+    },
   },
   {
     key: Key.KeyV,
     label: "V zap",
-    waveform: Waveform.Square,
     frequency: 900,
-    options: { sweepTo: 120, sweepOver: 0.18, attack: 0.001, decay: 0.3, sustain: 0, duration: 0.25 },
+    options: {
+      waveform: Waveform.Square,
+      sweepTo: 120,
+      sweepOver: 0.18,
+      attack: 0.001,
+      decay: 0.3,
+      sustainLevel: 0,
+      duration: 0.25,
+    },
   },
 ];
 
@@ -171,30 +192,19 @@ const DRUMS_W = 80;
 const DRUMS_H = 20;
 const DRUMS_PITCH = 23;
 
-/** The noise channel's first `SCOPE_CYCLES` values, taken from the same
- * 15-bit shift register the mixer uses, stepped once per cycle rather than
- * once per sample — which is why noise holds one value for a whole cycle and
- * has no pitch of its own. A voice that is actually sounding keeps advancing
- * its own register, so this is the sequence from the seed rather than a live
+/** The noise channel's first `SCOPE_CYCLES` values, from the same generator
+ * the mixer uses. A voice that is actually sounding keeps advancing its own
+ * register, so this is the sequence from the start rather than a live
  * capture: the shape is real, the moment isn't. */
-const NOISE: number[] = (() => {
-  let lfsr = 0x7fff;
-  const values: number[] = [];
-  for (let cycle = 0; cycle < SCOPE_CYCLES; cycle++) {
-    values.push((lfsr & 1) === 0 ? 1 : -1);
-    const bit = (lfsr ^ (lfsr >> 1)) & 1;
-    lfsr = (lfsr >> 1) | (bit << 14);
-  }
-  return values;
-})();
+const NOISE: number[] = noiseSequence(SCOPE_CYCLES);
 
 /** The note `pad` sounds with the keyboard based at `octave`.
  *
  * The name is assembled here rather than written out, which makes it an
  * ordinary string as far as the checker is concerned — `isNote` is what turns
- * it back into a `Note` that `noteToFrequency` will accept. Clamping the base
- * means the guard never actually rejects anything, but it is the only honest
- * way to hand a built name to an API that takes a closed type. */
+ * it back into a `Note` that `playTone` will accept. Clamping the base means
+ * the guard never actually rejects anything, but it is the only honest way to
+ * hand a built name to an API that takes a closed type. */
 function noteFor(pad: Pad, octave: number): Note | undefined {
   const name = `${pad.pitch}${octave + pad.above}`;
   return isNote(name) ? name : undefined;
@@ -209,7 +219,7 @@ function noteFor(pad: Pad, octave: number): Note | undefined {
 function envelopeShape(envelope: {
   attack: number;
   decay: number;
-  sustain: number;
+  sustainLevel: number;
   release: number;
 }): Vector2d[] {
   const left = GRAPH_X + GRAPH_INSET;
@@ -224,7 +234,7 @@ function envelopeShape(envelope: {
 
   const attackW = share(envelope.attack);
   const decayW = share(envelope.decay);
-  const sustainY = baseline - envelope.sustain * (baseline - peak);
+  const sustainY = baseline - envelope.sustainLevel * (baseline - peak);
 
   return [
     { x: left, y: baseline },
@@ -246,7 +256,7 @@ interface Preset {
   label: string;
   attack: number;
   decay: number;
-  sustain: number;
+  sustainLevel: number;
   release: number;
   /** The shape drawn in the panel, built once — it depends on nothing but
    * the four numbers above. */
@@ -254,28 +264,28 @@ interface Preset {
 }
 
 const PRESETS: Preset[] = [
-  { key: Key.Digit5, label: "5  organ", attack: 0.02, decay: 0, sustain: 1, release: 0.08 },
-  { key: Key.Digit6, label: "6  pluck", attack: 0.005, decay: 0.12, sustain: 0.15, release: 0.15 },
-  { key: Key.Digit7, label: "7  bell", attack: 0.002, decay: 0.9, sustain: 0, release: 0.4 },
-  { key: Key.Digit8, label: "8  pad", attack: 0.25, decay: 0.3, sustain: 0.7, release: 0.6 },
+  { key: Key.Digit5, label: "5  organ", attack: 0.02, decay: 0, sustainLevel: 1, release: 0.08 },
+  {
+    key: Key.Digit6,
+    label: "6  pluck",
+    attack: 0.005,
+    decay: 0.12,
+    sustainLevel: 0.15,
+    release: 0.15,
+  },
+  { key: Key.Digit7, label: "7  bell", attack: 0.002, decay: 0.9, sustainLevel: 0, release: 0.4 },
+  { key: Key.Digit8, label: "8  pad", attack: 0.25, decay: 0.3, sustainLevel: 0.7, release: 0.6 },
 ].map((preset) => ({ ...preset, points: envelopeShape(preset) }));
 
-/** One cycle of `waveform` at `phase`, using the same arithmetic the mixer
- * does, so the trace is the shape being played rather than an impression of
- * it. */
-function sample(waveform: Waveform, phase: number, cycle: number): number {
-  if (waveform === Waveform.Square) return phase < 0.5 ? 1 : -1;
-  if (waveform === Waveform.Triangle) return 4 * Math.abs(phase - 0.5) - 1;
-  if (waveform === Waveform.Sine) return Math.sin(phase * 2 * Math.PI);
-  return NOISE[cycle % SCOPE_CYCLES] ?? 1;
-}
-
+/** The selected shape, traced across the scope. `waveformSample` is the
+ * mixer's own arithmetic, so this is the shape that will actually sound
+ * rather than an impression of it. */
 function trace(waveform: Waveform): Vector2d[] {
   const points: Vector2d[] = [];
   const middle = SCOPE_Y + SCOPE_H / 2;
   for (let column = 0; column <= SCOPE_W; column++) {
     const through = (column / SCOPE_W) * SCOPE_CYCLES;
-    const value = sample(waveform, through % 1, Math.floor(through));
+    const value = waveformSample(waveform, through % 1, Math.floor(through) % SCOPE_CYCLES);
     points.push({ x: SCOPE_X + column, y: middle - value * SCOPE_AMP });
   }
   return points;
@@ -324,7 +334,7 @@ addUpdateTicker(() => {
     // Every drum carries a duration, so it sees itself out — there is
     // nothing here to track and nothing to release.
     if (wasKeyPressed(drum.key)) {
-      playTone(drum.frequency, { waveform: drum.waveform, ...drum.options });
+      playTone(drum.frequency, drum.options);
     }
   }
 
@@ -340,11 +350,11 @@ addUpdateTicker(() => {
       // affects the next key pressed.
       const note = noteFor(pad, octave);
       if (note !== undefined) {
-        const voice = playTone(noteToFrequency(note), {
+        const voice = playTone(note, {
           waveform: selected,
           attack: preset.attack,
           decay: preset.decay,
-          sustain: preset.sustain,
+          sustainLevel: preset.sustainLevel,
           release: preset.release,
         });
         // Absent means nothing sounded — no output device, or every voice
