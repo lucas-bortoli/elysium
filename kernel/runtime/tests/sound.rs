@@ -2,7 +2,7 @@
 //! mixer, what happens when there's no device, and naming notes.
 
 use super::*;
-use crate::audio::Waveform;
+use crate::audio::{AudioLog, Waveform};
 
 #[test]
 fn playing_a_tone_returns_a_voice_id() {
@@ -164,6 +164,23 @@ fn playing_a_tone_while_every_voice_is_in_use_reports_nothing() {
     assert!(global::<bool>(&runtime, "silent"));
 }
 
+/// Whether the one tone played carried no sweep.
+fn played_sweep_is_absent(log: &AudioLog) -> bool {
+    log.played()[0].sweep.is_none()
+}
+
+/// The option `ToneOptionError` blamed, or `""` if `source` didn't throw one.
+fn rejected_option(source: &str) -> String {
+    let (runtime, _log) = eval_with_audio(&format!(
+        "import {{ playTone, ToneOptionError, Waveform }} from 'ely:sound'; \
+         globalThis.option = ''; \
+         try {{ {source} }} catch (err) {{ \
+             if (err instanceof ToneOptionError) globalThis.option = err.option; \
+         }}"
+    ));
+    global::<String>(&runtime, "option")
+}
+
 /// Evaluates `source` and reports whether it threw, and whether the thrown
 /// value was of class `expected`.
 fn throws(source: &str, expected: &str) -> (bool, bool) {
@@ -184,12 +201,45 @@ fn throws(source: &str, expected: &str) -> (bool, bool) {
 #[test]
 fn an_out_of_range_amplitude_is_rejected() {
     for amplitude in ["-0.1", "1.1"] {
-        let (threw, correct) = throws(
-            &format!("playTone(440, {{ amplitude: {amplitude} }});"),
-            "RangeError",
+        assert_eq!(
+            rejected_option(&format!("playTone(440, {{ amplitude: {amplitude} }});")),
+            "amplitude",
+            "amplitude {amplitude} should be rejected, and blamed on amplitude"
         );
-        assert!(threw, "amplitude {amplitude} should be rejected");
-        assert!(correct, "and as a RangeError");
+    }
+}
+
+/// Every option this module checks itself, and the rule each one breaks. The
+/// point is the blame: a test that only asserted `RangeError` would pass
+/// just as happily if the wrong rule fired.
+#[test]
+fn a_rejected_option_names_itself() {
+    let cases = [
+        ("amplitude: 2", "amplitude"),
+        ("attack: -1", "attack"),
+        ("decay: -1", "decay"),
+        ("sustain: 2", "sustain"),
+        ("release: -1", "release"),
+        ("sweepOver: -1", "sweepOver"),
+        ("duration: 0", "duration"),
+    ];
+    for (option, blamed) in cases {
+        assert_eq!(
+            rejected_option(&format!("playTone(440, {{ {option} }});")),
+            blamed
+        );
+    }
+}
+
+/// The two the kernel range-checks rather than the module, so they arrive as
+/// a plain `RangeError` with nothing to blame.
+#[test]
+fn a_kernel_checked_option_is_a_plain_range_error() {
+    for source in ["playTone(40000);", "playTone(440, { sweepTo: 40000 });"] {
+        let (threw, correct) = throws(source, "RangeError");
+        assert!(threw, "{source} should be rejected");
+        assert!(correct, "as a RangeError");
+        assert_eq!(rejected_option(source), "", "but not as a ToneOptionError");
     }
 }
 
@@ -221,6 +271,55 @@ fn a_zero_or_negative_duration_is_rejected() {
         assert!(threw, "duration {duration} should be rejected");
         assert!(correct, "and as a RangeError");
     }
+}
+
+#[test]
+fn a_sweep_reaches_the_mixer() {
+    let (_runtime, log) = eval_with_audio(
+        "import { playTone } from 'ely:sound'; \
+         playTone(150, { sweepTo: 50, sweepOver: 0.08 });",
+    );
+    let played = log.played();
+    let sweep = played[0].sweep.expect("the tone should carry a sweep");
+    assert_eq!(sweep.to_hz, 50.0);
+    assert_eq!(sweep.over_secs, 0.08);
+}
+
+#[test]
+fn a_tone_without_a_sweep_target_holds_its_pitch() {
+    // `sweepOver` alone means nothing: without somewhere to slide to, the
+    // note simply stays where it started.
+    let (_runtime, log) =
+        eval_with_audio("import { playTone } from 'ely:sound'; playTone(440, { sweepOver: 2 });");
+    assert!(played_sweep_is_absent(&log));
+}
+
+#[test]
+fn a_sweep_takes_a_tenth_of_a_second_unless_told_otherwise() {
+    let (_runtime, log) =
+        eval_with_audio("import { playTone } from 'ely:sound'; playTone(440, { sweepTo: 220 });");
+    let played = log.played();
+    let sweep = played[0].sweep.expect("the tone should carry a sweep");
+    assert_eq!(sweep.over_secs, 0.1);
+}
+
+#[test]
+fn a_sweep_target_outside_the_audible_range_is_rejected() {
+    for target in ["-1", "40000", "NaN"] {
+        let (threw, correct) = throws(
+            &format!("playTone(440, {{ sweepTo: {target} }});"),
+            "RangeError",
+        );
+        assert!(threw, "sweepTo {target} should be rejected");
+        assert!(correct, "and as a RangeError");
+    }
+}
+
+#[test]
+fn a_negative_sweep_time_is_rejected() {
+    let (threw, correct) = throws("playTone(440, { sweepOver: -1 });", "RangeError");
+    assert!(threw);
+    assert!(correct);
 }
 
 #[test]
@@ -271,6 +370,8 @@ fn every_valid_combination_of_options_is_accepted() {
              playTone(440, { waveform: Waveform.Noise, duration: 10 }); \
              playTone(440, { decay: 0, sustain: 1 }); \
              playTone(440, { decay: 0.5, sustain: 0 }); \
+             playTone(150, { sweepTo: 50, sweepOver: 0.08 }); \
+             playTone(440, { sweepTo: 0 }); \
          } catch (err) { globalThis.error = String(err); }",
     );
     assert_eq!(global::<String>(&runtime, "error"), "none");
@@ -354,3 +455,4 @@ fn a_note_name_can_be_played_directly() {
     );
     assert_eq!(log.played()[0].frequency_hz, 440.0);
 }
+

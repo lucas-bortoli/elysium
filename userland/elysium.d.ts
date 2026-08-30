@@ -1582,6 +1582,15 @@ declare module "ely:sound" {
     /** Seconds spent falling the rest of the way to silence once released.
      * Defaults to `0.1`. */
     release?: number;
+    /** The frequency, in hertz, the pitch slides to over `sweepOver`
+     * seconds. Omitted, the note holds the pitch it started on. A falling
+     * slide is what makes a drum read as a thump rather than a note, and
+     * what makes an arcade "pew". The slide is geometric, since that is how
+     * pitch is heard. */
+    sweepTo?: number;
+    /** How long the slide to `sweepTo` takes, after which the pitch holds
+     * there. Defaults to `0.1`. Ignored without a `sweepTo`. */
+    sweepOver?: number;
     /** Seconds to hold at the sustain level before the release begins.
      * Omitted, the voice holds until `stopVoice`. */
     duration?: number;
@@ -1592,8 +1601,9 @@ declare module "ely:sound" {
    * already in use — both ordinary conditions, not errors. A tone given a
    * `duration` outlives the code that started it; one given none holds until
    * `stopVoice` and is released when the program ends.
-   * @throws {RangeError} if amplitude, frequency, attack, decay, sustain,
-   * release or duration is out of range.
+   * @throws {ToneOptionError} if amplitude, attack, decay, sustain, release,
+   * sweepOver or duration is out of range; `option` names which.
+   * @throws {RangeError} if frequency or sweepTo is out of range.
    * @throws {TypeError} if `waveform` is not one of `Waveform`'s entries. */
   export function playTone(
     frequency: number,
@@ -1616,5 +1626,15 @@ declare module "ely:sound" {
 
   export class UnknownNoteError extends Error {
     constructor(note: string);
+  }
+
+  /** Thrown when one of `playTone`'s options is out of range. `option` names
+   * which one, so two rules can be told apart without reading the message.
+   * Extends `RangeError`, so code that only cares that something was out of
+   * range can keep catching that. `frequency` and `sweepTo` are checked by
+   * the kernel instead and arrive as a plain `RangeError`. */
+  export class ToneOptionError extends RangeError {
+    readonly option: string;
+    constructor(option: string, requirement: string);
   }
 }
