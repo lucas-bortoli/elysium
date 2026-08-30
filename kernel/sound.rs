@@ -1378,9 +1378,8 @@ mod tests {
 
     #[test]
     fn a_release_from_sustain_starts_at_the_sustain_level_rather_than_full() {
-        // The shape the old two-stage envelope could not express: a note
-        // that has already settled quieter releases from there, not from
-        // full.
+        // A note that has already settled quieter releases from where it
+        // actually is, not from full.
         let mut shaped = tone(Waveform::Square, 0.0);
         shaped.envelope.decay_secs = 0.002;
         shaped.envelope.sustain_level = 0.25;
