@@ -595,11 +595,10 @@ function wrapLine(line: string, options: ResolvedTextOptions): string[] {
 /** Where every line of `text` sits and how much room the whole block takes,
  * shared by `drawText` and `measureText` so the two can't disagree. */
 function layoutText(text: string, options: ResolvedTextOptions) {
-  const lines = text
-    .split("\n")
-    .flatMap((line) => wrapLine(line, options));
+  const lines = text.split("\n").flatMap((line) => wrapLine(line, options));
   const widths = lines.map((line) => lineWidth(line, options));
-  const lineHeight = __framebuffer_measure_text("", options.font)[1] * options.scale;
+  const lineHeight =
+    __framebuffer_measure_text("", options.font)[1] * options.scale;
   const step = lineHeight * options.lineSpacing;
   return {
     lines,
@@ -633,12 +632,12 @@ export function drawText(
   const { lines, widths, step } = layoutText(text, options);
   for (let i = 0; i < lines.length; i++) {
     let left = x;
-    if (options.align === "center") left = x - widths[i] / 2;
-    else if (options.align === "right") left = x - widths[i];
+    if (options.align === "center") left = x - widths[i]! / 2;
+    else if (options.align === "right") left = x - widths[i]!;
     __framebuffer_draw_text(
       left,
       y + step * i,
-      lines[i],
+      lines[i]!,
       options.font,
       options.scale,
       color,
@@ -1063,10 +1062,11 @@ export function strokePolygon(
 /** Starts a fresh path running through `points` in order, leaving it open
  * for the caller to close, fill or stroke. */
 function tracePoints(points: readonly Vector2d[]): void {
+  if (points.length === 0) return;
   __framebuffer_path_begin();
-  __framebuffer_path_move_to(points[0].x, points[0].y);
+  __framebuffer_path_move_to(points[0]!.x, points[0]!.y);
   for (let i = 1; i < points.length; i++) {
-    __framebuffer_path_line_to(points[i].x, points[i].y);
+    __framebuffer_path_line_to(points[i]!.x, points[i]!.y);
   }
 }
 
