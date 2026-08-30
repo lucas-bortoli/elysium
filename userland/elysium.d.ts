@@ -1594,6 +1594,13 @@ declare module "ely:sound" {
     /** Seconds to hold at the sustain level before the release begins.
      * Omitted, the voice holds until `stopVoice`. */
     duration?: number;
+    /** When to start, as a reading of `currentTime` — an instant, not a
+     * delay. Omitted, the tone starts as soon as the system sees it. This is
+     * how anything rhythmic is built, since a frame almost never lands on a
+     * beat. A time already past starts at once; more than two seconds out is
+     * refused, because a scheduled voice holds one of the system's slots
+     * before it makes any sound. */
+    startAt?: number;
   }
 
   /** Starts `pitch` — a note name or a frequency in hertz — sounding,
@@ -1640,6 +1647,14 @@ declare module "ely:sound" {
    * sample, which is why noise holds one value for a whole cycle and why
    * frequency sets how fast it churns instead of how high it sounds. */
   export function noiseSequence(length: number): number[];
+
+  /** Seconds of sound played since the system started — the clock
+   * `playTone`'s `startAt` is measured against. It counts what the speaker
+   * has actually played rather than what the wall clock says, and only ever
+   * moves forward. The reading trails the speaker slightly, so build a
+   * schedule by reading it once and deriving every later instant by
+   * arithmetic: the gaps then stay exact however stale the reading was. */
+  export function currentTime(): number;
 
   export class UnknownNoteError extends Error {
     constructor(note: string);
