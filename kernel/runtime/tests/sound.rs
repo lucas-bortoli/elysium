@@ -18,7 +18,7 @@ fn playing_a_tone_sends_the_mixer_exactly_what_the_program_asked_for() {
     let (_runtime, log) = eval_with_audio(
         "import { playTone, Waveform } from 'ely:sound'; \
          playTone(440, { waveform: Waveform.Square, amplitude: 0.5, \
-                         attack: 0.02, decay: 0.05, sustain: 0.3, \
+                         attack: 0.02, decay: 0.05, sustainLevel: 0.3, \
                          release: 0.3, duration: 0.4 });",
     );
     let played = log.played();
@@ -198,38 +198,43 @@ fn an_out_of_range_amplitude_is_rejected() {
     }
 }
 
-/// Every option this module checks itself, and the rule each one breaks. The
-/// point is the blame: a test that only asserted `RangeError` would pass
-/// just as happily if the wrong rule fired.
+/// Every option, and the rule each one breaks. The point is the blame: a
+/// test that only asserted `RangeError` would pass just as happily if the
+/// wrong rule fired.
+///
+/// The pitch and the sweep's target are in here alongside the rest. They are
+/// range-checked against what the sound device can actually sound rather
+/// than against a fixed ceiling, but a program is told which option it got
+/// wrong either way.
 #[test]
-fn a_rejected_option_names_itself() {
+fn every_rejected_option_names_itself() {
     let cases = [
-        ("amplitude: 2", "amplitude"),
-        ("attack: -1", "attack"),
-        ("decay: -1", "decay"),
-        ("sustain: 2", "sustain"),
-        ("release: -1", "release"),
-        ("sweepOver: -1", "sweepOver"),
-        ("duration: 0", "duration"),
+        ("playTone(40000);", "frequency"),
+        ("playTone(440, { amplitude: 2 });", "amplitude"),
+        ("playTone(440, { attack: -1 });", "attack"),
+        ("playTone(440, { decay: -1 });", "decay"),
+        ("playTone(440, { sustainLevel: 2 });", "sustainLevel"),
+        ("playTone(440, { release: -1 });", "release"),
+        ("playTone(440, { sweepTo: 40000 });", "sweepTo"),
+        (
+            "playTone(440, { sweepTo: 200, sweepOver: -1 });",
+            "sweepOver",
+        ),
+        ("playTone(440, { duration: 0 });", "duration"),
     ];
-    for (option, blamed) in cases {
-        assert_eq!(
-            rejected_option(&format!("playTone(440, {{ {option} }});")),
-            blamed
-        );
+    for (source, blamed) in cases {
+        assert_eq!(rejected_option(source), blamed, "{source}");
     }
 }
 
-/// The two the kernel range-checks rather than the module, so they arrive as
-/// a plain `RangeError` with nothing to blame.
 #[test]
-fn a_kernel_checked_option_is_a_plain_range_error() {
-    for source in ["playTone(40000);", "playTone(440, { sweepTo: 40000 });"] {
-        let (threw, correct) = throws(source, "RangeError");
-        assert!(threw, "{source} should be rejected");
-        assert!(correct, "as a RangeError");
-        assert_eq!(rejected_option(source), "", "but not as a ToneOptionError");
-    }
+fn a_sweep_time_is_only_checked_when_there_is_a_sweep_to_use_it() {
+    // `sweepOver` says how long a slide takes, so without a `sweepTo` there
+    // is no slide for it to describe and its value never reaches anything.
+    let (_runtime, log) =
+        eval_with_audio("import { playTone } from 'ely:sound'; playTone(440, { sweepOver: -1 });");
+    assert_eq!(log.played().len(), 1, "the tone still sounds");
+    assert!(played_sweep_is_absent(&log), "and it holds its pitch");
 }
 
 #[test]
@@ -306,21 +311,24 @@ fn a_sweep_target_outside_the_audible_range_is_rejected() {
 
 #[test]
 fn a_negative_sweep_time_is_rejected() {
-    let (threw, correct) = throws("playTone(440, { sweepOver: -1 });", "RangeError");
+    let (threw, correct) = throws(
+        "playTone(440, { sweepTo: 200, sweepOver: -1 });",
+        "RangeError",
+    );
     assert!(threw);
     assert!(correct);
 }
 
 #[test]
-fn a_sustain_outside_zero_to_one_is_rejected() {
+fn a_sustain_level_outside_zero_to_one_is_rejected() {
     // The one envelope field that is a level rather than a duration, so it
     // is bounded on both sides where the others are only bounded below.
     for sustain in ["-0.1", "1.1", "NaN"] {
         let (threw, correct) = throws(
-            &format!("playTone(440, {{ sustain: {sustain} }});"),
+            &format!("playTone(440, {{ sustainLevel: {sustain} }});"),
             "RangeError",
         );
-        assert!(threw, "sustain {sustain} should be rejected");
+        assert!(threw, "sustainLevel {sustain} should be rejected");
         assert!(correct, "and as a RangeError");
     }
 }
@@ -443,4 +451,72 @@ fn a_note_name_can_be_played_directly() {
          playTone(noteToFrequency('A4'));",
     );
     assert_eq!(log.played()[0].frequency_hz, 440.0);
+}
+
+#[test]
+fn a_tone_can_be_played_by_note_name_instead_of_by_frequency() {
+    // The two spellings are one tone: the name is turned into its frequency
+    // before anything else happens to it.
+    let (_runtime, log) = eval_with_audio(
+        "import { playTone, noteToFrequency } from 'ely:sound'; \
+         playTone('A4'); playTone(noteToFrequency('A4')); playTone(440);",
+    );
+    let played = log.played();
+    assert_eq!(played.len(), 3);
+    assert_eq!(played[0].frequency_hz, played[1].frequency_hz);
+    assert_eq!(played[1].frequency_hz, played[2].frequency_hz);
+}
+
+#[test]
+fn a_note_name_that_is_not_a_note_is_still_rejected_when_played_directly() {
+    // Unreachable from TypeScript, which checks a literal name as it is
+    // written — but a name can still arrive from parsed data or a cast.
+    let runtime = eval_without_audio(
+        "import { playTone } from 'ely:sound'; \
+         globalThis.thrown = ''; \
+         try { playTone('H9' as never); } catch (err) { globalThis.thrown = err.name; }",
+    );
+    assert_eq!(global::<String>(&runtime, "thrown"), "UnknownNoteError");
+}
+
+#[test]
+fn the_noise_sequence_matches_the_one_the_mixer_generates() {
+    // The example draws the noise channel using this, so a drift here would
+    // put a shape on screen that isn't the one being played.
+    let expected = {
+        let mut register: u16 = 0x7fff;
+        let mut values = Vec::new();
+        for _ in 0..16 {
+            values.push(if register & 1 == 0 { 1.0 } else { -1.0 });
+            let bit = (register ^ (register >> 1)) & 1;
+            register = (register >> 1) | (bit << 14);
+        }
+        values
+    };
+    let runtime = eval_without_audio(
+        "import { noiseSequence } from 'ely:sound'; \
+         globalThis.values = noiseSequence(16).join(',');",
+    );
+    let actual: Vec<f64> = global::<String>(&runtime, "values")
+        .split(',')
+        .map(|value| value.parse().expect("a number"))
+        .collect();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn every_waveform_samples_the_shape_the_mixer_would_sound() {
+    // Exported so a program drawing a waveform draws what will actually
+    // sound; these are the values the mixer's own tests pin down.
+    let runtime = eval_without_audio(
+        "import { Waveform, waveformSample } from 'ely:sound'; \
+         globalThis.square = waveformSample(Waveform.Square, 0.25); \
+         globalThis.squareLate = waveformSample(Waveform.Square, 0.75); \
+         globalThis.triangle = waveformSample(Waveform.Triangle, 0.5); \
+         globalThis.sine = waveformSample(Waveform.Sine, 0.25);",
+    );
+    assert_eq!(global::<f64>(&runtime, "square"), 1.0);
+    assert_eq!(global::<f64>(&runtime, "squareLate"), -1.0);
+    assert_eq!(global::<f64>(&runtime, "triangle"), -1.0);
+    assert!((global::<f64>(&runtime, "sine") - 1.0).abs() < 1e-9);
 }
