@@ -38,20 +38,22 @@
 //! logging the specific reason, and `ely:sound`'s bindings degrade to silent
 //! no-ops, so both the kernel and every program boot normally either way.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
+#[cfg(test)]
+use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rquickjs::{Ctx, Result};
 
 use crate::bindings::bind;
+use crate::process::ProcessId;
 
-/// Hard ceiling on simultaneously sounding voices. A `play` past this is
-/// rejected and logged. Mixing cost is linear in the voice count and every
-/// voice steals headroom from the ones already sounding; this bounds both.
+/// Hard ceiling on simultaneously sounding voices. A `play` past this takes
+/// the slot of the faintest voice already sounding — see [`Mixer::add`].
+/// Mixing cost is linear in the voice count and every voice takes headroom
+/// from the ones already sounding; this bounds both.
 const MAX_VOICES: usize = 32;
 
 /// Every voice is summed at full scale and the result clamped, so the mix is
@@ -199,6 +201,10 @@ pub struct Tone {
 /// how far through its envelope it has travelled.
 struct Voice {
     id: VoiceId,
+    /// The process whose `playTone` started this voice. A VM going away
+    /// releases the sustaining voices it owns, and this is how the mixer
+    /// knows which those are.
+    owner: ProcessId,
     tone: Tone,
     /// `0.0..1.0`, wraps every cycle.
     phase: f32,
@@ -210,15 +216,23 @@ struct Voice {
 }
 
 impl Voice {
-    fn new(id: VoiceId, tone: Tone) -> Self {
+    fn new(id: VoiceId, owner: ProcessId, tone: Tone) -> Self {
         Self {
             id,
+            owner,
             tone,
             phase: 0.0,
             lfsr: LFSR_SEED,
             elapsed_secs: 0.0,
             releasing_since: None,
         }
+    }
+
+    /// How loud this voice actually is right now: its envelope scaled by its
+    /// own amplitude. What [`Mixer::add`] compares when it has to steal a
+    /// slot, since neither number alone says which voice is faintest.
+    fn audible_level(&self) -> f32 {
+        self.tone.amplitude * self.amplitude_envelope()
     }
 
     /// This voice's envelope value right now, in `0.0..=1.0`.
@@ -325,8 +339,16 @@ impl Voice {
 
 /// What the main thread asks the sound thread to do.
 enum Command {
-    Play { id: VoiceId, tone: Tone },
+    Play {
+        id: VoiceId,
+        owner: ProcessId,
+        tone: Tone,
+    },
     Stop(VoiceId),
+    /// Releases every sustaining voice `owner` started, sent when its VM
+    /// goes away. Timed voices are left alone: a sound effect has to outlive
+    /// the code that triggered it.
+    ReleaseSustaining(ProcessId),
 }
 
 /// The voices currently sounding, and the mix of them. Lives entirely on the
@@ -338,22 +360,42 @@ struct Mixer {
 impl Mixer {
     fn new() -> Self {
         Self {
-            // Allocated once, up front, and `add` refuses past the cap, so
-            // `push` never reallocates — the sound callback never reaches
+            // Allocated once, up front, and `add` never grows past the cap,
+            // so `push` never reallocates — the sound callback never reaches
             // the allocator.
             voices: Vec::with_capacity(MAX_VOICES),
         }
     }
 
-    /// Starts `voice` sounding, or returns `false` if every voice is already
-    /// in use. The authoritative cap: [`Sound::play`]'s own check is against
-    /// a count that can be one callback stale.
-    fn add(&mut self, voice: Voice) -> bool {
-        if self.voices.len() >= MAX_VOICES {
-            return false;
+    /// Starts `voice` sounding, replacing the faintest voice already
+    /// sounding if every slot is taken.
+    ///
+    /// Something has to give at the cap, and silently dropping the new voice
+    /// makes a program's own sound disappear for reasons it can neither see
+    /// nor predict. Stealing sacrifices the least audible thing instead: a
+    /// voice part-way through its release, or one that has rung out to a low
+    /// sustain, is by construction quieter than one that just started, so
+    /// the replacement is the one a listener is least likely to notice. Ties
+    /// go to the oldest, which is the one closest to being over.
+    fn add(&mut self, voice: Voice) {
+        if self.voices.len() < MAX_VOICES {
+            self.voices.push(voice);
+            return;
         }
-        self.voices.push(voice);
-        true
+
+        let quietest = self
+            .voices
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                a.audible_level()
+                    .total_cmp(&b.audible_level())
+                    .then(b.elapsed_secs.total_cmp(&a.elapsed_secs))
+            })
+            .map(|(index, _)| index);
+        if let Some(index) = quietest {
+            self.voices[index] = voice;
+        }
     }
 
     /// Releases the voice `id` names. A voice that finished on its own a
@@ -362,6 +404,17 @@ impl Mixer {
     fn stop(&mut self, id: VoiceId) {
         if let Some(voice) = self.voices.iter_mut().find(|voice| voice.id == id) {
             voice.release();
+        }
+    }
+
+    /// Releases every sustaining voice `owner` started. A timed voice is
+    /// left to finish on its own, so a sound effect still outlives the
+    /// program that triggered it.
+    fn release_sustaining(&mut self, owner: ProcessId) {
+        for voice in &mut self.voices {
+            if voice.owner == owner && voice.tone.envelope.duration_secs.is_none() {
+                voice.release();
+            }
         }
     }
 
@@ -376,25 +429,20 @@ impl Mixer {
         let dt = 1.0 / sample_rate_hz;
 
         for frame in out.chunks_mut(channels) {
-            let mixed: f32 = self
-                .voices
-                .iter()
-                .map(|voice| {
-                    voice.tone.waveform.sample(voice.phase, voice.lfsr)
-                        * voice.tone.amplitude
-                        * voice.amplitude_envelope()
-                })
-                .sum();
-            frame.fill((mixed * MASTER_GAIN).clamp(-1.0, 1.0));
-
+            let mut mixed = 0.0;
             for voice in &mut self.voices {
+                mixed += voice.tone.waveform.sample(voice.phase, voice.lfsr)
+                    * voice.tone.amplitude
+                    * voice.amplitude_envelope();
                 voice.advance(dt);
             }
+            frame.fill((mixed * MASTER_GAIN).clamp(-1.0, 1.0));
         }
 
         self.voices.retain(|voice| !voice.finished());
     }
 
+    #[cfg(test)]
     fn active(&self) -> usize {
         self.voices.len()
     }
@@ -405,11 +453,6 @@ impl Mixer {
 /// stops playback.
 pub struct Sound {
     commands: mpsc::Sender<Command>,
-    /// How many voices were sounding as of the last callback. Approximate by
-    /// construction — it lags by up to one buffer, and several `play` calls
-    /// within one frame all read the same stale value — which is why
-    /// [`Mixer::add`] enforces the cap again where the true count lives.
-    active: Arc<AtomicUsize>,
     next_id: Cell<VoiceId>,
     _stream: Option<cpal::Stream>,
 }
@@ -421,16 +464,16 @@ impl Sound {
         id
     }
 
-    /// Starts `tone` sounding and returns the id that stops it, or `None` if
-    /// every voice is in use or the sound thread is gone.
-    pub fn play(&self, tone: Tone) -> Option<VoiceId> {
-        if self.active_voices() >= MAX_VOICES {
-            eprintln!("[sound] play rejected: all voices are in use");
-            return None;
-        }
-
+    /// Starts `tone` sounding on `owner`'s behalf and returns the id that
+    /// stops it, or `None` if the sound thread is gone.
+    ///
+    /// There is no cap to fail against here. The mixer holds the only
+    /// truthful count of what is sounding, and it steals a slot rather than
+    /// turning a voice away, so a play that reaches the thread always
+    /// sounds.
+    pub fn play(&self, owner: ProcessId, tone: Tone) -> Option<VoiceId> {
         let id = self.allocate_id();
-        match self.commands.send(Command::Play { id, tone }) {
+        match self.commands.send(Command::Play { id, owner, tone }) {
             Ok(()) => Some(id),
             Err(_) => {
                 eprintln!("[sound] play failed: the sound thread is gone");
@@ -447,50 +490,12 @@ impl Sound {
         let _ = self.commands.send(Command::Stop(id));
     }
 
-    /// How many voices were sounding as of the last callback; see
-    /// [`Sound::active`] for why this is approximate.
-    pub fn active_voices(&self) -> usize {
-        self.active.load(Ordering::Relaxed)
-    }
-}
-
-/// The sustaining voices one VM started — the ones played with no duration,
-/// which would otherwise drone on forever if the program that started them
-/// faulted or exited. [`ElysiumRuntime`]'s `Drop` stops them, the same way it
-/// clears that VM's loaded images.
-///
-/// Timed voices are deliberately absent. A sound effect has to outlive the
-/// code that triggered it — a program destroys whatever made the noise and
-/// the noise still finishes — and a timed voice stops itself, so the table
-/// stays bounded by [`MAX_VOICES`] without ever being pruned.
-///
-/// [`ElysiumRuntime`]: crate::runtime::ElysiumRuntime
-pub struct VoiceTable {
-    sustaining: RefCell<Vec<VoiceId>>,
-}
-
-impl VoiceTable {
-    pub fn new() -> Self {
-        Self {
-            sustaining: RefCell::new(Vec::new()),
-        }
-    }
-
-    fn track(&self, id: VoiceId) {
-        self.sustaining.borrow_mut().push(id);
-    }
-
-    fn forget(&self, id: VoiceId) {
-        self.sustaining.borrow_mut().retain(|held| *held != id);
-    }
-
-    /// Releases every sustaining voice this VM started. They ring out over
-    /// their own release rather than being cut, so a faulted program's drone
-    /// fades instead of clicking off.
-    pub fn stop_all(&self, sound: &Sound) {
-        for id in self.sustaining.borrow_mut().drain(..) {
-            sound.stop(id);
-        }
+    /// Releases every sustaining voice `owner` started, ringing each out
+    /// over its own release. Called when a VM goes away, so a program that
+    /// faulted or exited holding a note doesn't leave it droning for the
+    /// life of the kernel.
+    pub fn release_sustaining(&self, owner: ProcessId) {
+        let _ = self.commands.send(Command::ReleaseSustaining(owner));
     }
 }
 
@@ -505,11 +510,10 @@ impl VoiceTable {
 pub fn bootstrap_sound_bindings(
     ctx: &Ctx<'_>,
     sound: Option<Rc<Sound>>,
-    voices: Rc<VoiceTable>,
+    owner: ProcessId,
 ) -> Result<()> {
     {
         let sound = sound.clone();
-        let voices = Rc::clone(&voices);
         bind(
             ctx,
             "__sound_play",
@@ -619,33 +623,28 @@ pub fn bootstrap_sound_bindings(
                 let Some(sound) = &sound else {
                     return Ok(None);
                 };
-                let id = sound.play(Tone {
-                    waveform,
-                    frequency_hz,
-                    amplitude,
-                    envelope: Envelope {
-                        attack_secs,
-                        decay_secs,
-                        sustain_level,
-                        release_secs,
-                        duration_secs,
+                let id = sound.play(
+                    owner,
+                    Tone {
+                        waveform,
+                        frequency_hz,
+                        amplitude,
+                        envelope: Envelope {
+                            attack_secs,
+                            decay_secs,
+                            sustain_level,
+                            release_secs,
+                            duration_secs,
+                        },
+                        sweep,
                     },
-                    sweep,
-                });
-                // Only a voice that holds until stopped needs releasing when
-                // this VM goes away; a timed one sees itself out.
-                if let Some(id) = id
-                    && duration_secs.is_none()
-                {
-                    voices.track(id);
-                }
+                );
                 Ok(id)
             },
         )?;
     }
 
     bind(ctx, "__sound_stop", move |id: VoiceId| {
-        voices.forget(id);
         if let Some(sound) = &sound {
             sound.stop(id);
         }
@@ -690,8 +689,6 @@ pub fn start() -> Option<Sound> {
     let channels = config.channels() as usize;
 
     let (commands, incoming) = mpsc::channel();
-    let active = Arc::new(AtomicUsize::new(0));
-    let callback_active = Arc::clone(&active);
     let mut mixer = Mixer::new();
 
     let stream = device.build_output_stream(
@@ -701,14 +698,14 @@ pub fn start() -> Option<Sound> {
             // rings its remaining voices out and then stays silent.
             while let Ok(command) = incoming.try_recv() {
                 match command {
-                    Command::Play { id, tone } => {
-                        mixer.add(Voice::new(id, tone));
+                    Command::Play { id, owner, tone } => {
+                        mixer.add(Voice::new(id, owner, tone));
                     }
                     Command::Stop(id) => mixer.stop(id),
+                    Command::ReleaseSustaining(owner) => mixer.release_sustaining(owner),
                 }
             }
             mixer.render(data, channels, sample_rate);
-            callback_active.store(mixer.active(), Ordering::Relaxed);
         },
         |err| eprintln!("[sound] stream error: {err}"),
         None,
@@ -729,7 +726,6 @@ pub fn start() -> Option<Sound> {
     eprintln!("[sound] output ready ({sample_rate} Hz, {channels} channels)");
     Some(Sound {
         commands,
-        active,
         next_id: Cell::new(1),
         _stream: Some(stream),
     })
@@ -742,43 +738,60 @@ pub fn start() -> Option<Sound> {
 #[cfg(test)]
 pub(crate) struct SoundLog {
     incoming: mpsc::Receiver<Command>,
-    active: Arc<AtomicUsize>,
+    /// Everything drained so far. The channel can only be read once, so what
+    /// comes out of it is kept here and every accessor filters this instead
+    /// — otherwise asking what played would throw away what stopped.
+    seen: RefCell<Vec<Command>>,
 }
 
 #[cfg(test)]
 impl SoundLog {
-    fn drain(&self) -> Vec<Command> {
-        std::iter::from_fn(|| self.incoming.try_recv().ok()).collect()
+    /// Moves everything pending out of the channel and into `seen`.
+    fn drain(&self) {
+        let mut seen = self.seen.borrow_mut();
+        while let Ok(command) = self.incoming.try_recv() {
+            seen.push(command);
+        }
     }
 
-    /// The tones played since the last drain, in order. Draining empties the
-    /// channel, so call one of these once per stretch of interest.
+    /// The tones played so far, in order.
     pub(crate) fn played(&self) -> Vec<Tone> {
-        self.drain()
-            .into_iter()
+        self.drain();
+        self.seen
+            .borrow()
+            .iter()
             .filter_map(|command| match command {
-                Command::Play { tone, .. } => Some(tone),
-                Command::Stop(_) => None,
+                Command::Play { tone, .. } => Some(*tone),
+                _ => None,
             })
             .collect()
     }
 
-    /// The voices stopped since the last drain, in order.
+    /// The voices explicitly stopped so far, in order.
     pub(crate) fn stopped(&self) -> Vec<VoiceId> {
-        self.drain()
-            .into_iter()
+        self.drain();
+        self.seen
+            .borrow()
+            .iter()
             .filter_map(|command| match command {
-                Command::Stop(id) => Some(id),
-                Command::Play { .. } => None,
+                Command::Stop(id) => Some(*id),
+                _ => None,
             })
             .collect()
     }
 
-    /// Makes the next `play` find every voice in use. Nothing stores to the
-    /// live count without a real output callback, so without this the
-    /// all-voices-busy path can't be reached from a test.
-    pub(crate) fn saturate(&self) {
-        self.active.store(MAX_VOICES, Ordering::Relaxed);
+    /// The processes whose sustaining voices were released, in order — one
+    /// entry per VM teardown that reached the sound thread.
+    pub(crate) fn released(&self) -> Vec<ProcessId> {
+        self.drain();
+        self.seen
+            .borrow()
+            .iter()
+            .filter_map(|command| match command {
+                Command::ReleaseSustaining(owner) => Some(*owner),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -790,22 +803,31 @@ impl Sound {
     /// reports the sound thread as gone.
     pub(crate) fn detached() -> (Sound, SoundLog) {
         let (commands, incoming) = mpsc::channel();
-        let active = Arc::new(AtomicUsize::new(0));
         let sound = Sound {
             commands,
-            active: Arc::clone(&active),
             next_id: Cell::new(1),
             _stream: None,
         };
-        (sound, SoundLog { incoming, active })
+        (
+            sound,
+            SoundLog {
+                incoming,
+                seen: RefCell::new(Vec::new()),
+            },
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Envelope, MASTER_GAIN, MAX_VOICES, Mixer, Sound, Sweep, Tone, Voice, Waveform, advance_lfsr,
+        Envelope, MASTER_GAIN, MAX_VOICES, Mixer, Sound, Sweep, Tone, Voice, VoiceId, Waveform,
+        advance_lfsr,
     };
+
+    /// Every test here is about the mix rather than about ownership, so
+    /// they all play as the same process.
+    const OWNER: crate::process::ProcessId = 1;
 
     /// A tone that holds until stopped, with no attack or release ramp, so a
     /// test sees the waveform itself rather than an envelope shaping it.
@@ -829,7 +851,7 @@ mod tests {
     /// 1000 Hz so that a period lands on a whole number of samples.
     fn render_one(tone: Tone, count: usize) -> Vec<f32> {
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, tone));
+        mixer.add(Voice::new(1, OWNER, tone));
         let mut out = vec![0.0; count];
         mixer.render(&mut out, 1, 1000.0);
         out
@@ -999,7 +1021,7 @@ mod tests {
     #[test]
     fn a_voice_with_no_duration_sounds_until_it_is_stopped() {
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, tone(Waveform::Square, 0.0)));
+        mixer.add(Voice::new(1, OWNER, tone(Waveform::Square, 0.0)));
         let mut out = vec![0.0; 1000];
         mixer.render(&mut out, 1, 1000.0);
         assert_eq!(mixer.active(), 1, "still sounding a whole second later");
@@ -1011,7 +1033,7 @@ mod tests {
         let mut shaped = tone(Waveform::Square, 0.0);
         shaped.envelope.release_secs = 0.01;
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, shaped));
+        mixer.add(Voice::new(1, OWNER, shaped));
 
         let mut before = vec![0.0; 5];
         mixer.render(&mut before, 1, 1000.0);
@@ -1036,7 +1058,7 @@ mod tests {
         shaped.envelope.duration_secs = Some(0.005);
         shaped.envelope.release_secs = 0.005;
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, shaped));
+        mixer.add(Voice::new(1, OWNER, shaped));
 
         let mut out = vec![0.0; 20];
         mixer.render(&mut out, 1, 1000.0);
@@ -1052,7 +1074,7 @@ mod tests {
         let mut shaped = tone(Waveform::Square, 0.0);
         shaped.envelope.duration_secs = Some(0.001);
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, shaped));
+        mixer.add(Voice::new(1, OWNER, shaped));
         let mut out = vec![0.0; 10];
         mixer.render(&mut out, 1, 1000.0);
         assert_eq!(mixer.active(), 0);
@@ -1064,39 +1086,129 @@ mod tests {
     #[test]
     fn stopping_an_id_that_was_never_played_does_nothing() {
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, tone(Waveform::Square, 100.0)));
+        mixer.add(Voice::new(1, OWNER, tone(Waveform::Square, 100.0)));
         mixer.stop(9999);
         assert_eq!(mixer.active(), 1, "the sounding voice is untouched");
     }
 
-    #[test]
-    fn the_mixer_refuses_voices_past_its_cap() {
+    /// A mixer holding `MAX_VOICES` identical voices, ready for a steal.
+    fn full_mixer() -> Mixer {
         let mut mixer = Mixer::new();
         for id in 0..MAX_VOICES as u32 {
-            assert!(mixer.add(Voice::new(id, tone(Waveform::Square, 100.0))));
+            mixer.add(Voice::new(id, OWNER, tone(Waveform::Square, 100.0)));
         }
-        assert!(
-            !mixer.add(Voice::new(9999, tone(Waveform::Square, 100.0))),
-            "the voice past the cap is refused"
-        );
-        assert_eq!(mixer.active(), MAX_VOICES);
+        mixer
     }
 
     #[test]
-    fn a_refused_voice_does_not_disturb_the_ones_already_sounding() {
-        let full = |also_refuse: bool| {
-            let mut mixer = Mixer::new();
-            for id in 0..MAX_VOICES as u32 {
-                mixer.add(Voice::new(id, tone(Waveform::Square, 100.0)));
-            }
-            if also_refuse {
-                mixer.add(Voice::new(9999, tone(Waveform::Sine, 250.0)));
-            }
-            let mut out = vec![0.0; 50];
-            mixer.render(&mut out, 1, 1000.0);
-            out
+    fn stealing_keeps_the_mixer_at_its_cap() {
+        let mut mixer = full_mixer();
+        mixer.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0)));
+        assert_eq!(mixer.active(), MAX_VOICES, "the cap still holds");
+        assert!(
+            mixer.voices.iter().any(|voice| voice.id == 9999),
+            "and the new voice is the one sounding"
+        );
+    }
+
+    #[test]
+    fn the_quietest_voice_is_the_one_stolen() {
+        let mut mixer = Mixer::new();
+        // One voice is audibly quieter than the rest, so it is the one with
+        // the least to lose.
+        mixer.add(Voice::new(
+            1,
+            OWNER,
+            Tone {
+                amplitude: 0.05,
+                ..tone(Waveform::Square, 100.0)
+            },
+        ));
+        for id in 2..=MAX_VOICES as u32 {
+            mixer.add(Voice::new(id, OWNER, tone(Waveform::Square, 100.0)));
+        }
+
+        mixer.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0)));
+
+        assert!(
+            !mixer.voices.iter().any(|voice| voice.id == 1),
+            "the faintest voice gave up its slot"
+        );
+        assert_eq!(
+            mixer.voices.iter().filter(|voice| voice.id != 9999).count(),
+            MAX_VOICES - 1,
+            "and nothing else was disturbed"
+        );
+    }
+
+    #[test]
+    fn a_releasing_voice_is_stolen_before_a_sounding_one() {
+        let mut shaped = tone(Waveform::Square, 100.0);
+        shaped.envelope.release_secs = 1.0;
+        let mut mixer = Mixer::new();
+        mixer.add(Voice::new(1, OWNER, shaped));
+        for id in 2..=MAX_VOICES as u32 {
+            mixer.add(Voice::new(id, OWNER, tone(Waveform::Square, 100.0)));
+        }
+
+        // Part-way through a long release, so it is still sounding but on
+        // its way out — the one a listener misses least.
+        mixer.stop(1);
+        let mut out = vec![0.0; 500];
+        mixer.render(&mut out, 1, 1000.0);
+        mixer.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0)));
+
+        assert!(
+            !mixer.voices.iter().any(|voice| voice.id == 1),
+            "the releasing voice gave up its slot"
+        );
+    }
+
+    #[test]
+    fn a_stolen_voice_leaves_the_others_sounding_as_they_were() {
+        let mut untouched = full_mixer();
+        let mut stolen_from = full_mixer();
+        stolen_from.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0)));
+
+        let mut before = vec![0.0; 50];
+        untouched.render(&mut before, 1, 1000.0);
+        let mut after = vec![0.0; 50];
+        stolen_from.render(&mut after, 1, 1000.0);
+
+        // Every voice here is identical, so replacing one changes nothing a
+        // listener could point at.
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn a_vm_going_away_releases_only_the_voices_it_was_holding() {
+        let mut held = tone(Waveform::Square, 0.0);
+        held.envelope.release_secs = 0.01;
+        let mut timed = held;
+        timed.envelope.duration_secs = Some(10.0);
+
+        let mut mixer = Mixer::new();
+        mixer.add(Voice::new(1, 7, held));
+        mixer.add(Voice::new(2, 7, timed));
+        mixer.add(Voice::new(3, 8, held));
+
+        mixer.release_sustaining(7);
+
+        let releasing = |mixer: &Mixer, id: VoiceId| {
+            mixer
+                .voices
+                .iter()
+                .find(|voice| voice.id == id)
+                .expect("still sounding")
+                .releasing_since
+                .is_some()
         };
-        assert_eq!(full(false), full(true));
+        assert!(releasing(&mixer, 1), "the VM's held note is released");
+        assert!(
+            !releasing(&mixer, 2),
+            "its timed voice sees itself out instead"
+        );
+        assert!(!releasing(&mixer, 3), "another VM's note is untouched");
     }
 
     #[test]
@@ -1120,7 +1232,7 @@ mod tests {
     #[test]
     fn every_channel_in_a_frame_gets_the_same_sample() {
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, tone(Waveform::Sine, 100.0)));
+        mixer.add(Voice::new(1, OWNER, tone(Waveform::Sine, 100.0)));
         let mut out = vec![0.0; 20];
         mixer.render(&mut out, 2, 1000.0);
         for frame in out.chunks(2) {
@@ -1131,7 +1243,7 @@ mod tests {
     #[test]
     fn a_partial_final_frame_is_still_filled() {
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, tone(Waveform::Square, 0.0)));
+        mixer.add(Voice::new(1, OWNER, tone(Waveform::Square, 0.0)));
         // Seven samples across two channels leaves a one-sample final frame.
         let mut out = vec![0.0; 7];
         mixer.render(&mut out, 2, 1000.0);
@@ -1145,7 +1257,7 @@ mod tests {
     fn the_mix_never_leaves_the_output_range() {
         let mut mixer = Mixer::new();
         for id in 0..MAX_VOICES as u32 {
-            mixer.add(Voice::new(id, tone(Waveform::Square, 100.0)));
+            mixer.add(Voice::new(id, OWNER, tone(Waveform::Square, 100.0)));
         }
         let mut out = vec![0.0; 100];
         mixer.render(&mut out, 1, 1000.0);
@@ -1214,7 +1326,7 @@ mod tests {
         shaped.envelope.release_secs = 0.01;
 
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, shaped));
+        mixer.add(Voice::new(1, OWNER, shaped));
         let mut before = vec![0.0; 10];
         mixer.render(&mut before, 1, 1000.0);
         mixer.stop(1);
@@ -1239,7 +1351,7 @@ mod tests {
         shaped.envelope.decay_secs = 0.005;
         shaped.envelope.sustain_level = 0.0;
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, shaped));
+        mixer.add(Voice::new(1, OWNER, shaped));
 
         let mut out = vec![0.0; 40];
         mixer.render(&mut out, 1, 1000.0);
@@ -1309,7 +1421,7 @@ mod tests {
             over_secs: 1.0,
         });
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, swept));
+        mixer.add(Voice::new(1, OWNER, swept));
         let mut out = vec![0.0; 1];
         mixer.render(&mut out, 1, 1000.0);
 
@@ -1335,19 +1447,14 @@ mod tests {
     #[test]
     fn a_detached_audio_records_what_it_was_asked_to_play() {
         let (sound, log) = Sound::detached();
-        let id = sound.play(tone(Waveform::Sine, 220.0)).expect("plays");
+        let id = sound
+            .play(OWNER, tone(Waveform::Sine, 220.0))
+            .expect("plays");
         sound.stop(id);
 
         let played = log.played();
         assert_eq!(played.len(), 1);
         assert_eq!(played[0].waveform, Waveform::Sine);
-    }
-
-    #[test]
-    fn a_saturated_detached_audio_refuses_to_play() {
-        let (sound, log) = Sound::detached();
-        log.saturate();
-        assert!(sound.play(tone(Waveform::Square, 440.0)).is_none());
     }
 
     #[test]
@@ -1361,8 +1468,8 @@ mod tests {
         let one = render_one(quiet, 4);
 
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, quiet));
-        mixer.add(Voice::new(2, quiet));
+        mixer.add(Voice::new(1, OWNER, quiet));
+        mixer.add(Voice::new(2, OWNER, quiet));
         let mut two = vec![0.0; 4];
         mixer.render(&mut two, 1, 1000.0);
 
