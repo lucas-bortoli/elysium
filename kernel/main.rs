@@ -1,3 +1,4 @@
+mod audio;
 mod bindings;
 mod esm_resolver;
 mod filesystem;
@@ -30,6 +31,8 @@ fn main() {
         .expect("binary path has no parent directory")
         .to_path_buf();
     let userland_root = exe_dir.join("userland");
+
+    let _audio = audio::start();
 
     let draw_commands = Rc::new(RefCell::new(Vec::new()));
     let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
