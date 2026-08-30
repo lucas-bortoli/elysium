@@ -33,6 +33,7 @@ import { Key, isKeyDown, wasKeyPressed } from "ely:input";
 import { addUpdateTicker } from "ely:lifecycle";
 import { hasValue } from "ely:container";
 import { Waveform, isNote, noteToFrequency, playTone, stopVoice } from "ely:sound";
+import type { ToneOptions } from "ely:sound";
 import type { Note, VoiceId } from "ely:sound";
 
 /** One waveform, and the digit that selects it. */
@@ -43,6 +44,54 @@ const SHAPES: { waveform: Waveform; key: Key; label: string }[] = [
   { waveform: Waveform.Noise, key: Key.Digit4, label: "4  noise" },
 ];
 
+
+
+/** Percussion, on its own four keys. These ignore the piano's note and
+ * octave entirely — a drum isn't a pitch, it's a shape.
+ *
+ * `kick` is the one that needs a sweep: a tone falling from 150 Hz to 50 Hz
+ * inside a tenth of a second reads as a thump, and no amount of shaping its
+ * loudness gets there. `zap` is the same trick made obvious. The other two
+ * are noise, where frequency sets how fast the shift register re-rolls —
+ * fast is a hiss, slow is a rattle — which is how one noise generator covers
+ * both a hi-hat and a snare.
+ */
+const DRUMS: {
+  key: Key;
+  label: string;
+  waveform: Waveform;
+  frequency: number;
+  options: ToneOptions;
+}[] = [
+  {
+    key: Key.KeyZ,
+    label: "Z kick",
+    waveform: Waveform.Sine,
+    frequency: 150,
+    options: { sweepTo: 50, sweepOver: 0.08, attack: 0.001, decay: 0.25, sustain: 0, duration: 0.3 },
+  },
+  {
+    key: Key.KeyX,
+    label: "X snare",
+    waveform: Waveform.Noise,
+    frequency: 2000,
+    options: { attack: 0.001, decay: 0.15, sustain: 0, duration: 0.2 },
+  },
+  {
+    key: Key.KeyC,
+    label: "C hat",
+    waveform: Waveform.Noise,
+    frequency: 8000,
+    options: { attack: 0.001, decay: 0.04, sustain: 0, duration: 0.06 },
+  },
+  {
+    key: Key.KeyV,
+    label: "V zap",
+    waveform: Waveform.Square,
+    frequency: 900,
+    options: { sweepTo: 120, sweepOver: 0.18, attack: 0.001, decay: 0.3, sustain: 0, duration: 0.25 },
+  },
+];
 
 /** One playable key: which pitch it sounds, and which computer key plays it.
  * The octave isn't here — it moves, so a pad's note name is built when it's
@@ -114,6 +163,13 @@ const WHITE_H = 88;
 const WHITE_PITCH = 64;
 const BLACK_W = 34;
 const BLACK_H = 52;
+
+/** A column beside the piano — the drums aren't notes, so they don't belong
+ * on it. */
+const DRUMS_X = 624;
+const DRUMS_W = 80;
+const DRUMS_H = 20;
+const DRUMS_PITCH = 23;
 
 /** The noise channel's first `SCOPE_CYCLES` values, taken from the same
  * 15-bit shift register the mixer uses, stepped once per cycle rather than
@@ -264,6 +320,14 @@ addUpdateTicker(() => {
   if (wasKeyPressed(Key.ArrowLeft)) octave = Math.max(LOWEST_OCTAVE, octave - 1);
   if (wasKeyPressed(Key.ArrowRight)) octave = Math.min(HIGHEST_OCTAVE, octave + 1);
 
+  for (const drum of DRUMS) {
+    // Every drum carries a duration, so it sees itself out — there is
+    // nothing here to track and nothing to release.
+    if (wasKeyPressed(drum.key)) {
+      playTone(drum.frequency, { waveform: drum.waveform, ...drum.options });
+    }
+  }
+
   for (const pad of PADS) {
     if (wasKeyPressed(pad.key)) {
       // Releasing first is what keeps a fast retrigger from stranding a
@@ -364,6 +428,15 @@ addDrawHandler(() => {
       align: "center",
     });
     drawText(x + BLACK_W / 2, WHITE_Y + 22, pad.label, down ? Color.Slate900 : Color.Slate600, {
+      align: "center",
+    });
+  }
+
+  for (const [index, drum] of DRUMS.entries()) {
+    const y = WHITE_Y + index * DRUMS_PITCH;
+    const down = isKeyDown(drum.key);
+    fillRoundedRectangle(DRUMS_X, y, DRUMS_W, DRUMS_H, 4, down ? Color.Rose400 : Color.Slate800);
+    drawText(DRUMS_X + DRUMS_W / 2, y + 6, drum.label, down ? Color.Slate900 : Color.Slate400, {
       align: "center",
     });
   }
