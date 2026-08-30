@@ -24,7 +24,7 @@ import {
   strokeRectangle,
 } from "ely:framebuffer";
 import type { Vector2d } from "ely:math";
-import { Key, isKeyDown, wasKeyPressed, wasKeyReleased } from "ely:input";
+import { Key, isKeyDown, wasKeyPressed } from "ely:input";
 import { addUpdateTicker } from "ely:lifecycle";
 import { hasValue } from "ely:container";
 import { Waveform, isNote, noteToFrequency, playTone, stopVoice } from "ely:sound";
@@ -162,6 +162,13 @@ let traced: Vector2d[] = trace(Waveform.Triangle);
  * the right one. */
 const voices = new Map<Key, VoiceId>();
 
+/** Stops whatever voice `key` is holding, if it is holding one. */
+function release(key: Key): void {
+  const voice = voices.get(key);
+  if (hasValue(voice)) stopVoice(voice);
+  voices.delete(key);
+}
+
 addUpdateTicker(() => {
   for (const shape of SHAPES) {
     if (wasKeyPressed(shape.key)) {
@@ -177,24 +184,29 @@ addUpdateTicker(() => {
 
   for (const pad of PADS) {
     if (wasKeyPressed(pad.key)) {
-      // No duration, so the voice holds until it's stopped below. A held
-      // voice keeps the shape it started with; picking another only affects
-      // the next key pressed.
+      // Releasing first is what keeps a fast retrigger from stranding a
+      // voice: an edge says a press happened this frame, not that only one
+      // did, so this key may already be holding one.
+      release(pad.key);
+
+      // No duration, so the voice holds until it's released. A held voice
+      // keeps the shape and pitch it started with; changing either only
+      // affects the next key pressed.
       const note = noteFor(pad, octave);
       if (note !== undefined) {
         const voice = playTone(noteToFrequency(note), { waveform: selected });
         // Absent means nothing sounded — no output device, or every voice
         // already in use. Neither is an error: the key simply has no voice to
-        // stop later.
+        // release later.
         if (hasValue(voice)) voices.set(pad.key, voice);
       }
     }
 
-    if (wasKeyReleased(pad.key)) {
-      const voice = voices.get(pad.key);
-      if (hasValue(voice)) stopVoice(voice);
-      voices.delete(pad.key);
-    }
+    // Whether the key is down decides whether it should still be sounding,
+    // rather than whether a release was seen. A key pressed and let go
+    // inside one frame reports both edges at once, and one released without
+    // the window watching reports neither.
+    if (!isKeyDown(pad.key)) release(pad.key);
   }
 });
 

@@ -383,6 +383,31 @@ mod tests {
         assert!(!input.key_down[Key::KeyA as usize].get());
     }
 
+    /// Edges say *that* a transition happened this frame, not how many. A
+    /// key released and pressed again before the next frame reports both,
+    /// and `key_down` is whatever the last event left — so a program that
+    /// starts something on the press has to reconcile against `key_down`
+    /// rather than assume one press pairs with one release.
+    #[test]
+    fn a_release_and_a_press_in_one_frame_both_report() {
+        let input = test_input();
+        let index = Key::KeyA as usize;
+
+        input.handle_key_code(winit::keyboard::KeyCode::KeyA, true, false);
+        input.end_frame();
+
+        input.handle_key_code(winit::keyboard::KeyCode::KeyA, false, false);
+        input.handle_key_code(winit::keyboard::KeyCode::KeyA, true, false);
+        input.handle_key_code(winit::keyboard::KeyCode::KeyA, false, false);
+
+        assert!(input.key_pressed[index].get(), "the press is reported");
+        assert!(input.key_released[index].get(), "and so is the release");
+        assert!(
+            !input.key_down[index].get(),
+            "and the key is up, since that is where the last event left it"
+        );
+    }
+
     #[test]
     fn end_frame_clears_key_edges_but_not_key_down() {
         let input = test_input();
