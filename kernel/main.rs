@@ -1,4 +1,3 @@
-mod audio;
 mod bindings;
 mod esm_resolver;
 mod filesystem;
@@ -8,6 +7,7 @@ mod input;
 mod process;
 mod process_manager;
 mod runtime;
+mod sound;
 mod text;
 mod timers;
 mod window;
@@ -32,7 +32,7 @@ fn main() {
         .to_path_buf();
     let userland_root = exe_dir.join("userland");
 
-    let audio = audio::start().map(Rc::new);
+    let sound = sound::start().map(Rc::new);
 
     let draw_commands = Rc::new(RefCell::new(Vec::new()));
     let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
@@ -42,7 +42,7 @@ fn main() {
         Rc::clone(&draw_commands),
         Rc::clone(&input),
         Rc::clone(&scale),
-        audio,
+        sound,
         userland_root,
     );
     let mut manager = ProcessManager::new(devices);

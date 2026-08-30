@@ -1,7 +1,7 @@
-//! The Audio device: a mixer that sums any number of simultaneously
+//! The Sound device: a mixer that sums any number of simultaneously
 //! sounding voices into the one stream the output device plays.
 //!
-//! `Audio` never leaks `cpal`'s device or stream types outside this module,
+//! `Sound` never leaks `cpal`'s device or stream types outside this module,
 //! the same way `Framebuffer` never leaks `winit` types — see
 //! `kernel/window.rs`, which establishes that pattern for the window's OS
 //! resource. Here the OS resource is the default output stream instead of a
@@ -11,11 +11,11 @@
 //!
 //! Mixing is [`Mixer::render`], which takes a buffer and a sample rate and
 //! nothing else, so a mix can be verified against a plain `Vec<f32>` with no
-//! real audio device involved — the same separation `framebuffer::rasterize`
+//! real sound device involved — the same separation `framebuffer::rasterize`
 //! uses to test rasterization without a window.
 //!
 //! This is the one place in the kernel that crosses an OS thread boundary.
-//! The output callback runs on a thread the audio backend owns, invoked on
+//! The output callback runs on a thread the sound backend owns, invoked on
 //! its own schedule, so the state it touches can't be `Rc` and the main
 //! thread can't reach into it directly. The voices therefore live entirely
 //! inside the callback, and the main thread only ever sends it commands
@@ -23,7 +23,7 @@
 //! that blocks produces a buffer underrun, heard as a click or a dropout,
 //! and a `Mutex` shared with the main thread is exactly how you get one:
 //! the main thread can be descheduled still holding the lock while the
-//! higher-priority audio thread waits on it. `try_recv` never blocks
+//! higher-priority sound thread waits on it. `try_recv` never blocks
 //! waiting for a message and never allocates on the receiving side, and
 //! sends here are rare — a handful per frame at most — so contention is
 //! effectively absent. That is a practical guarantee rather than a formal
@@ -33,7 +33,7 @@
 //! it ever needed to be rigorous.
 //!
 //! Unlike a missing window (load-bearing for everything else the kernel
-//! does), a missing or unusable audio device is not fatal: a real machine
+//! does), a missing or unusable sound device is not fatal: a real machine
 //! may simply have none. [`start`] returns `None` rather than panicking,
 //! logging the specific reason, and `ely:sound`'s bindings degrade to silent
 //! no-ops, so both the kernel and every program boot normally either way.
@@ -166,7 +166,7 @@ pub struct Envelope {
     pub release_secs: f32,
     /// How long the note holds at its sustain level before its release
     /// begins, so a voice sounds for `duration_secs + release_secs` in
-    /// total. `None` holds until [`Audio::stop`].
+    /// total. `None` holds until [`Sound::stop`].
     pub duration_secs: Option<f32>,
 }
 
@@ -183,7 +183,7 @@ pub struct Sweep {
     pub over_secs: f32,
 }
 
-/// Everything [`Audio::play`] needs to start one voice.
+/// Everything [`Sound::play`] needs to start one voice.
 #[derive(Debug, Clone, Copy)]
 pub struct Tone {
     pub waveform: Waveform,
@@ -323,14 +323,14 @@ impl Voice {
     }
 }
 
-/// What the main thread asks the audio thread to do.
+/// What the main thread asks the sound thread to do.
 enum Command {
     Play { id: VoiceId, tone: Tone },
     Stop(VoiceId),
 }
 
 /// The voices currently sounding, and the mix of them. Lives entirely on the
-/// audio thread.
+/// sound thread.
 struct Mixer {
     voices: Vec<Voice>,
 }
@@ -339,14 +339,14 @@ impl Mixer {
     fn new() -> Self {
         Self {
             // Allocated once, up front, and `add` refuses past the cap, so
-            // `push` never reallocates — the audio callback never reaches
+            // `push` never reallocates — the sound callback never reaches
             // the allocator.
             voices: Vec::with_capacity(MAX_VOICES),
         }
     }
 
     /// Starts `voice` sounding, or returns `false` if every voice is already
-    /// in use. The authoritative cap: [`Audio::play`]'s own check is against
+    /// in use. The authoritative cap: [`Sound::play`]'s own check is against
     /// a count that can be one callback stale.
     fn add(&mut self, voice: Voice) -> bool {
         if self.voices.len() >= MAX_VOICES {
@@ -400,10 +400,10 @@ impl Mixer {
     }
 }
 
-/// The kernel's handle on the audio device: allocates voice ids, sends the
-/// audio thread its commands, and holds the output stream open. Dropping it
+/// The kernel's handle on the sound device: allocates voice ids, sends the
+/// sound thread its commands, and holds the output stream open. Dropping it
 /// stops playback.
-pub struct Audio {
+pub struct Sound {
     commands: mpsc::Sender<Command>,
     /// How many voices were sounding as of the last callback. Approximate by
     /// construction — it lags by up to one buffer, and several `play` calls
@@ -414,7 +414,7 @@ pub struct Audio {
     _stream: Option<cpal::Stream>,
 }
 
-impl Audio {
+impl Sound {
     fn allocate_id(&self) -> VoiceId {
         let id = self.next_id.get();
         self.next_id.set(id.wrapping_add(1).max(1));
@@ -422,10 +422,10 @@ impl Audio {
     }
 
     /// Starts `tone` sounding and returns the id that stops it, or `None` if
-    /// every voice is in use or the audio thread is gone.
+    /// every voice is in use or the sound thread is gone.
     pub fn play(&self, tone: Tone) -> Option<VoiceId> {
         if self.active_voices() >= MAX_VOICES {
-            eprintln!("[audio] play rejected: all voices are in use");
+            eprintln!("[sound] play rejected: all voices are in use");
             return None;
         }
 
@@ -433,7 +433,7 @@ impl Audio {
         match self.commands.send(Command::Play { id, tone }) {
             Ok(()) => Some(id),
             Err(_) => {
-                eprintln!("[audio] play failed: the audio thread is gone");
+                eprintln!("[sound] play failed: the sound thread is gone");
                 None
             }
         }
@@ -448,7 +448,7 @@ impl Audio {
     }
 
     /// How many voices were sounding as of the last callback; see
-    /// [`Audio::active`] for why this is approximate.
+    /// [`Sound::active`] for why this is approximate.
     pub fn active_voices(&self) -> usize {
         self.active.load(Ordering::Relaxed)
     }
@@ -487,9 +487,9 @@ impl VoiceTable {
     /// Releases every sustaining voice this VM started. They ring out over
     /// their own release rather than being cut, so a faulted program's drone
     /// fades instead of clicking off.
-    pub fn stop_all(&self, audio: &Audio) {
+    pub fn stop_all(&self, sound: &Sound) {
         for id in self.sustaining.borrow_mut().drain(..) {
-            audio.stop(id);
+            sound.stop(id);
         }
     }
 }
@@ -498,17 +498,17 @@ impl VoiceTable {
 /// never names one of these: it calls the module's exported `playTone` and
 /// `stopVoice`, which validate their arguments and call the matching global.
 ///
-/// `audio` is `None` on a machine whose output device couldn't be opened, in
+/// `sound` is `None` on a machine whose output device couldn't be opened, in
 /// which case every binding here is a silent no-op — `playTone` reports that
 /// nothing sounded and a program carries on, rather than the absence of a
 /// sound card becoming an error every program has to handle.
-pub fn bootstrap_audio_bindings(
+pub fn bootstrap_sound_bindings(
     ctx: &Ctx<'_>,
-    audio: Option<Rc<Audio>>,
+    sound: Option<Rc<Sound>>,
     voices: Rc<VoiceTable>,
 ) -> Result<()> {
     {
-        let audio = audio.clone();
+        let sound = sound.clone();
         let voices = Rc::clone(&voices);
         bind(
             ctx,
@@ -616,10 +616,10 @@ pub fn bootstrap_audio_bindings(
                     ));
                 }
 
-                let Some(audio) = &audio else {
+                let Some(sound) = &sound else {
                     return Ok(None);
                 };
-                let id = audio.play(Tone {
+                let id = sound.play(Tone {
                     waveform,
                     frequency_hz,
                     amplitude,
@@ -646,8 +646,8 @@ pub fn bootstrap_audio_bindings(
 
     bind(ctx, "__sound_stop", move |id: VoiceId| {
         voices.forget(id);
-        if let Some(audio) = &audio {
-            audio.stop(id);
+        if let Some(sound) = &sound {
+            sound.stop(id);
         }
     })?;
 
@@ -658,9 +658,9 @@ pub fn bootstrap_audio_bindings(
 /// and logs why if no device is available, no `f32`-capable output config can
 /// be found, or the stream can't be built or started. Never panics — see the
 /// module doc comment.
-pub fn start() -> Option<Audio> {
+pub fn start() -> Option<Sound> {
     let Some(device) = cpal::default_host().default_output_device() else {
-        eprintln!("[audio] no output device found, continuing without sound");
+        eprintln!("[sound] no output device found, continuing without sound");
         return None;
     };
 
@@ -668,7 +668,7 @@ pub fn start() -> Option<Audio> {
     // per-SampleFormat dispatch a general engine would need. Searched rather
     // than taken from `default_output_config()` alone: on some real ALSA
     // setups the default isn't f32, and giving up there would silently fail
-    // on a plausible real machine, not just an audio-less sandbox.
+    // on a plausible real machine, not just an sound-less sandbox.
     let config = device
         .supported_output_configs()
         .ok()
@@ -682,7 +682,7 @@ pub fn start() -> Option<Audio> {
         });
 
     let Some(config) = config else {
-        eprintln!("[audio] no f32-capable output config found, continuing without sound");
+        eprintln!("[sound] no f32-capable output config found, continuing without sound");
         return None;
     };
 
@@ -697,7 +697,7 @@ pub fn start() -> Option<Audio> {
     let stream = device.build_output_stream(
         &config.into(),
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            // A disconnected channel means `Audio` was dropped; the mixer
+            // A disconnected channel means `Sound` was dropped; the mixer
             // rings its remaining voices out and then stays silent.
             while let Ok(command) = incoming.try_recv() {
                 match command {
@@ -710,24 +710,24 @@ pub fn start() -> Option<Audio> {
             mixer.render(data, channels, sample_rate);
             callback_active.store(mixer.active(), Ordering::Relaxed);
         },
-        |err| eprintln!("[audio] stream error: {err}"),
+        |err| eprintln!("[sound] stream error: {err}"),
         None,
     );
     let stream = match stream {
         Ok(stream) => stream,
         Err(err) => {
-            eprintln!("[audio] failed to build output stream: {err}");
+            eprintln!("[sound] failed to build output stream: {err}");
             return None;
         }
     };
 
     if let Err(err) = stream.play() {
-        eprintln!("[audio] failed to start output stream: {err}");
+        eprintln!("[sound] failed to start output stream: {err}");
         return None;
     }
 
-    eprintln!("[audio] output ready ({sample_rate} Hz, {channels} channels)");
-    Some(Audio {
+    eprintln!("[sound] output ready ({sample_rate} Hz, {channels} channels)");
+    Some(Sound {
         commands,
         active,
         next_id: Cell::new(1),
@@ -735,18 +735,18 @@ pub fn start() -> Option<Audio> {
     })
 }
 
-/// An `Audio` with no output device, and the record of everything asked of
+/// A `Sound` with no output device, and the record of everything asked of
 /// it. Lets a test assert on the exact tones a program played without a
 /// sound card anywhere in the picture — the same reason [`Mixer::render`]
 /// takes a plain buffer.
 #[cfg(test)]
-pub(crate) struct AudioLog {
+pub(crate) struct SoundLog {
     incoming: mpsc::Receiver<Command>,
     active: Arc<AtomicUsize>,
 }
 
 #[cfg(test)]
-impl AudioLog {
+impl SoundLog {
     fn drain(&self) -> Vec<Command> {
         std::iter::from_fn(|| self.incoming.try_recv().ok()).collect()
     }
@@ -783,28 +783,28 @@ impl AudioLog {
 }
 
 #[cfg(test)]
-impl Audio {
-    /// An `Audio` wired to nothing, paired with the log of what it was asked
+impl Sound {
+    /// A `Sound` wired to nothing, paired with the log of what it was asked
     /// to do. The log holds the receiving end of the command channel, so it
-    /// has to outlive the `Audio`: drop it first and every later `play`
-    /// reports the audio thread as gone.
-    pub(crate) fn detached() -> (Audio, AudioLog) {
+    /// has to outlive the `Sound`: drop it first and every later `play`
+    /// reports the sound thread as gone.
+    pub(crate) fn detached() -> (Sound, SoundLog) {
         let (commands, incoming) = mpsc::channel();
         let active = Arc::new(AtomicUsize::new(0));
-        let audio = Audio {
+        let sound = Sound {
             commands,
             active: Arc::clone(&active),
             next_id: Cell::new(1),
             _stream: None,
         };
-        (audio, AudioLog { incoming, active })
+        (sound, SoundLog { incoming, active })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Audio, Envelope, MASTER_GAIN, MAX_VOICES, Mixer, Sweep, Tone, Voice, Waveform, advance_lfsr,
+        Envelope, MASTER_GAIN, MAX_VOICES, Mixer, Sound, Sweep, Tone, Voice, Waveform, advance_lfsr,
     };
 
     /// A tone that holds until stopped, with no attack or release ramp, so a
@@ -1334,9 +1334,9 @@ mod tests {
 
     #[test]
     fn a_detached_audio_records_what_it_was_asked_to_play() {
-        let (audio, log) = Audio::detached();
-        let id = audio.play(tone(Waveform::Sine, 220.0)).expect("plays");
-        audio.stop(id);
+        let (sound, log) = Sound::detached();
+        let id = sound.play(tone(Waveform::Sine, 220.0)).expect("plays");
+        sound.stop(id);
 
         let played = log.played();
         assert_eq!(played.len(), 1);
@@ -1345,9 +1345,9 @@ mod tests {
 
     #[test]
     fn a_saturated_detached_audio_refuses_to_play() {
-        let (audio, log) = Audio::detached();
+        let (sound, log) = Sound::detached();
         log.saturate();
-        assert!(audio.play(tone(Waveform::Square, 440.0)).is_none());
+        assert!(sound.play(tone(Waveform::Square, 440.0)).is_none());
     }
 
     #[test]
