@@ -42,7 +42,11 @@ use std::cell::Cell;
 #[cfg(test)]
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rquickjs::{Ctx, Result};
@@ -81,6 +85,20 @@ const MAX_FREQUENCY_HZ: f32 = 20_000.0;
 /// eight times the work per second for frequencies an ear can't hear, since
 /// 48 kHz already covers the audible range twice over.
 const PREFERRED_SAMPLE_RATE: u32 = 48_000;
+
+/// How far ahead of now a tone may be scheduled. A voice booked for the
+/// future holds one of [`MAX_VOICES`] slots before it makes any sound, and
+/// voices are one pool shared by every program — so without a limit, a
+/// program could reserve the whole device for an hour and silence the
+/// machine for everyone. Two seconds is far past the hundred milliseconds a
+/// lookahead scheduler actually queues, and bounds the worst case to
+/// something that clears itself.
+const MAX_SCHEDULE_AHEAD_SECS: f64 = 2.0;
+
+/// Stands in for the mixer's clock on a machine with no sound device, so
+/// that a program scheduling against `currentTime` behaves the same whether
+/// or not anything can be heard.
+static SILENT_CLOCK: OnceLock<Instant> = OnceLock::new();
 
 pub type VoiceId = u32;
 
@@ -199,6 +217,16 @@ pub struct Tone {
     pub envelope: Envelope,
     /// Where the pitch slides to, if it slides at all.
     pub sweep: Option<Sweep>,
+    /// When this voice should begin, on the same clock [`Sound::current_time`]
+    /// reports. `None` starts it as soon as the mixer sees it.
+    ///
+    /// Absolute rather than a delay, which is what makes a schedule hold
+    /// together: a delay would start counting when the command came off the
+    /// channel, so every voice would absorb that latency separately and the
+    /// error would pile up across a sequence. Naming the instant instead
+    /// means a stale reading of the clock shifts everything once, by the same
+    /// amount, and the gaps between voices stay exact.
+    pub starts_at_secs: Option<f64>,
 }
 
 /// Why a set of tone parts was refused: which option was wrong, and what it
@@ -257,6 +285,31 @@ fn checked_frequency(
     Ok(frequency_hz)
 }
 
+/// The loose numbers a program passed, before any of them have been checked.
+/// Every field is spelled the way `ely:sound` spells it, so a rejection can
+/// name the option a program actually wrote.
+pub struct ToneParts {
+    pub waveform: u8,
+    pub frequency_hz: f32,
+    pub amplitude: f32,
+    pub attack_secs: f32,
+    pub decay_secs: f32,
+    pub sustain_level: f32,
+    pub release_secs: f32,
+    pub sweep_to_hz: Option<f32>,
+    pub sweep_over_secs: f32,
+    pub duration_secs: Option<f32>,
+    pub starts_at_secs: Option<f64>,
+}
+
+/// What the device this tone is bound for can actually do, and when it is.
+/// Both are properties of the machine rather than of the tone, which is why
+/// they arrive separately from [`ToneParts`].
+pub struct ToneLimits {
+    pub max_frequency_hz: f32,
+    pub now_secs: f64,
+}
+
 /// Assembles a [`Tone`] out of the loose numbers a program passed, refusing
 /// anything the mixer shouldn't see.
 ///
@@ -267,47 +320,56 @@ fn checked_frequency(
 /// The finiteness checks are the load-bearing ones: a NaN frequency never
 /// advances past its phase wrap, so the voice's every sample is NaN, and it
 /// poisons the whole mix for as long as it sounds.
-#[allow(clippy::too_many_arguments)]
 pub fn tone_from_parts(
-    waveform: u8,
-    frequency_hz: f32,
-    amplitude: f32,
-    envelope: [f32; 4],
-    sweep: Option<[f32; 2]>,
-    duration_secs: Option<f32>,
-    max_frequency_hz: f32,
+    parts: ToneParts,
+    limits: ToneLimits,
 ) -> std::result::Result<Tone, ToneError> {
-    let Some(waveform) = Waveform::from_id(waveform) else {
+    let Some(waveform) = Waveform::from_id(parts.waveform) else {
         return Err(ToneError::new("waveform", "is not one of the four"));
     };
-    let [attack_secs, decay_secs, sustain_level, release_secs] = envelope;
 
-    let sweep = match sweep {
-        Some([to_hz, over_secs]) => Some(Sweep {
-            to_hz: checked_frequency("sweepTo", to_hz, max_frequency_hz)?,
-            over_secs: checked_secs("sweepOver", over_secs)?,
+    let sweep = match parts.sweep_to_hz {
+        Some(to_hz) => Some(Sweep {
+            to_hz: checked_frequency("sweepTo", to_hz, limits.max_frequency_hz)?,
+            over_secs: checked_secs("sweepOver", parts.sweep_over_secs)?,
         }),
         None => None,
     };
 
-    if let Some(duration) = duration_secs
+    if let Some(duration) = parts.duration_secs
         && (!duration.is_finite() || duration <= 0.0)
     {
         return Err(ToneError::new("duration", "must be greater than zero"));
     }
 
+    // A time already past is not an error: it sounds at once. A program that
+    // dropped a frame gets a late note rather than a silent gap, which is the
+    // difference between a schedule that stumbles and one that loses a beat.
+    if let Some(starts_at) = parts.starts_at_secs {
+        if !starts_at.is_finite() {
+            return Err(ToneError::new("startAt", "must be a time"));
+        }
+        if starts_at - limits.now_secs > MAX_SCHEDULE_AHEAD_SECS {
+            return Err(ToneError::new(
+                "startAt",
+                format!("must be within {MAX_SCHEDULE_AHEAD_SECS} seconds of now"),
+            ));
+        }
+    }
+
     Ok(Tone {
         waveform,
-        frequency_hz: checked_frequency("frequency", frequency_hz, max_frequency_hz)?,
-        amplitude: checked_level("amplitude", amplitude)?,
+        frequency_hz: checked_frequency("frequency", parts.frequency_hz, limits.max_frequency_hz)?,
+        amplitude: checked_level("amplitude", parts.amplitude)?,
         envelope: Envelope {
-            attack_secs: checked_secs("attack", attack_secs)?,
-            decay_secs: checked_secs("decay", decay_secs)?,
-            sustain_level: checked_level("sustainLevel", sustain_level)?,
-            release_secs: checked_secs("release", release_secs)?,
-            duration_secs,
+            attack_secs: checked_secs("attack", parts.attack_secs)?,
+            decay_secs: checked_secs("decay", parts.decay_secs)?,
+            sustain_level: checked_level("sustainLevel", parts.sustain_level)?,
+            release_secs: checked_secs("release", parts.release_secs)?,
+            duration_secs: parts.duration_secs,
         },
         sweep,
+        starts_at_secs: parts.starts_at_secs,
     })
 }
 
@@ -320,6 +382,11 @@ struct Voice {
     /// knows which those are.
     owner: ProcessId,
     tone: Tone,
+    /// The mixer sample this voice begins on. Until the mixer reaches it the
+    /// voice is silent and does not age, so its envelope and its phase both
+    /// start at the instant it was scheduled for rather than at the instant
+    /// it was queued.
+    starts_at_sample: u64,
     /// `0.0..1.0`, wraps every cycle.
     phase: f32,
     lfsr: u16,
@@ -330,16 +397,23 @@ struct Voice {
 }
 
 impl Voice {
-    fn new(id: VoiceId, owner: ProcessId, tone: Tone) -> Self {
+    fn new(id: VoiceId, owner: ProcessId, tone: Tone, starts_at_sample: u64) -> Self {
         Self {
             id,
             owner,
             tone,
+            starts_at_sample,
             phase: 0.0,
             lfsr: LFSR_SEED,
             elapsed_secs: 0.0,
             releasing_since: None,
         }
+    }
+
+    /// Whether this voice is still waiting for the sample it was scheduled
+    /// to begin on.
+    fn is_pending(&self, sample: u64) -> bool {
+        sample < self.starts_at_sample
     }
 
     /// How loud this voice actually is right now: its envelope scaled by its
@@ -475,6 +549,12 @@ enum Command {
 /// sound thread.
 struct Mixer {
     voices: Vec<Voice>,
+    /// Samples rendered since the device started, which is the clock every
+    /// scheduled voice is placed against and the one `ely:sound`'s
+    /// `currentTime` reports. Counting what the device has actually consumed
+    /// means a scheduled instant converts to a sample index by exact
+    /// arithmetic, with no estimated mapping between two drifting clocks.
+    clock_samples: u64,
 }
 
 impl Mixer {
@@ -484,6 +564,17 @@ impl Mixer {
             // so `push` never reallocates — the sound callback never reaches
             // the allocator.
             voices: Vec::with_capacity(MAX_VOICES),
+            clock_samples: 0,
+        }
+    }
+
+    /// The sample a voice scheduled for `starts_at_secs` begins on. A time
+    /// already past lands at or before the clock, which starts the voice at
+    /// once.
+    fn sample_index_for(&self, starts_at_secs: Option<f64>, sample_rate_hz: f32) -> u64 {
+        match starts_at_secs {
+            Some(secs) if secs > 0.0 => (secs * f64::from(sample_rate_hz)) as u64,
+            _ => self.clock_samples,
         }
     }
 
@@ -503,14 +594,29 @@ impl Mixer {
             return;
         }
 
+        let clock = self.clock_samples;
         let quietest = self
             .voices
             .iter()
             .enumerate()
             .min_by(|(_, a), (_, b)| {
-                a.audible_level()
-                    .total_cmp(&b.audible_level())
-                    .then(b.elapsed_secs.total_cmp(&a.elapsed_secs))
+                // A voice that has started gives up its slot before one that
+                // has not. A scheduled voice is silent until its moment, so
+                // by loudness alone it would look like the obvious thing to
+                // discard — and a program queueing a sequence would have each
+                // new voice eat the ones already waiting.
+                a.is_pending(clock).cmp(&b.is_pending(clock)).then_with(|| {
+                    if a.is_pending(clock) {
+                        // Both waiting: the one furthest out is the least
+                        // imminent, and the easiest for a scheduler to
+                        // queue again.
+                        b.starts_at_sample.cmp(&a.starts_at_sample)
+                    } else {
+                        a.audible_level()
+                            .total_cmp(&b.audible_level())
+                            .then(b.elapsed_secs.total_cmp(&a.elapsed_secs))
+                    }
+                })
             })
             .map(|(index, _)| index);
         if let Some(index) = quietest {
@@ -522,8 +628,16 @@ impl Mixer {
     /// callback before its stop arrived is the ordinary race, not an error,
     /// so an unknown id is a no-op.
     fn stop(&mut self, id: VoiceId) {
-        if let Some(voice) = self.voices.iter_mut().find(|voice| voice.id == id) {
-            voice.release();
+        let clock = self.clock_samples;
+        let Some(index) = self.voices.iter().position(|voice| voice.id == id) else {
+            return;
+        };
+        // A voice that never sounded has nothing to ring out, so it goes
+        // rather than spending its release fading from silence to silence.
+        if self.voices[index].is_pending(clock) {
+            self.voices.remove(index);
+        } else {
+            self.voices[index].release();
         }
     }
 
@@ -531,8 +645,13 @@ impl Mixer {
     /// left to finish on its own, so a sound effect still outlives the
     /// program that triggered it.
     fn release_sustaining(&mut self, owner: ProcessId) {
+        let clock = self.clock_samples;
+        let mine =
+            |voice: &Voice| voice.owner == owner && voice.tone.envelope.duration_secs.is_none();
+        self.voices
+            .retain(|voice| !(mine(voice) && voice.is_pending(clock)));
         for voice in &mut self.voices {
-            if voice.owner == owner && voice.tone.envelope.duration_secs.is_none() {
+            if mine(voice) {
                 voice.release();
             }
         }
@@ -548,16 +667,25 @@ impl Mixer {
     fn render(&mut self, out: &mut [f32], channels: usize, sample_rate_hz: f32) {
         let dt = 1.0 / sample_rate_hz;
 
+        let mut sample = self.clock_samples;
         for frame in out.chunks_mut(channels) {
             let mut mixed = 0.0;
             for voice in &mut self.voices {
+                // Checked per sample rather than per buffer, so a voice
+                // scheduled for the middle of this buffer begins in the
+                // middle of it.
+                if voice.is_pending(sample) {
+                    continue;
+                }
                 mixed += voice.tone.waveform.sample(voice.phase, voice.lfsr)
                     * voice.tone.amplitude
                     * voice.amplitude_envelope();
                 voice.advance(dt);
             }
             frame.fill((mixed * MASTER_GAIN).clamp(-1.0, 1.0));
+            sample += 1;
         }
+        self.clock_samples = sample;
 
         self.voices.retain(|voice| !voice.finished());
     }
@@ -577,6 +705,10 @@ pub struct Sound {
     /// lower of [`MAX_FREQUENCY_HZ`] and half the rate the output stream
     /// actually negotiated.
     max_frequency_hz: f32,
+    sample_rate_hz: f32,
+    /// Samples the device has played, as of the last callback. Read to place
+    /// scheduled voices; see [`Sound::current_time`].
+    clock: Arc<AtomicU64>,
     next_id: Cell<VoiceId>,
     _stream: Option<cpal::Stream>,
 }
@@ -619,12 +751,39 @@ impl Sound {
         self.max_frequency_hz
     }
 
+    /// Seconds of sound the device has actually played since it started —
+    /// the clock a scheduled tone's `starts_at_secs` is measured against.
+    ///
+    /// The reading trails the device by up to one buffer, since it is stored
+    /// once per callback. That costs a scheduler nothing but lookahead: a
+    /// tone names an absolute instant the mixer then honours exactly, so a
+    /// stale reading shifts a whole sequence by the same small amount
+    /// instead of scattering its notes. What it must not do is stop
+    /// advancing, which is why a machine with no device still gets a clock.
+    pub fn current_time(&self) -> f64 {
+        self.clock.load(Ordering::Relaxed) as f64 / f64::from(self.sample_rate_hz)
+    }
+
     /// Releases every sustaining voice `owner` started, ringing each out
     /// over its own release. Called when a VM goes away, so a program that
     /// faulted or exited holding a note doesn't leave it droning for the
     /// life of the kernel.
     pub fn release_sustaining(&self, owner: ProcessId) {
         let _ = self.commands.send(Command::ReleaseSustaining(owner));
+    }
+}
+
+/// Seconds of sound played so far, falling back to elapsed wall time on a
+/// machine with no device. A scheduler that read a clock frozen at zero
+/// would queue everything into the same instant, so the clock keeps running
+/// whether or not anyone can hear it.
+fn current_time(sound: Option<&Sound>) -> f64 {
+    match sound {
+        Some(sound) => sound.current_time(),
+        None => SILENT_CLOCK
+            .get_or_init(Instant::now)
+            .elapsed()
+            .as_secs_f64(),
     }
 }
 
@@ -649,51 +808,38 @@ pub fn bootstrap_sound_bindings(
             move |ctx: Ctx<'_>,
                   waveform: u8,
                   frequency_hz: f32,
-                  amplitude: f32,
-                  envelope: Vec<f32>,
-                  sweep: Option<Vec<f32>>,
-                  duration_secs: Option<f32>|
+                  options: rquickjs::Object<'_>|
                   -> Result<Option<VoiceId>> {
-                // The four stages arrive as one envelope rather than four
-                // loose floats — not because the arguments wouldn't fit, but
-                // because they are one thing, the same way a source rect
-                // crosses as one array in `__framebuffer_draw_image_transformed`.
-                let envelope = <[f32; 4]>::try_from(envelope.as_slice()).map_err(|_| {
-                    rquickjs::Exception::throw_type(&ctx, "an envelope needs four numbers")
-                })?;
-                // Absent when the note holds its pitch, which is the common
-                // case. A sweep's target and its time are one thing, like the
-                // envelope's four stages, so they cross together or not at
-                // all.
-                let sweep = sweep
-                    .map(|sweep| {
-                        <[f32; 2]>::try_from(sweep.as_slice()).map_err(|_| {
-                            rquickjs::Exception::throw_type(
-                                &ctx,
-                                "a sweep needs a frequency and a time",
-                            )
-                        })
-                    })
-                    .transpose()?;
+                // Everything but the waveform and the pitch crosses as one
+                // object, read by name. The alternative is a positional
+                // argument per option, which this binding has already
+                // outgrown twice — and named fields cost a handful of
+                // property lookups on a call made a few times a frame.
+                let parts = ToneParts {
+                    waveform,
+                    frequency_hz,
+                    amplitude: options.get("amplitude")?,
+                    attack_secs: options.get("attack")?,
+                    decay_secs: options.get("decay")?,
+                    sustain_level: options.get("sustainLevel")?,
+                    release_secs: options.get("release")?,
+                    sweep_to_hz: options.get("sweepTo")?,
+                    sweep_over_secs: options.get("sweepOver")?,
+                    duration_secs: options.get("duration")?,
+                    starts_at_secs: options.get("startAt")?,
+                };
 
                 // A machine with no device still range-checks every option,
                 // so a program gets the same errors whether or not anything
-                // can sound. Only the ceiling differs, and 20 kHz is the one
-                // no real device lowers by much.
-                let max_frequency_hz = sound
-                    .as_ref()
-                    .map_or(MAX_FREQUENCY_HZ, |sound| sound.max_frequency_hz());
+                // can sound.
+                let limits = ToneLimits {
+                    max_frequency_hz: sound
+                        .as_ref()
+                        .map_or(MAX_FREQUENCY_HZ, |sound| sound.max_frequency_hz()),
+                    now_secs: current_time(sound.as_deref()),
+                };
 
-                let tone = tone_from_parts(
-                    waveform,
-                    frequency_hz,
-                    amplitude,
-                    envelope,
-                    sweep,
-                    duration_secs,
-                    max_frequency_hz,
-                )
-                .map_err(|err| {
+                let tone = tone_from_parts(parts, limits).map_err(|err| {
                     // A bad waveform names no point on any scale, so it is a
                     // type error and stays untagged: `ely:sound` re-types
                     // only what it can report as an out-of-range option.
@@ -717,6 +863,13 @@ pub fn bootstrap_sound_bindings(
                 Ok(sound.play(owner, tone))
             },
         )?;
+    }
+
+    {
+        let sound = sound.clone();
+        bind(ctx, "__sound_current_time", move || {
+            current_time(sound.as_deref())
+        })?;
     }
 
     bind(ctx, "__sound_stop", move |id: VoiceId| {
@@ -764,6 +917,8 @@ pub fn start() -> Option<Sound> {
     let channels = config.channels() as usize;
 
     let (commands, incoming) = mpsc::channel();
+    let clock = Arc::new(AtomicU64::new(0));
+    let callback_clock = Arc::clone(&clock);
     let mut mixer = Mixer::new();
 
     let stream = device.build_output_stream(
@@ -774,13 +929,15 @@ pub fn start() -> Option<Sound> {
             while let Ok(command) = incoming.try_recv() {
                 match command {
                     Command::Play { id, owner, tone } => {
-                        mixer.add(Voice::new(id, owner, tone));
+                        let starts_at = mixer.sample_index_for(tone.starts_at_secs, sample_rate);
+                        mixer.add(Voice::new(id, owner, tone, starts_at));
                     }
                     Command::Stop(id) => mixer.stop(id),
                     Command::ReleaseSustaining(owner) => mixer.release_sustaining(owner),
                 }
             }
             mixer.render(data, channels, sample_rate);
+            callback_clock.store(mixer.clock_samples, Ordering::Relaxed);
         },
         |err| eprintln!("[sound] stream error: {err}"),
         None,
@@ -802,6 +959,8 @@ pub fn start() -> Option<Sound> {
     Some(Sound {
         commands,
         max_frequency_hz: MAX_FREQUENCY_HZ.min(sample_rate / 2.0),
+        sample_rate_hz: sample_rate,
+        clock,
         next_id: Cell::new(1),
         _stream: Some(stream),
     })
@@ -814,6 +973,9 @@ pub fn start() -> Option<Sound> {
 #[cfg(test)]
 pub(crate) struct SoundLog {
     incoming: mpsc::Receiver<Command>,
+    /// The same clock the detached `Sound` reads, so a test can move time
+    /// forward without an output callback to move it.
+    clock: Arc<AtomicU64>,
     /// Everything drained so far. The channel can only be read once, so what
     /// comes out of it is kept here and every accessor filters this instead
     /// — otherwise asking what played would throw away what stopped.
@@ -856,6 +1018,14 @@ impl SoundLog {
             .collect()
     }
 
+    /// Moves the clock on as if the device had played `seconds` of sound.
+    /// Nothing advances it without a real output callback, so without this a
+    /// test can't reach anything that depends on time passing.
+    pub(crate) fn play_out(&self, seconds: f64) {
+        let samples = (seconds * f64::from(PREFERRED_SAMPLE_RATE)) as u64;
+        self.clock.fetch_add(samples, Ordering::Relaxed);
+    }
+
     /// The processes whose sustaining voices were released, in order — one
     /// entry per VM teardown that reached the sound thread.
     pub(crate) fn released(&self) -> Vec<ProcessId> {
@@ -879,9 +1049,12 @@ impl Sound {
     /// reports the sound thread as gone.
     pub(crate) fn detached() -> (Sound, SoundLog) {
         let (commands, incoming) = mpsc::channel();
+        let clock = Arc::new(AtomicU64::new(0));
         let sound = Sound {
             commands,
             max_frequency_hz: MAX_FREQUENCY_HZ,
+            sample_rate_hz: PREFERRED_SAMPLE_RATE as f32,
+            clock: Arc::clone(&clock),
             next_id: Cell::new(1),
             _stream: None,
         };
@@ -889,6 +1062,7 @@ impl Sound {
             sound,
             SoundLog {
                 incoming,
+                clock,
                 seen: RefCell::new(Vec::new()),
             },
         )
@@ -921,6 +1095,7 @@ mod tests {
                 duration_secs: None,
             },
             sweep: None,
+            starts_at_secs: None,
         }
     }
 
@@ -928,7 +1103,7 @@ mod tests {
     /// 1000 Hz so that a period lands on a whole number of samples.
     fn render_one(tone: Tone, count: usize) -> Vec<f32> {
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, tone));
+        mixer.add(Voice::new(1, OWNER, tone, 0));
         let mut out = vec![0.0; count];
         mixer.render(&mut out, 1, 1000.0);
         out
@@ -1098,7 +1273,7 @@ mod tests {
     #[test]
     fn a_voice_with_no_duration_sounds_until_it_is_stopped() {
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, tone(Waveform::Square, 0.0)));
+        mixer.add(Voice::new(1, OWNER, tone(Waveform::Square, 0.0), 0));
         let mut out = vec![0.0; 1000];
         mixer.render(&mut out, 1, 1000.0);
         assert_eq!(mixer.active(), 1, "still sounding a whole second later");
@@ -1110,7 +1285,7 @@ mod tests {
         let mut shaped = tone(Waveform::Square, 0.0);
         shaped.envelope.release_secs = 0.01;
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, shaped));
+        mixer.add(Voice::new(1, OWNER, shaped, 0));
 
         let mut before = vec![0.0; 5];
         mixer.render(&mut before, 1, 1000.0);
@@ -1135,7 +1310,7 @@ mod tests {
         shaped.envelope.duration_secs = Some(0.005);
         shaped.envelope.release_secs = 0.005;
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, shaped));
+        mixer.add(Voice::new(1, OWNER, shaped, 0));
 
         let mut out = vec![0.0; 20];
         mixer.render(&mut out, 1, 1000.0);
@@ -1151,7 +1326,7 @@ mod tests {
         let mut shaped = tone(Waveform::Square, 0.0);
         shaped.envelope.duration_secs = Some(0.001);
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, shaped));
+        mixer.add(Voice::new(1, OWNER, shaped, 0));
         let mut out = vec![0.0; 10];
         mixer.render(&mut out, 1, 1000.0);
         assert_eq!(mixer.active(), 0);
@@ -1163,7 +1338,7 @@ mod tests {
     #[test]
     fn stopping_an_id_that_was_never_played_does_nothing() {
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, tone(Waveform::Square, 100.0)));
+        mixer.add(Voice::new(1, OWNER, tone(Waveform::Square, 100.0), 0));
         mixer.stop(9999);
         assert_eq!(mixer.active(), 1, "the sounding voice is untouched");
     }
@@ -1172,7 +1347,7 @@ mod tests {
     fn full_mixer() -> Mixer {
         let mut mixer = Mixer::new();
         for id in 0..MAX_VOICES as u32 {
-            mixer.add(Voice::new(id, OWNER, tone(Waveform::Square, 100.0)));
+            mixer.add(Voice::new(id, OWNER, tone(Waveform::Square, 100.0), 0));
         }
         mixer
     }
@@ -1180,7 +1355,7 @@ mod tests {
     #[test]
     fn stealing_keeps_the_mixer_at_its_cap() {
         let mut mixer = full_mixer();
-        mixer.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0)));
+        mixer.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0), 0));
         assert_eq!(mixer.active(), MAX_VOICES, "the cap still holds");
         assert!(
             mixer.voices.iter().any(|voice| voice.id == 9999),
@@ -1200,12 +1375,13 @@ mod tests {
                 amplitude: 0.05,
                 ..tone(Waveform::Square, 100.0)
             },
+            0,
         ));
         for id in 2..=MAX_VOICES as u32 {
-            mixer.add(Voice::new(id, OWNER, tone(Waveform::Square, 100.0)));
+            mixer.add(Voice::new(id, OWNER, tone(Waveform::Square, 100.0), 0));
         }
 
-        mixer.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0)));
+        mixer.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0), 0));
 
         assert!(
             !mixer.voices.iter().any(|voice| voice.id == 1),
@@ -1223,9 +1399,9 @@ mod tests {
         let mut shaped = tone(Waveform::Square, 100.0);
         shaped.envelope.release_secs = 1.0;
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, shaped));
+        mixer.add(Voice::new(1, OWNER, shaped, 0));
         for id in 2..=MAX_VOICES as u32 {
-            mixer.add(Voice::new(id, OWNER, tone(Waveform::Square, 100.0)));
+            mixer.add(Voice::new(id, OWNER, tone(Waveform::Square, 100.0), 0));
         }
 
         // Part-way through a long release, so it is still sounding but on
@@ -1233,7 +1409,7 @@ mod tests {
         mixer.stop(1);
         let mut out = vec![0.0; 500];
         mixer.render(&mut out, 1, 1000.0);
-        mixer.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0)));
+        mixer.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0), 0));
 
         assert!(
             !mixer.voices.iter().any(|voice| voice.id == 1),
@@ -1245,7 +1421,7 @@ mod tests {
     fn a_stolen_voice_leaves_the_others_sounding_as_they_were() {
         let mut untouched = full_mixer();
         let mut stolen_from = full_mixer();
-        stolen_from.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0)));
+        stolen_from.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0), 0));
 
         let mut before = vec![0.0; 50];
         untouched.render(&mut before, 1, 1000.0);
@@ -1265,9 +1441,9 @@ mod tests {
         timed.envelope.duration_secs = Some(10.0);
 
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, 7, held));
-        mixer.add(Voice::new(2, 7, timed));
-        mixer.add(Voice::new(3, 8, held));
+        mixer.add(Voice::new(1, 7, held, 0));
+        mixer.add(Voice::new(2, 7, timed, 0));
+        mixer.add(Voice::new(3, 8, held, 0));
 
         mixer.release_sustaining(7);
 
@@ -1309,7 +1485,7 @@ mod tests {
     #[test]
     fn every_channel_in_a_frame_gets_the_same_sample() {
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, tone(Waveform::Sine, 100.0)));
+        mixer.add(Voice::new(1, OWNER, tone(Waveform::Sine, 100.0), 0));
         let mut out = vec![0.0; 20];
         mixer.render(&mut out, 2, 1000.0);
         for frame in out.chunks(2) {
@@ -1320,7 +1496,7 @@ mod tests {
     #[test]
     fn a_partial_final_frame_is_still_filled() {
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, tone(Waveform::Square, 0.0)));
+        mixer.add(Voice::new(1, OWNER, tone(Waveform::Square, 0.0), 0));
         // Seven samples across two channels leaves a one-sample final frame.
         let mut out = vec![0.0; 7];
         mixer.render(&mut out, 2, 1000.0);
@@ -1334,7 +1510,7 @@ mod tests {
     fn the_mix_never_leaves_the_output_range() {
         let mut mixer = Mixer::new();
         for id in 0..MAX_VOICES as u32 {
-            mixer.add(Voice::new(id, OWNER, tone(Waveform::Square, 100.0)));
+            mixer.add(Voice::new(id, OWNER, tone(Waveform::Square, 100.0), 0));
         }
         let mut out = vec![0.0; 100];
         mixer.render(&mut out, 1, 1000.0);
@@ -1402,7 +1578,7 @@ mod tests {
         shaped.envelope.release_secs = 0.01;
 
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, shaped));
+        mixer.add(Voice::new(1, OWNER, shaped, 0));
         let mut before = vec![0.0; 10];
         mixer.render(&mut before, 1, 1000.0);
         mixer.stop(1);
@@ -1427,7 +1603,7 @@ mod tests {
         shaped.envelope.decay_secs = 0.005;
         shaped.envelope.sustain_level = 0.0;
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, shaped));
+        mixer.add(Voice::new(1, OWNER, shaped, 0));
 
         let mut out = vec![0.0; 40];
         mixer.render(&mut out, 1, 1000.0);
@@ -1497,7 +1673,7 @@ mod tests {
             over_secs: 1.0,
         });
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, swept));
+        mixer.add(Voice::new(1, OWNER, swept, 0));
         let mut out = vec![0.0; 1];
         mixer.render(&mut out, 1, 1000.0);
 
@@ -1509,115 +1685,156 @@ mod tests {
         );
     }
 
-    /// The loose numbers a program passes, in the order `tone_from_parts`
-    /// takes them: waveform, frequency, amplitude, envelope, sweep, duration.
-    type Parts = (u8, f32, f32, [f32; 4], Option<[f32; 2]>, Option<f32>);
-
     /// Valid parts, for a test that wants to break exactly one of them.
-    fn parts() -> Parts {
-        (1, 440.0, 0.6, [0.01, 0.0, 1.0, 0.1], None, None)
+    fn parts() -> super::ToneParts {
+        super::ToneParts {
+            waveform: 1,
+            frequency_hz: 440.0,
+            amplitude: 0.6,
+            attack_secs: 0.01,
+            decay_secs: 0.0,
+            sustain_level: 1.0,
+            release_secs: 0.1,
+            sweep_to_hz: None,
+            sweep_over_secs: 0.1,
+            duration_secs: None,
+            starts_at_secs: None,
+        }
+    }
+
+    /// A device that can sound anything, at time zero.
+    fn limits() -> super::ToneLimits {
+        super::ToneLimits {
+            max_frequency_hz: MAX_FREQUENCY_HZ,
+            now_secs: 0.0,
+        }
     }
 
     /// The option `tone_from_parts` blamed, or `""` if it accepted them.
-    fn blamed(tone: std::result::Result<Tone, super::ToneError>) -> &'static str {
-        tone.err().map_or("", |err| err.option)
+    fn blamed(parts: super::ToneParts) -> &'static str {
+        super::tone_from_parts(parts, limits())
+            .err()
+            .map_or("", |err| err.option)
     }
 
     #[test]
     fn valid_parts_become_a_tone() {
-        let (waveform, frequency, amplitude, envelope, sweep, duration) = parts();
-        let tone = super::tone_from_parts(
-            waveform,
-            frequency,
-            amplitude,
-            envelope,
-            sweep,
-            duration,
-            MAX_FREQUENCY_HZ,
-        )
-        .expect("valid parts");
+        let tone = super::tone_from_parts(parts(), limits()).expect("valid parts");
         assert_eq!(tone.waveform, Waveform::Triangle);
         assert_eq!(tone.frequency_hz, 440.0);
         assert_eq!(tone.envelope.sustain_level, 1.0);
+        assert_eq!(tone.starts_at_secs, None);
     }
 
     #[test]
     fn each_bad_part_is_blamed_on_the_option_a_program_named() {
-        let (w, f, a, e, s, d) = parts();
-        let check = |waveform, frequency, amplitude, envelope, sweep, duration| {
-            blamed(super::tone_from_parts(
-                waveform,
-                frequency,
-                amplitude,
-                envelope,
-                sweep,
-                duration,
-                MAX_FREQUENCY_HZ,
-            ))
+        let broken = |change: fn(&mut super::ToneParts)| {
+            let mut parts = parts();
+            change(&mut parts);
+            blamed(parts)
         };
 
-        assert_eq!(check(9, f, a, e, s, d), "waveform");
-        assert_eq!(check(w, 40_000.0, a, e, s, d), "frequency");
-        assert_eq!(check(w, f, 2.0, e, s, d), "amplitude");
-        assert_eq!(check(w, f, a, [-1.0, 0.0, 1.0, 0.1], s, d), "attack");
-        assert_eq!(check(w, f, a, [0.0, -1.0, 1.0, 0.1], s, d), "decay");
-        assert_eq!(check(w, f, a, [0.0, 0.0, 2.0, 0.1], s, d), "sustainLevel");
-        assert_eq!(check(w, f, a, [0.0, 0.0, 1.0, -1.0], s, d), "release");
-        assert_eq!(check(w, f, a, e, Some([40_000.0, 0.1]), d), "sweepTo");
-        assert_eq!(check(w, f, a, e, Some([200.0, -1.0]), d), "sweepOver");
-        assert_eq!(check(w, f, a, e, s, Some(0.0)), "duration");
+        assert_eq!(broken(|p| p.waveform = 9), "waveform");
+        assert_eq!(broken(|p| p.frequency_hz = 40_000.0), "frequency");
+        assert_eq!(broken(|p| p.amplitude = 2.0), "amplitude");
+        assert_eq!(broken(|p| p.attack_secs = -1.0), "attack");
+        assert_eq!(broken(|p| p.decay_secs = -1.0), "decay");
+        assert_eq!(broken(|p| p.sustain_level = 2.0), "sustainLevel");
+        assert_eq!(broken(|p| p.release_secs = -1.0), "release");
+        assert_eq!(broken(|p| p.sweep_to_hz = Some(40_000.0)), "sweepTo");
+        assert_eq!(
+            broken(|p| {
+                p.sweep_to_hz = Some(200.0);
+                p.sweep_over_secs = -1.0;
+            }),
+            "sweepOver"
+        );
+        assert_eq!(broken(|p| p.duration_secs = Some(0.0)), "duration");
+        assert_eq!(broken(|p| p.starts_at_secs = Some(60.0)), "startAt");
     }
 
     #[test]
     fn nothing_that_is_not_a_number_gets_through() {
         // A NaN anywhere would poison every sample of the whole mix for as
         // long as the voice sounded.
-        let (w, f, a, e, s, d) = parts();
-        let nan = f32::NAN;
-        assert_eq!(
-            blamed(super::tone_from_parts(w, nan, a, e, s, d, MAX_FREQUENCY_HZ)),
-            "frequency"
-        );
-        assert_eq!(
-            blamed(super::tone_from_parts(w, f, nan, e, s, d, MAX_FREQUENCY_HZ)),
-            "amplitude"
-        );
-        assert_eq!(
-            blamed(super::tone_from_parts(
-                w,
-                f,
-                a,
-                [nan, 0.0, 1.0, 0.1],
-                s,
-                d,
-                MAX_FREQUENCY_HZ
-            )),
-            "attack"
-        );
+        let broken = |change: fn(&mut super::ToneParts)| {
+            let mut parts = parts();
+            change(&mut parts);
+            blamed(parts)
+        };
+        assert_eq!(broken(|p| p.frequency_hz = f32::NAN), "frequency");
+        assert_eq!(broken(|p| p.amplitude = f32::NAN), "amplitude");
+        assert_eq!(broken(|p| p.attack_secs = f32::NAN), "attack");
+        assert_eq!(broken(|p| p.starts_at_secs = Some(f64::NAN)), "startAt");
     }
 
     #[test]
     fn a_frequency_is_checked_against_what_the_device_can_sound() {
-        let (w, _, a, e, s, d) = parts();
         // A device running at 16 kHz can only carry 8 kHz without aliasing,
         // whatever the fixed ceiling says.
+        let mut parts = parts();
+        parts.frequency_hz = 12_000.0;
         assert_eq!(
-            blamed(super::tone_from_parts(w, 12_000.0, a, e, s, d, 8_000.0)),
+            super::tone_from_parts(
+                super::ToneParts { ..parts },
+                super::ToneLimits {
+                    max_frequency_hz: 8_000.0,
+                    now_secs: 0.0,
+                },
+            )
+            .err()
+            .map_or("", |err| err.option),
             "frequency",
             "past half the output rate it would alias back down"
         );
         assert_eq!(
-            blamed(super::tone_from_parts(
-                w,
-                12_000.0,
-                a,
-                e,
-                s,
-                d,
-                MAX_FREQUENCY_HZ
-            )),
+            blamed(parts),
             "",
             "and the same tone is fine on a faster device"
+        );
+    }
+
+    #[test]
+    fn a_tone_may_be_scheduled_up_to_the_horizon_but_no_further() {
+        let at = |starts_at, now| {
+            let mut parts = parts();
+            parts.starts_at_secs = Some(starts_at);
+            super::tone_from_parts(
+                parts,
+                super::ToneLimits {
+                    max_frequency_hz: MAX_FREQUENCY_HZ,
+                    now_secs: now,
+                },
+            )
+            .err()
+            .map_or("", |err| err.option)
+        };
+
+        assert_eq!(at(10.5, 10.0), "", "half a second out is fine");
+        assert_eq!(at(12.0, 10.0), "", "and the horizon itself is fine");
+        assert_eq!(at(12.1, 10.0), "startAt", "past it is not");
+        // A voice parked in the far future holds a slot without ever
+        // sounding, and the slots belong to every program at once.
+        assert_eq!(at(3600.0, 10.0), "startAt");
+    }
+
+    #[test]
+    fn a_tone_scheduled_in_the_past_is_accepted_rather_than_refused() {
+        // A program that dropped a frame should get a late note, not an
+        // exception in the middle of a sequence.
+        let mut parts = parts();
+        parts.starts_at_secs = Some(1.0);
+        assert_eq!(
+            super::tone_from_parts(
+                parts,
+                super::ToneLimits {
+                    max_frequency_hz: MAX_FREQUENCY_HZ,
+                    now_secs: 10.0,
+                },
+            )
+            .err()
+            .map_or("", |err| err.option),
+            ""
         );
     }
 
@@ -1625,13 +1842,182 @@ mod tests {
     fn noise_churns_once_per_cycle_even_when_a_sample_spans_several() {
         // Three cycles per sample: the register has to step three times, or
         // the noise stops churning at the pitch it was asked for.
-        let mut voice = Voice::new(1, OWNER, tone(Waveform::Noise, 3000.0));
+        let mut voice = Voice::new(1, OWNER, tone(Waveform::Noise, 3000.0), 0);
         voice.advance(1.0 / 1000.0);
         let mut expected = LFSR_SEED;
         for _ in 0..3 {
             expected = advance_lfsr(expected);
         }
         assert_eq!(voice.lfsr, expected);
+    }
+
+    /// A tone scheduled for `secs`, with a flat envelope so a test sees the
+    /// waveform itself.
+    fn scheduled(secs: f64) -> Tone {
+        Tone {
+            starts_at_secs: Some(secs),
+            ..tone(Waveform::Square, 0.0)
+        }
+    }
+
+    #[test]
+    fn the_clock_advances_by_one_sample_for_every_frame_rendered() {
+        let mut mixer = Mixer::new();
+        let mut out = vec![0.0; 40];
+        mixer.render(&mut out, 2, 1000.0);
+        assert_eq!(mixer.clock_samples, 20, "twenty frames of two channels");
+        mixer.render(&mut out, 1, 1000.0);
+        assert_eq!(mixer.clock_samples, 60);
+    }
+
+    #[test]
+    fn a_scheduled_voice_is_silent_until_the_sample_it_named() {
+        // Ten samples in, at a round 1000 Hz.
+        let mut mixer = Mixer::new();
+        let starts_at = mixer.sample_index_for(Some(0.01), 1000.0);
+        assert_eq!(starts_at, 10);
+        mixer.add(Voice::new(1, OWNER, scheduled(0.01), starts_at));
+
+        let mut out = vec![0.0; 20];
+        mixer.render(&mut out, 1, 1000.0);
+
+        assert!(
+            out[..10].iter().all(|&s| s == 0.0),
+            "nothing before its moment"
+        );
+        assert!(
+            out[10..].iter().all(|&s| s != 0.0),
+            "and sounding from it onward"
+        );
+    }
+
+    #[test]
+    fn a_scheduled_voice_starts_mid_buffer_rather_than_on_a_buffer_boundary() {
+        // The whole point of scheduling: a device hands over whole buffers,
+        // and a voice placed inside one has to begin inside it rather than
+        // waiting for the edge. Sixteen-sample buffers, a voice due at 21.
+        let mut mixer = Mixer::new();
+        mixer.add(Voice::new(1, OWNER, scheduled(0.021), 21));
+
+        let mut first = vec![0.0; 16];
+        mixer.render(&mut first, 1, 1000.0);
+        assert!(first.iter().all(|&s| s == 0.0), "not in the first buffer");
+
+        let mut second = vec![0.0; 16];
+        mixer.render(&mut second, 1, 1000.0);
+        assert!(
+            second[..5].iter().all(|&s| s == 0.0),
+            "silent for the first five of the second buffer"
+        );
+        assert!(
+            second[5..].iter().all(|&s| s != 0.0),
+            "and sounding from the sixth, which is sample 21"
+        );
+    }
+
+    #[test]
+    fn a_scheduled_voice_does_not_age_while_it_waits() {
+        // Its envelope has to begin when the voice does. A voice that aged
+        // while pending would arrive part-way through its own attack, or
+        // already over.
+        let mut shaped = scheduled(0.01);
+        shaped.envelope.attack_secs = 0.01;
+        let mut mixer = Mixer::new();
+        mixer.add(Voice::new(1, OWNER, shaped, 10));
+
+        let mut out = vec![0.0; 20];
+        mixer.render(&mut out, 1, 1000.0);
+
+        let sounding = unscaled(out[10..].to_vec());
+        assert!(
+            sounding[0].abs() < 1e-5,
+            "starts from silence, not part-way"
+        );
+        for window in sounding.windows(2) {
+            assert!(window[1] > window[0], "and rises through its whole attack");
+        }
+    }
+
+    #[test]
+    fn a_voice_scheduled_in_the_past_sounds_immediately() {
+        // A program that dropped a frame gets a late note rather than a hole.
+        let mut mixer = Mixer::new();
+        let mut out = vec![0.0; 50];
+        mixer.render(&mut out, 1, 1000.0);
+        assert_eq!(mixer.clock_samples, 50);
+
+        let starts_at = mixer.sample_index_for(Some(0.01), 1000.0);
+        mixer.add(Voice::new(1, OWNER, scheduled(0.01), starts_at));
+        let mut after = vec![0.0; 4];
+        mixer.render(&mut after, 1, 1000.0);
+        assert!(after.iter().all(|&s| s != 0.0), "sounding at once");
+    }
+
+    #[test]
+    fn a_pending_voice_is_stolen_only_after_every_sounding_one() {
+        // A scheduled voice is silent, so by loudness alone it would be the
+        // obvious thing to discard — and a program queueing a sequence would
+        // watch each new voice eat the ones already waiting.
+        let mut mixer = Mixer::new();
+        mixer.add(Voice::new(1, OWNER, scheduled(1.0), 1000));
+        for id in 2..=MAX_VOICES as u32 {
+            mixer.add(Voice::new(id, OWNER, tone(Waveform::Square, 100.0), 0));
+        }
+
+        mixer.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0), 0));
+
+        assert!(
+            mixer.voices.iter().any(|voice| voice.id == 1),
+            "the waiting voice keeps its slot"
+        );
+    }
+
+    #[test]
+    fn the_latest_starting_pending_voice_is_the_one_stolen() {
+        let mut mixer = Mixer::new();
+        for (id, at) in (1..=MAX_VOICES as u32).zip((1..).map(|n| n * 100)) {
+            mixer.add(Voice::new(id, OWNER, scheduled(1.0), at));
+        }
+
+        mixer.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0), 0));
+
+        assert!(
+            !mixer
+                .voices
+                .iter()
+                .any(|voice| voice.id == MAX_VOICES as u32),
+            "the one furthest out gives way first"
+        );
+        assert!(
+            mixer.voices.iter().any(|voice| voice.id == 1),
+            "and the most imminent is untouched"
+        );
+    }
+
+    #[test]
+    fn stopping_a_voice_that_has_not_sounded_removes_it() {
+        // Nothing to ring out, so it goes rather than spending its release
+        // fading from silence to silence.
+        let mut mixer = Mixer::new();
+        mixer.add(Voice::new(1, OWNER, scheduled(1.0), 1000));
+        mixer.stop(1);
+        assert_eq!(mixer.active(), 0);
+
+        let mut out = vec![0.0; 2000];
+        mixer.render(&mut out, 1, 1000.0);
+        assert!(out.iter().all(|&s| s == 0.0), "and never sounds");
+    }
+
+    #[test]
+    fn a_vm_going_away_takes_its_scheduled_voices_with_it() {
+        let mut mixer = Mixer::new();
+        mixer.add(Voice::new(1, 7, scheduled(1.0), 1000));
+        mixer.add(Voice::new(2, 8, scheduled(1.0), 1000));
+
+        mixer.release_sustaining(7);
+
+        assert_eq!(mixer.active(), 1, "its queued voice is dropped");
+        assert_eq!(mixer.voices[0].id, 2, "another VM's is not");
     }
 
     #[test]
@@ -1669,8 +2055,8 @@ mod tests {
         let one = render_one(quiet, 4);
 
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, quiet));
-        mixer.add(Voice::new(2, OWNER, quiet));
+        mixer.add(Voice::new(1, OWNER, quiet, 0));
+        mixer.add(Voice::new(2, OWNER, quiet, 0));
         let mut two = vec![0.0; 4];
         mixer.render(&mut two, 1, 1000.0);
 

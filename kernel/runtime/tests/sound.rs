@@ -520,3 +520,106 @@ fn every_waveform_samples_the_shape_the_mixer_would_sound() {
     assert_eq!(global::<f64>(&runtime, "triangle"), -1.0);
     assert!((global::<f64>(&runtime, "sine") - 1.0).abs() < 1e-9);
 }
+
+#[test]
+fn a_tone_reaches_the_mixer_with_the_start_time_it_was_given() {
+    let (_runtime, log) =
+        eval_with_audio("import { playTone } from 'ely:sound'; playTone(440, { startAt: 0.75 });");
+    assert_eq!(log.played()[0].starts_at_secs, Some(0.75));
+}
+
+#[test]
+fn a_tone_with_no_start_time_sounds_as_soon_as_the_mixer_sees_it() {
+    let (_runtime, log) = eval_with_audio("import { playTone } from 'ely:sound'; playTone(440);");
+    assert_eq!(log.played()[0].starts_at_secs, None);
+}
+
+#[test]
+fn the_clock_reports_the_sound_played_so_far() {
+    let (runtime, log) = eval_with_audio(
+        "import { currentTime } from 'ely:sound'; globalThis.before = currentTime();",
+    );
+    assert_eq!(global::<f64>(&runtime, "before"), 0.0);
+
+    log.play_out(1.5);
+    runtime
+        .eval_module(
+            "later.ts",
+            "import { currentTime } from 'ely:sound'; globalThis.after = currentTime();",
+        )
+        .expect("module failed to evaluate");
+    assert!(
+        (global::<f64>(&runtime, "after") - 1.5).abs() < 1e-6,
+        "the clock followed the device"
+    );
+}
+
+#[test]
+fn the_clock_still_advances_without_a_sound_device() {
+    // A scheduler reading a clock frozen at zero would queue everything into
+    // the same instant, so a machine with no speakers still gets time.
+    let runtime = eval_without_audio(
+        "import { currentTime } from 'ely:sound'; \
+         globalThis.first = currentTime(); \
+         for (let i = 0; i < 200000; i++) {} \
+         globalThis.second = currentTime();",
+    );
+    let first = global::<f64>(&runtime, "first");
+    let second = global::<f64>(&runtime, "second");
+    assert!(second >= first, "it only ever moves forward");
+    assert!(second > 0.0, "and it is running");
+}
+
+#[test]
+fn scheduling_further_ahead_than_the_horizon_names_start_at() {
+    // A voice queued for the far future holds one of the system's slots
+    // without ever sounding, and the slots belong to every program at once.
+    assert_eq!(
+        rejected_option("playTone(440, { startAt: 60 });"),
+        "startAt"
+    );
+}
+
+#[test]
+fn scheduling_within_the_horizon_is_accepted() {
+    let (_runtime, log) = eval_with_audio(
+        "import { currentTime, playTone } from 'ely:sound'; \
+         playTone(440, { startAt: currentTime() + 0.1 });",
+    );
+    assert_eq!(log.played().len(), 1);
+}
+
+#[test]
+fn a_tone_scheduled_in_the_past_is_accepted_rather_than_refused() {
+    // A program that dropped a frame should get a late note, not an
+    // exception part-way through a sequence.
+    let (_runtime, log) =
+        eval_with_audio("import { playTone } from 'ely:sound'; playTone(440, { startAt: -5 });");
+    assert_eq!(log.played().len(), 1);
+}
+
+#[test]
+fn a_sequence_derived_from_one_clock_reading_keeps_its_gaps_exact() {
+    // The pattern the whole design exists for: read the clock once, derive
+    // every instant from it. Whatever the reading was, the spacing is exact.
+    let (_runtime, log) = eval_with_audio(
+        "import { currentTime, playTone } from 'ely:sound'; \
+         const start = currentTime() + 0.1; \
+         for (let beat = 0; beat < 4; beat++) { \
+             playTone(440, { startAt: start + beat * 0.12 }); \
+         }",
+    );
+    let starts: Vec<f64> = log
+        .played()
+        .iter()
+        .map(|tone| tone.starts_at_secs.expect("scheduled"))
+        .collect();
+    assert_eq!(starts.len(), 4);
+    for pair in starts.windows(2) {
+        assert!(
+            (pair[1] - pair[0] - 0.12).abs() < 1e-9,
+            "gap was {}",
+            pair[1] - pair[0]
+        );
+    }
+}

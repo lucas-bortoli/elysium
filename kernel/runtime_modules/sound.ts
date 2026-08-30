@@ -7,12 +7,10 @@ import type { Option } from "ely:container";
 declare function __sound_play(
   waveform: number,
   frequency: number,
-  amplitude: number,
-  envelope: number[],
-  sweep: number[] | undefined,
-  duration: number | undefined,
+  options: ResolvedToneOptions,
 ): Option<number>;
 declare function __sound_stop(id: number): void;
+declare function __sound_current_time(): number;
 
 /** Opaque handle to a sounding voice, returned by `playTone`. */
 export type VoiceId = number;
@@ -90,6 +88,21 @@ export interface ToneOptions {
    * voice sounds for `duration + release` in total. Omitted, the voice holds
    * until `stopVoice`. */
   duration?: number;
+  /** When to start, as a reading of `currentTime` — an instant, not a delay.
+   * Omitted, the tone starts as soon as the system sees it.
+   *
+   * This is how anything rhythmic is built: a frame lands every 16 to 33
+   * milliseconds and a musical beat almost never does, so a tone started
+   * from a frame is a tone started at the wrong moment. Naming the instant
+   * instead lets a program queue the next fraction of a second of sound
+   * ahead of itself, leaving frames to be merely frequent rather than
+   * punctual.
+   *
+   * A time already past starts at once, so a program that misses a frame
+   * gets a late note rather than a silent gap. A time more than two seconds
+   * out is refused: a scheduled voice occupies one of the system's slots
+   * before it makes any sound. */
+  startAt?: number;
 }
 
 interface ResolvedToneOptions {
@@ -102,6 +115,7 @@ interface ResolvedToneOptions {
   sweepTo: number | undefined;
   sweepOver: number;
   duration: number | undefined;
+  startAt: number | undefined;
 }
 
 /** Thrown when one of `playTone`'s options is out of range. `option` names
@@ -135,6 +149,7 @@ function withDefaults(options: ToneOptions | undefined): ResolvedToneOptions {
     sweepTo: options?.sweepTo,
     sweepOver: options?.sweepOver ?? 0.1,
     duration: options?.duration,
+    startAt: options?.startAt,
   };
 }
 
@@ -151,6 +166,7 @@ const TONE_OPTIONS = [
   "sweepTo",
   "sweepOver",
   "duration",
+  "startAt",
 ];
 
 /** Re-throws the kernel's `"<option>: <requirement>"` rejections as a
@@ -189,17 +205,34 @@ export function playTone(
   const tone = withDefaults(options);
   const frequency = typeof pitch === "number" ? pitch : noteToFrequency(pitch);
   try {
-    return __sound_play(
-      tone.waveform,
-      frequency,
-      tone.amplitude,
-      [tone.attack, tone.decay, tone.sustainLevel, tone.release],
-      tone.sweepTo === undefined ? undefined : [tone.sweepTo, tone.sweepOver],
-      tone.duration,
-    );
+    return __sound_play(tone.waveform, frequency, tone);
   } catch (err) {
     rethrowToneError(err);
   }
+}
+
+/** Seconds of sound played since the system started.
+ *
+ * This is the clock `playTone`'s `startAt` is measured against, and it is the
+ * speaker's own rather than the wall's: it counts what has actually been
+ * played. A wall clock can't answer the question a schedule asks — how much
+ * sound has gone out, and so how much room is left before the queue runs dry
+ * — and it can jump, where this only ever moves forward.
+ *
+ * The reading trails the speaker slightly, and a schedule should be built so
+ * that doesn't matter: read it once, and derive every instant after that by
+ * arithmetic. Then a stale reading moves a whole sequence by the same
+ * inaudible amount, and the gaps within it stay exact.
+ *
+ * ```ts
+ * const start = currentTime() + 0.1;
+ * for (let beat = 0; beat < 4; beat++) {
+ *   playTone("C5", { startAt: start + beat * 0.5, duration: 0.1 });
+ * }
+ * ```
+ */
+export function currentTime(): number {
+  return __sound_current_time();
 }
 
 /** Releases the voice `id` names. It fades over its own release rather than
