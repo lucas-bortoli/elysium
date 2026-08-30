@@ -8,6 +8,7 @@ use rquickjs::{
     Context, Ctx, Error, Function, Module, Persistent, Result, Runtime as JsRuntime, Type, Value,
 };
 
+use crate::audio::{self, Audio, VoiceTable};
 use crate::bindings::bind;
 use crate::esm_resolver::{
     CompilingLoader, EmbeddedOrFileResolver, bootstrap_jsx_runtime, set_virtual_import_meta,
@@ -78,6 +79,11 @@ pub struct Devices {
     pub draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
     pub input: Rc<Input>,
     pub scale: Rc<Cell<u32>>,
+    /// The output device, absent when the machine has none or it couldn't be
+    /// opened. Every other device here is unconditional — sound is the one a
+    /// real machine may legitimately not have, so `ely:sound`'s bindings
+    /// degrade to silent no-ops rather than the kernel refusing to boot.
+    pub audio: Option<Rc<Audio>>,
     pub userland_root: PathBuf,
 }
 
@@ -89,6 +95,7 @@ impl Devices {
         draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
         input: Rc<Input>,
         scale: Rc<Cell<u32>>,
+        audio: Option<Rc<Audio>>,
         userland_root: PathBuf,
     ) -> Self {
         let userland_root = std::fs::canonicalize(&userland_root).unwrap_or_else(|err| {
@@ -101,6 +108,7 @@ impl Devices {
             draw_commands,
             input,
             scale,
+            audio,
             userland_root,
         }
     }
@@ -133,6 +141,15 @@ pub struct ElysiumRuntime {
     /// `Drop` purely so VM teardown has one obvious place every resource
     /// gets released.
     images: Rc<ImageTable>,
+    /// The sustaining voices `ely:sound`'s `playTone` started for this VM.
+    /// Holds no `Persistent` values, like `images` above — grouped with them
+    /// so VM teardown has one place every resource gets released. A voice
+    /// left sounding by a program that has gone away would otherwise drone
+    /// on for the life of the kernel.
+    voices: Rc<VoiceTable>,
+    /// This VM's handle on the shared output device, kept so `Drop` can
+    /// silence `voices`. `None` when the machine has no working device.
+    audio: Option<Rc<Audio>>,
     guard: Rc<GuardState>,
     /// Canonicalized once in [`Self::new`]; shared by `ely:image`'s
     /// `loadImage` (which resolves an absolute virtual path against it) and
@@ -161,6 +178,7 @@ impl ElysiumRuntime {
             draw_commands,
             input,
             scale,
+            audio,
             userland_root,
         } = devices.clone();
 
@@ -199,6 +217,7 @@ impl ElysiumRuntime {
         let message_handler = Rc::new(RefCell::new(None));
         let exit_requested = Rc::new(Cell::new(false));
         let images = Rc::new(ImageTable::new());
+        let voices = Rc::new(VoiceTable::new());
 
         context.with(|ctx| -> Result<()> {
             bind(&ctx, "print", print)?;
@@ -213,6 +232,7 @@ impl ElysiumRuntime {
             bootstrap_timers(&ctx, Rc::clone(&timers), Rc::clone(&microtasks))?;
             bootstrap_post_init_handlers(&ctx, Rc::clone(&post_init_handlers))?;
             image::bootstrap_image_bindings(&ctx, Rc::clone(&images), userland_root.clone())?;
+            audio::bootstrap_audio_bindings(&ctx, audio.clone(), Rc::clone(&voices))?;
             filesystem::bootstrap_filesystem_bindings(&ctx, userland_root.clone())?;
             process::bootstrap_process_bindings(
                 &ctx,
@@ -238,6 +258,8 @@ impl ElysiumRuntime {
             userland_root,
             exit_requested,
             images,
+            voices,
+            audio,
         })
     }
 
@@ -464,6 +486,9 @@ impl Drop for ElysiumRuntime {
             self.microtasks.borrow_mut().clear();
             *self.message_handler.borrow_mut() = None;
             self.images.clear_all();
+            if let Some(audio) = &self.audio {
+                self.voices.stop_all(audio);
+            }
         });
     }
 }

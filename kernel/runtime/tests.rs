@@ -25,6 +25,8 @@ use crate::process::ProcessChannel;
 
 pub(super) use super::{Devices, ElysiumRuntime, GuardedError, remap_deadlock_error};
 
+use crate::audio::{Audio, AudioLog};
+
 mod container;
 mod filesystem;
 mod graphics;
@@ -34,24 +36,32 @@ mod lifecycle;
 mod modules;
 mod path_helpers;
 mod process;
+mod sound;
 mod text;
 mod timers;
 
-/// Builds an `ElysiumRuntime` against `root` with a fresh scale cell and
-/// `Input`, detached from any process (id 0, a throwaway channel, no
-/// arguments).
-fn build_runtime(root: PathBuf) -> (ElysiumRuntime, Rc<Input>) {
+/// Builds an `ElysiumRuntime` against `root` with a fresh scale cell,
+/// `Input`, and a detached `Audio`, apart from any process (id 0, a
+/// throwaway channel, no arguments).
+///
+/// The returned [`AudioLog`] owns the receiving end of the audio command
+/// channel, so it has to outlive the runtime — drop it first and every
+/// later `playTone` reports the audio thread as gone. Helpers that discard
+/// it are fine only because their tests never play anything.
+fn build_runtime(root: PathBuf) -> (ElysiumRuntime, Rc<Input>, AudioLog) {
     let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
     let input = Rc::new(Input::new(Rc::clone(&scale)));
+    let (audio, audio_log) = Audio::detached();
     let devices = Devices::new(
         Rc::new(RefCell::new(Vec::new())),
         Rc::clone(&input),
         scale,
+        Some(Rc::new(audio)),
         root,
     );
     let runtime = ElysiumRuntime::new(&devices, 0, ProcessChannel::new(), None)
         .expect("failed to construct runtime");
-    (runtime, input)
+    (runtime, input, audio_log)
 }
 
 /// A fresh VM with the entry module already evaluated from `source`. Test
@@ -72,7 +82,7 @@ fn eval_with_input(source: &str) -> (ElysiumRuntime, Rc<Input>) {
 /// are only set when `name` canonicalizes to somewhere inside
 /// [`test_userland_root`].
 fn eval_named_with_input(name: &str, source: &str) -> (ElysiumRuntime, Rc<Input>) {
-    let (runtime, input) = build_runtime(test_userland_root());
+    let (runtime, input, _audio) = build_runtime(test_userland_root());
     runtime
         .eval_module(name, source)
         .expect("module failed to evaluate");
@@ -83,7 +93,7 @@ fn eval_named_with_input(name: &str, source: &str) -> (ElysiumRuntime, Rc<Input>
 /// needed by `ely:filesystem` tests that mutate the filesystem and so must
 /// run against a private [`test_scratch_root`].
 fn eval_with_root(root: PathBuf, source: &str) -> ElysiumRuntime {
-    let (runtime, _input) = build_runtime(root);
+    let (runtime, _input, _audio) = build_runtime(root);
     runtime
         .eval_module("test.ts", source)
         .expect("module failed to evaluate");
@@ -116,6 +126,37 @@ fn test_scratch_root() -> PathBuf {
     ));
     std::fs::create_dir_all(&dir).expect("failed to create scratch root");
     dir
+}
+
+/// Like [`eval`], but hands back the log of everything the VM asked the audio
+/// device to do, for `ely:sound`'s tests. The log must outlive the runtime —
+/// see [`build_runtime`].
+fn eval_with_audio(source: &str) -> (ElysiumRuntime, AudioLog) {
+    let (runtime, _input, audio_log) = build_runtime(test_userland_root());
+    runtime
+        .eval_module("test.ts", source)
+        .expect("module failed to evaluate");
+    (runtime, audio_log)
+}
+
+/// A VM built against a machine with no working output device, for the
+/// bindings' silent-no-op path.
+fn eval_without_audio(source: &str) -> ElysiumRuntime {
+    let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
+    let input = Rc::new(Input::new(Rc::clone(&scale)));
+    let devices = Devices::new(
+        Rc::new(RefCell::new(Vec::new())),
+        input,
+        scale,
+        None,
+        test_userland_root(),
+    );
+    let runtime = ElysiumRuntime::new(&devices, 0, ProcessChannel::new(), None)
+        .expect("failed to construct runtime");
+    runtime
+        .eval_module("test.ts", source)
+        .expect("module failed to evaluate");
+    runtime
 }
 
 /// Reads `globalThis[name]` out of a VM and converts it to `T`.

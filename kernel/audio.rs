@@ -33,18 +33,21 @@
 //! it ever needed to be rigorous.
 //!
 //! Unlike a missing window (load-bearing for everything else the kernel
-//! does), a missing or unusable audio device is not fatal: nothing depends
-//! on sound yet, and a real machine may simply have none. [`start`] returns
-//! `None` rather than panicking, logging the specific reason, so the kernel
-//! boots normally either way.
+//! does), a missing or unusable audio device is not fatal: a real machine
+//! may simply have none. [`start`] returns `None` rather than panicking,
+//! logging the specific reason, and `ely:sound`'s bindings degrade to silent
+//! no-ops, so both the kernel and every program boot normally either way.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use rquickjs::{Ctx, Result};
+
+use crate::bindings::bind;
 
 /// Hard ceiling on simultaneously sounding voices. A `play` past this is
 /// rejected and logged. Mixing cost is linear in the voice count and every
@@ -61,6 +64,11 @@ const MASTER_GAIN: f32 = 0.2;
 /// The state a 15-bit LFSR powers up in; see [`Waveform::Noise`].
 const LFSR_SEED: u16 = 0x7fff;
 
+/// The highest frequency `ely:sound` will accept. Past roughly 20 kHz a tone
+/// is inaudible, and past half the output rate it aliases back down into
+/// something that is audible but isn't the note that was asked for.
+const MAX_FREQUENCY_HZ: f32 = 20_000.0;
+
 /// The output rate to ask a device for, clamped into whatever range it
 /// actually supports. Mixing work is linear in both the voice count and the
 /// sample rate, and a device willing to run at 384 kHz will happily do so —
@@ -73,13 +81,7 @@ pub type VoiceId = u32;
 /// The shape of one voice's waveform, which is what decides its timbre —
 /// what a note sounds like, as opposed to [`Envelope`], which decides how it
 /// arrives and leaves.
-///
-/// Only `Triangle` has a caller in the kernel today, in
-/// [`Audio::play_boot_chime`]; the rest are exercised by this module's tests
-/// and wait for `ely:sound` to let a program name them, so dead-code
-/// analysis can't yet see them as used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum Waveform {
     Square,
     Triangle,
@@ -88,6 +90,20 @@ pub enum Waveform {
 }
 
 impl Waveform {
+    /// The waveform `id` names, or `None` if it names none of them. `ely:sound`
+    /// exports these same numbers as its `Waveform` constants, so this match
+    /// is the contract between the two rather than something inferred from
+    /// the order the variants happen to be declared in.
+    pub fn from_id(id: u8) -> Option<Waveform> {
+        match id {
+            0 => Some(Waveform::Square),
+            1 => Some(Waveform::Triangle),
+            2 => Some(Waveform::Sine),
+            3 => Some(Waveform::Noise),
+            _ => None,
+        }
+    }
+
     /// This waveform's value at `phase` (`0.0..1.0` through one cycle), in
     /// `-1.0..=1.0`. `lfsr` is only read by [`Waveform::Noise`]; the pitched
     /// waveforms ignore it.
@@ -253,9 +269,7 @@ impl Voice {
     }
 }
 
-/// What the main thread asks the audio thread to do. `Stop` is sent only by
-/// [`Audio::stop`], which nothing in the kernel calls yet — see that method.
-#[allow(dead_code)]
+/// What the main thread asks the audio thread to do.
 enum Command {
     Play { id: VoiceId, tone: Tone },
     Stop(VoiceId),
@@ -343,7 +357,7 @@ pub struct Audio {
     /// [`Mixer::add`] enforces the cap again where the true count lives.
     active: Arc<AtomicUsize>,
     next_id: Cell<VoiceId>,
-    _stream: cpal::Stream,
+    _stream: Option<cpal::Stream>,
 }
 
 impl Audio {
@@ -375,11 +389,6 @@ impl Audio {
     /// than cutting it. Ignores an id that has already finished, and a
     /// stream that has already stopped — either way there's nothing left to
     /// silence.
-    ///
-    /// Half of the control surface `ely:sound` will bind: the boot chime
-    /// gives every voice a duration and so never needs to stop one, which is
-    /// why nothing in the kernel calls this yet.
-    #[allow(dead_code)]
     pub fn stop(&self, id: VoiceId) {
         let _ = self.commands.send(Command::Stop(id));
     }
@@ -389,28 +398,152 @@ impl Audio {
     pub fn active_voices(&self) -> usize {
         self.active.load(Ordering::Relaxed)
     }
+}
 
-    /// Plays a short three-note chord, the one audible sign the audio device
-    /// came up. It lives in the kernel while the kernel is the only thing
-    /// that can make a sound; once `ely:sound` exists, the init program
-    /// plays it as its first act, the way it already owns what appears on
-    /// screen at startup.
-    pub fn play_boot_chime(&self) {
-        // A4, C#5, E5 — an A major triad.
-        for frequency_hz in [440.0, 554.37, 659.25] {
-            std::thread::sleep(Duration::from_millis(100));
-            self.play(Tone {
-                waveform: Waveform::Triangle,
-                frequency_hz,
-                amplitude: 0.6,
-                envelope: Envelope {
-                    attack_secs: 0.01,
-                    release_secs: 0.3,
-                    duration_secs: Some(0.4),
-                },
-            });
+/// The sustaining voices one VM started — the ones played with no duration,
+/// which would otherwise drone on forever if the program that started them
+/// faulted or exited. [`ElysiumRuntime`]'s `Drop` stops them, the same way it
+/// clears that VM's loaded images.
+///
+/// Timed voices are deliberately absent. A sound effect has to outlive the
+/// code that triggered it — a program destroys whatever made the noise and
+/// the noise still finishes — and a timed voice stops itself, so the table
+/// stays bounded by [`MAX_VOICES`] without ever being pruned.
+///
+/// [`ElysiumRuntime`]: crate::runtime::ElysiumRuntime
+pub struct VoiceTable {
+    sustaining: RefCell<Vec<VoiceId>>,
+}
+
+impl VoiceTable {
+    pub fn new() -> Self {
+        Self {
+            sustaining: RefCell::new(Vec::new()),
         }
     }
+
+    fn track(&self, id: VoiceId) {
+        self.sustaining.borrow_mut().push(id);
+    }
+
+    fn forget(&self, id: VoiceId) {
+        self.sustaining.borrow_mut().retain(|held| *held != id);
+    }
+
+    /// Releases every sustaining voice this VM started. They ring out over
+    /// their own release rather than being cut, so a faulted program's drone
+    /// fades instead of clicking off.
+    pub fn stop_all(&self, audio: &Audio) {
+        for id in self.sustaining.borrow_mut().drain(..) {
+            audio.stop(id);
+        }
+    }
+}
+
+/// Binds the hidden globals `ely:sound`'s embedded module wraps. A program
+/// never names one of these: it calls the module's exported `playTone` and
+/// `stopVoice`, which validate their arguments and call the matching global.
+///
+/// `audio` is `None` on a machine whose output device couldn't be opened, in
+/// which case every binding here is a silent no-op — `playTone` reports that
+/// nothing sounded and a program carries on, rather than the absence of a
+/// sound card becoming an error every program has to handle.
+pub fn bootstrap_audio_bindings(
+    ctx: &Ctx<'_>,
+    audio: Option<Rc<Audio>>,
+    voices: Rc<VoiceTable>,
+) -> Result<()> {
+    {
+        let audio = audio.clone();
+        let voices = Rc::clone(&voices);
+        bind(
+            ctx,
+            "__sound_play",
+            move |ctx: Ctx<'_>,
+                  waveform: u8,
+                  frequency_hz: f32,
+                  amplitude: f32,
+                  attack_secs: f32,
+                  release_secs: f32,
+                  duration_secs: Option<f32>|
+                  -> Result<Option<VoiceId>> {
+                // Everything is checked before the mixer sees any of it. The
+                // finiteness checks are the load-bearing ones: a NaN
+                // frequency never advances past its phase wrap, so the
+                // voice's every sample is NaN, and it poisons the whole
+                // mix for as long as it sounds.
+                let Some(waveform) = Waveform::from_id(waveform) else {
+                    return Err(rquickjs::Exception::throw_type(
+                        &ctx,
+                        &format!("{waveform} is not a valid waveform"),
+                    ));
+                };
+                if !frequency_hz.is_finite() || !(0.0..=MAX_FREQUENCY_HZ).contains(&frequency_hz) {
+                    return Err(rquickjs::Exception::throw_range(
+                        &ctx,
+                        &format!("frequency must be between 0 and {MAX_FREQUENCY_HZ} Hz"),
+                    ));
+                }
+                if !amplitude.is_finite() || !(0.0..=1.0).contains(&amplitude) {
+                    return Err(rquickjs::Exception::throw_range(
+                        &ctx,
+                        "amplitude must be between 0 and 1",
+                    ));
+                }
+                if !attack_secs.is_finite() || attack_secs < 0.0 {
+                    return Err(rquickjs::Exception::throw_range(
+                        &ctx,
+                        "attack must not be negative",
+                    ));
+                }
+                if !release_secs.is_finite() || release_secs < 0.0 {
+                    return Err(rquickjs::Exception::throw_range(
+                        &ctx,
+                        "release must not be negative",
+                    ));
+                }
+                if let Some(duration) = duration_secs
+                    && (!duration.is_finite() || duration <= 0.0)
+                {
+                    return Err(rquickjs::Exception::throw_range(
+                        &ctx,
+                        "duration must be greater than zero",
+                    ));
+                }
+
+                let Some(audio) = &audio else {
+                    return Ok(None);
+                };
+                let id = audio.play(Tone {
+                    waveform,
+                    frequency_hz,
+                    amplitude,
+                    envelope: Envelope {
+                        attack_secs,
+                        release_secs,
+                        duration_secs,
+                    },
+                });
+                // Only a voice that holds until stopped needs releasing when
+                // this VM goes away; a timed one sees itself out.
+                if let Some(id) = id
+                    && duration_secs.is_none()
+                {
+                    voices.track(id);
+                }
+                Ok(id)
+            },
+        )?;
+    }
+
+    bind(ctx, "__sound_stop", move |id: VoiceId| {
+        voices.forget(id);
+        if let Some(audio) = &audio {
+            audio.stop(id);
+        }
+    })?;
+
+    Ok(())
 }
 
 /// Opens the default output device and starts its stream, or returns `None`
@@ -490,13 +623,81 @@ pub fn start() -> Option<Audio> {
         commands,
         active,
         next_id: Cell::new(1),
-        _stream: stream,
+        _stream: Some(stream),
     })
+}
+
+/// An `Audio` with no output device, and the record of everything asked of
+/// it. Lets a test assert on the exact tones a program played without a
+/// sound card anywhere in the picture — the same reason [`Mixer::render`]
+/// takes a plain buffer.
+#[cfg(test)]
+pub(crate) struct AudioLog {
+    incoming: mpsc::Receiver<Command>,
+    active: Arc<AtomicUsize>,
+}
+
+#[cfg(test)]
+impl AudioLog {
+    fn drain(&self) -> Vec<Command> {
+        std::iter::from_fn(|| self.incoming.try_recv().ok()).collect()
+    }
+
+    /// The tones played since the last drain, in order. Draining empties the
+    /// channel, so call one of these once per stretch of interest.
+    pub(crate) fn played(&self) -> Vec<Tone> {
+        self.drain()
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Play { tone, .. } => Some(tone),
+                Command::Stop(_) => None,
+            })
+            .collect()
+    }
+
+    /// The voices stopped since the last drain, in order.
+    pub(crate) fn stopped(&self) -> Vec<VoiceId> {
+        self.drain()
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Stop(id) => Some(id),
+                Command::Play { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Makes the next `play` find every voice in use. Nothing stores to the
+    /// live count without a real output callback, so without this the
+    /// all-voices-busy path can't be reached from a test.
+    pub(crate) fn saturate(&self) {
+        self.active.store(MAX_VOICES, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+impl Audio {
+    /// An `Audio` wired to nothing, paired with the log of what it was asked
+    /// to do. The log holds the receiving end of the command channel, so it
+    /// has to outlive the `Audio`: drop it first and every later `play`
+    /// reports the audio thread as gone.
+    pub(crate) fn detached() -> (Audio, AudioLog) {
+        let (commands, incoming) = mpsc::channel();
+        let active = Arc::new(AtomicUsize::new(0));
+        let audio = Audio {
+            commands,
+            active: Arc::clone(&active),
+            next_id: Cell::new(1),
+            _stream: None,
+        };
+        (audio, AudioLog { incoming, active })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Envelope, MASTER_GAIN, MAX_VOICES, Mixer, Tone, Voice, Waveform, advance_lfsr};
+    use super::{
+        Audio, Envelope, MASTER_GAIN, MAX_VOICES, Mixer, Tone, Voice, Waveform, advance_lfsr,
+    };
 
     /// A tone that holds until stopped, with no attack or release ramp, so a
     /// test sees the waveform itself rather than an envelope shaping it.
@@ -840,6 +1041,35 @@ mod tests {
         for sample in out {
             assert!((-1.0..=1.0).contains(&sample), "{sample} left the range");
         }
+    }
+
+    #[test]
+    fn every_waveform_id_maps_to_its_own_waveform() {
+        // `ely:sound` exports these same numbers, so this mapping is a
+        // contract with userland rather than an internal detail.
+        assert_eq!(Waveform::from_id(0), Some(Waveform::Square));
+        assert_eq!(Waveform::from_id(1), Some(Waveform::Triangle));
+        assert_eq!(Waveform::from_id(2), Some(Waveform::Sine));
+        assert_eq!(Waveform::from_id(3), Some(Waveform::Noise));
+        assert_eq!(Waveform::from_id(4), None);
+    }
+
+    #[test]
+    fn a_detached_audio_records_what_it_was_asked_to_play() {
+        let (audio, log) = Audio::detached();
+        let id = audio.play(tone(Waveform::Sine, 220.0)).expect("plays");
+        audio.stop(id);
+
+        let played = log.played();
+        assert_eq!(played.len(), 1);
+        assert_eq!(played[0].waveform, Waveform::Sine);
+    }
+
+    #[test]
+    fn a_saturated_detached_audio_refuses_to_play() {
+        let (audio, log) = Audio::detached();
+        log.saturate();
+        assert!(audio.play(tone(Waveform::Square, 440.0)).is_none());
     }
 
     #[test]

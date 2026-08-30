@@ -17,7 +17,7 @@ fn relative_import_resolves_and_evaluates() {
 #[test]
 fn relative_import_escaping_userland_root_fails_to_resolve() {
     let entry = test_userland_root().join("entry.ts");
-    let (runtime, _input) = build_runtime(test_userland_root());
+    let (runtime, _input, _audio) = build_runtime(test_userland_root());
     let result = runtime.eval_module(entry.to_str().unwrap(), "import '../../../../etc/passwd';");
     assert!(result.is_err());
 }
