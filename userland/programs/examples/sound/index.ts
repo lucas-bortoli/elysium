@@ -1,11 +1,16 @@
 // The sound device: a keyboard you can play, four shapes to play it with,
-// and an octave you can move it to.
+// four envelopes to shape those, and an octave to move the whole thing to.
 //
 // The distinction worth watching here is who ends a note. A tone started
 // without a duration sustains until someone stops it, and the program that
 // started it owns it — so holding a key here starts a voice and letting go
 // stops one. What you hear on the way out is the release, which is why a
 // note fades instead of clicking off.
+//
+// `bell` makes that ownership obvious by separating it from the sound: it
+// sustains at nothing, so it rings out to silence while the key is still
+// held. The voice is still there, still yours, still occupying one of the
+// mixer's slots — it just has nothing left to say.
 //
 // This example never reads Escape — that key belongs to the menu, which is
 // still running while this draws. There is no input focus in Elysium: this
@@ -37,6 +42,7 @@ const SHAPES: { waveform: Waveform; key: Key; label: string }[] = [
   { waveform: Waveform.Sine, key: Key.Digit3, label: "3  sine" },
   { waveform: Waveform.Noise, key: Key.Digit4, label: "4  noise" },
 ];
+
 
 /** One playable key: which pitch it sounds, and which computer key plays it.
  * The octave isn't here — it moves, so a pad's note name is built when it's
@@ -80,18 +86,26 @@ const PADS: Pad[] = [...WHITE, ...BLACK];
 const LOWEST_OCTAVE = 0;
 const HIGHEST_OCTAVE = 7;
 
+/** The right edge of the content column, which every row shares. */
+const CONTENT_RIGHT = 624;
+
 const PICKER_X = 96;
-const PICKER_Y = 52;
+const SHAPE_PICKER_Y = 46;
+const ENVELOPE_PICKER_Y = 80;
 const PICKER_W = 120;
-const PICKER_H = 34;
+const PICKER_H = 28;
 const PICKER_PITCH = 136;
 
 const SCOPE_X = 96;
-const SCOPE_Y = 100;
-const SCOPE_W = 528;
-const SCOPE_H = 96;
-const SCOPE_AMP = 38;
-const SCOPE_CYCLES = 12;
+const SCOPE_Y = 122;
+const SCOPE_W = 380;
+const SCOPE_H = 76;
+const SCOPE_AMP = 30;
+const SCOPE_CYCLES = 8;
+
+const GRAPH_X = 492;
+const GRAPH_W = 132;
+const GRAPH_INSET = 8;
 
 const KEYS_X = 108;
 const WHITE_Y = 228;
@@ -130,6 +144,66 @@ function noteFor(pad: Pad, octave: number): Note | undefined {
   return isNote(name) ? name : undefined;
 }
 
+/** The five corners of an envelope's shape, for the panel beside the scope.
+ *
+ * The horizontal axis is not time. A held note has no fixed length, so the
+ * sustain gets a fixed slice of the width and the three real durations share
+ * what's left in proportion to each other — enough to compare two envelopes
+ * at a glance, not to measure one. */
+function envelopeShape(envelope: {
+  attack: number;
+  decay: number;
+  sustain: number;
+  release: number;
+}): Vector2d[] {
+  const left = GRAPH_X + GRAPH_INSET;
+  const width = GRAPH_W - GRAPH_INSET * 2;
+  const baseline = SCOPE_Y + SCOPE_H - GRAPH_INSET;
+  const peak = SCOPE_Y + GRAPH_INSET;
+
+  const hold = width * 0.28;
+  const timed = envelope.attack + envelope.decay + envelope.release;
+  const share = (seconds: number) =>
+    timed > 0 ? ((width - hold) * seconds) / timed : (width - hold) / 3;
+
+  const attackW = share(envelope.attack);
+  const decayW = share(envelope.decay);
+  const sustainY = baseline - envelope.sustain * (baseline - peak);
+
+  return [
+    { x: left, y: baseline },
+    { x: left + attackW, y: peak },
+    { x: left + attackW + decayW, y: sustainY },
+    { x: left + attackW + decayW + hold, y: sustainY },
+    { x: left + width, y: baseline },
+  ];
+}
+
+/** One envelope, and the digit that selects it. Four shapes chosen to sound
+ * as unlike each other as the same waveform can: a note that just holds, one
+ * that snaps and settles, one that rings out on its own, and one that swells.
+ * `bell` sustains at nothing, so it fades to silence while the key is still
+ * down — the voice is still yours to release, it just has nothing left to
+ * say. */
+interface Preset {
+  key: Key;
+  label: string;
+  attack: number;
+  decay: number;
+  sustain: number;
+  release: number;
+  /** The shape drawn in the panel, built once — it depends on nothing but
+   * the four numbers above. */
+  points: Vector2d[];
+}
+
+const PRESETS: Preset[] = [
+  { key: Key.Digit5, label: "5  organ", attack: 0.02, decay: 0, sustain: 1, release: 0.08 },
+  { key: Key.Digit6, label: "6  pluck", attack: 0.005, decay: 0.12, sustain: 0.15, release: 0.15 },
+  { key: Key.Digit7, label: "7  bell", attack: 0.002, decay: 0.9, sustain: 0, release: 0.4 },
+  { key: Key.Digit8, label: "8  pad", attack: 0.25, decay: 0.3, sustain: 0.7, release: 0.6 },
+].map((preset) => ({ ...preset, points: envelopeShape(preset) }));
+
 /** One cycle of `waveform` at `phase`, using the same arithmetic the mixer
  * does, so the trace is the shape being played rather than an impression of
  * it. */
@@ -152,6 +226,10 @@ function trace(waveform: Waveform): Vector2d[] {
 }
 
 let selected: Waveform = Waveform.Triangle;
+/** The envelope every new voice is given. Index 0 is `organ`, which is a
+ * plain hold — so the example starts sounding as it did before envelopes
+ * were selectable. */
+let preset: Preset = PRESETS[0]!;
 /** Which octave the row of white keys starts on. */
 let octave = 4;
 /** The selected shape's trace, rebuilt only when the shape changes — a frame
@@ -177,8 +255,12 @@ addUpdateTicker(() => {
     }
   }
 
-  // Held voices keep the pitch they started on, the same way they keep their
-  // shape — a voice's frequency is fixed when it starts.
+  for (const candidate of PRESETS) {
+    if (wasKeyPressed(candidate.key)) preset = candidate;
+  }
+
+  // Held voices keep the pitch and envelope they started on, the same way
+  // they keep their shape — all of it is fixed when a voice starts.
   if (wasKeyPressed(Key.ArrowLeft)) octave = Math.max(LOWEST_OCTAVE, octave - 1);
   if (wasKeyPressed(Key.ArrowRight)) octave = Math.min(HIGHEST_OCTAVE, octave + 1);
 
@@ -194,7 +276,13 @@ addUpdateTicker(() => {
       // affects the next key pressed.
       const note = noteFor(pad, octave);
       if (note !== undefined) {
-        const voice = playTone(noteToFrequency(note), { waveform: selected });
+        const voice = playTone(noteToFrequency(note), {
+          waveform: selected,
+          attack: preset.attack,
+          decay: preset.decay,
+          sustain: preset.sustain,
+          release: preset.release,
+        });
         // Absent means nothing sounded — no output device, or every voice
         // already in use. Neither is an error: the key simply has no voice to
         // release later.
@@ -210,6 +298,15 @@ addUpdateTicker(() => {
   }
 });
 
+/** One picker cell, filled when it is the current selection. */
+function pickerCell(index: number, y: number, label: string, active: boolean): void {
+  const x = PICKER_X + index * PICKER_PITCH;
+  fillRoundedRectangle(x, y, PICKER_W, PICKER_H, 6, active ? Color.Teal500 : Color.Slate800);
+  drawText(x + PICKER_W / 2, y + 10, label, active ? Color.Slate900 : Color.Slate300, {
+    align: "center",
+  });
+}
+
 addDrawHandler(() => {
   clearScreen(Color.Slate900);
   drawText(getWidth() / 2, 8, "Sound", Color.Amber300, {
@@ -218,20 +315,15 @@ addDrawHandler(() => {
   });
 
   drawText(PICKER_X, 34, "waveform — press 1 to 4", Color.Slate400);
+  drawText(CONTENT_RIGHT, 34, "envelope — press 5 to 8", Color.Slate400, {
+    align: "right",
+  });
+
   for (const [index, shape] of SHAPES.entries()) {
-    const x = PICKER_X + index * PICKER_PITCH;
-    const active = shape.waveform === selected;
-    fillRoundedRectangle(
-      x,
-      PICKER_Y,
-      PICKER_W,
-      PICKER_H,
-      6,
-      active ? Color.Teal500 : Color.Slate800,
-    );
-    drawText(x + PICKER_W / 2, PICKER_Y + 13, shape.label, active ? Color.Slate900 : Color.Slate300, {
-      align: "center",
-    });
+    pickerCell(index, SHAPE_PICKER_Y, shape.label, shape.waveform === selected);
+  }
+  for (const [index, candidate] of PRESETS.entries()) {
+    pickerCell(index, ENVELOPE_PICKER_Y, candidate.label, candidate === preset);
   }
 
   // The shape itself, twelve cycles of it, drawn whether or not anything is
@@ -241,8 +333,14 @@ addDrawHandler(() => {
   drawLine(SCOPE_X + 1, middle + 0.5, SCOPE_X + SCOPE_W - 1, middle + 0.5, Color.Slate800, 1);
   drawPolyline(traced, Color.Rose400, 2);
 
+  // The envelope beside the shape: what the note's loudness does, next to
+  // what one cycle of it looks like. A different accent so two panels side
+  // by side don't read as one graph.
+  strokeRectangle(GRAPH_X, SCOPE_Y, GRAPH_W, SCOPE_H, Color.Slate700, 1);
+  drawPolyline(preset.points, Color.Amber400, 2);
+
   drawText(PICKER_X, 206, "hold a key to sustain — let go to hear the release", Color.Slate400);
-  drawText(SCOPE_X + SCOPE_W, 206, `← octave ${octave} →`, Color.Slate300, {
+  drawText(CONTENT_RIGHT, 206, `← octave ${octave} →`, Color.Slate300, {
     align: "right",
   });
 
