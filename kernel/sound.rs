@@ -219,6 +219,22 @@ enum Curve {
     Linear,
 }
 
+/// Which of a voice's settings a ramp is moving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RampTarget {
+    Frequency,
+    Amplitude,
+}
+
+impl RampTarget {
+    fn curve(self) -> Curve {
+        match self {
+            RampTarget::Frequency => Curve::Geometric,
+            RampTarget::Amplitude => Curve::Linear,
+        }
+    }
+}
+
 /// One of a voice's settings moving to another over a stretch of samples.
 ///
 /// A [`Sweep`] is this fixed at the note's start, and a bend is this arriving
@@ -237,9 +253,11 @@ impl Ramp {
     /// Where the value sits at `sample`: `from` before the ramp begins, `to`
     /// once it is done.
     fn value_at(&self, sample: u64) -> f32 {
-        if sample <= self.starts_at_sample {
+        if sample < self.starts_at_sample {
             return self.from;
         }
+        // A ramp with no length arrives the moment it begins, rather than one
+        // sample later.
         if self.over_samples == 0 {
             return self.to;
         }
@@ -357,6 +375,26 @@ pub struct ToneParts {
 pub struct ToneLimits {
     pub max_frequency_hz: f32,
     pub now_secs: f64,
+}
+
+/// Checks a bend's target pitch and the time it takes.
+pub fn checked_bend(
+    frequency_hz: f32,
+    over_secs: f32,
+    max_frequency_hz: f32,
+) -> std::result::Result<(f32, f32), ToneError> {
+    Ok((
+        checked_frequency("frequency", frequency_hz, max_frequency_hz)?,
+        checked_secs("overSeconds", over_secs)?,
+    ))
+}
+
+/// Checks a fade's target level and the time it takes.
+pub fn checked_fade(level: f32, over_secs: f32) -> std::result::Result<(f32, f32), ToneError> {
+    Ok((
+        checked_level("level", level)?,
+        checked_secs("overSeconds", over_secs)?,
+    ))
 }
 
 /// Assembles a [`Tone`] out of the loose numbers a program passed, refusing
@@ -573,6 +611,33 @@ impl Voice {
         }
     }
 
+    /// Sends one of this voice's settings toward `to` over `over_samples`,
+    /// starting now — or, on a voice still waiting for its moment, when the
+    /// voice itself begins. A ramp that ran while the voice was silent would
+    /// be over before anyone heard it.
+    ///
+    /// It starts from wherever the setting actually is, so nothing jumps: a
+    /// pitch caught mid-sweep bends on from there rather than snapping back
+    /// to the note's own frequency first.
+    fn ramp_to(&mut self, target: RampTarget, to: f32, over_samples: u64, sample: u64) {
+        let starts_at_sample = sample.max(self.starts_at_sample);
+        let ramp = |from| Ramp {
+            from,
+            to,
+            starts_at_sample,
+            over_samples,
+            curve: target.curve(),
+        };
+        match target {
+            RampTarget::Frequency => {
+                self.frequency_ramp = Some(ramp(self.frequency_at(starts_at_sample)));
+            }
+            RampTarget::Amplitude => {
+                self.amplitude_ramp = Some(ramp(self.amplitude_at(starts_at_sample)));
+            }
+        }
+    }
+
     /// Begins the release. Cutting a voice off outright would reintroduce
     /// exactly the click the envelope exists to remove, so a stop rings out
     /// over `release_secs` instead. Already-releasing voices keep the
@@ -597,6 +662,13 @@ enum Command {
         tone: Tone,
     },
     Stop(VoiceId),
+    /// Sends one setting of a sounding voice toward a new value.
+    Ramp {
+        id: VoiceId,
+        target: RampTarget,
+        to: f32,
+        over_secs: f32,
+    },
     /// Releases every sustaining voice `owner` started, sent when its VM
     /// goes away. Timed voices are left alone: a sound effect has to outlive
     /// the code that triggered it.
@@ -699,6 +771,16 @@ impl Mixer {
         }
     }
 
+    /// Sends `id`'s setting toward `to`. An id whose voice has already
+    /// finished — or which lost its slot to a newer sound — is a no-op, the
+    /// same as stopping one.
+    fn ramp(&mut self, id: VoiceId, target: RampTarget, to: f32, over_samples: u64) {
+        let clock = self.clock_samples;
+        if let Some(voice) = self.voices.iter_mut().find(|voice| voice.id == id) {
+            voice.ramp_to(target, to, over_samples, clock);
+        }
+    }
+
     /// Releases every sustaining voice `owner` started. A timed voice is
     /// left to finish on its own, so a sound effect still outlives the
     /// program that triggered it.
@@ -796,6 +878,19 @@ impl Sound {
         }
     }
 
+    /// Sends one setting of the voice `id` names toward `to` across
+    /// `over_secs`, rather than stepping it. A step in loudness is exactly
+    /// the discontinuity an envelope's attack exists to remove, and a step in
+    /// pitch is heard as a different note rather than the same one moving.
+    pub fn ramp(&self, id: VoiceId, target: RampTarget, to: f32, over_secs: f32) {
+        let _ = self.commands.send(Command::Ramp {
+            id,
+            target,
+            to,
+            over_secs,
+        });
+    }
+
     /// Releases the voice `id` names, ringing it out over its release rather
     /// than cutting it. Ignores an id that has already finished, and a
     /// stream that has already stopped — either way there's nothing left to
@@ -829,6 +924,22 @@ impl Sound {
     pub fn release_sustaining(&self, owner: ProcessId) {
         let _ = self.commands.send(Command::ReleaseSustaining(owner));
     }
+}
+
+/// Turns a refused option into the exception `ely:sound` re-types.
+///
+/// Tagged `option: requirement`, which the module splits back apart into a
+/// `ToneOptionError`. A bad waveform names no point on any scale, so it is a
+/// type error and stays untagged: the module re-types only what it can report
+/// as an out-of-range option.
+fn throw_tone_error(ctx: &Ctx<'_>, err: &ToneError) -> rquickjs::Error {
+    if err.option == "waveform" {
+        return rquickjs::Exception::throw_type(
+            ctx,
+            &format!("{} {}", err.option, err.requirement),
+        );
+    }
+    rquickjs::Exception::throw_range(ctx, &format!("{}: {}", err.option, err.requirement))
 }
 
 /// Seconds of sound played so far, falling back to elapsed wall time on a
@@ -897,23 +1008,8 @@ pub fn bootstrap_sound_bindings(
                     now_secs: current_time(sound.as_deref()),
                 };
 
-                let tone = tone_from_parts(parts, limits).map_err(|err| {
-                    // A bad waveform names no point on any scale, so it is a
-                    // type error and stays untagged: `ely:sound` re-types
-                    // only what it can report as an out-of-range option.
-                    if err.option == "waveform" {
-                        return rquickjs::Exception::throw_type(
-                            &ctx,
-                            &format!("{} {}", err.option, err.requirement),
-                        );
-                    }
-                    // Tagged `option: requirement`, which `ely:sound` splits
-                    // back apart into a `ToneOptionError`.
-                    rquickjs::Exception::throw_range(
-                        &ctx,
-                        &format!("{}: {}", err.option, err.requirement),
-                    )
-                })?;
+                let tone =
+                    tone_from_parts(parts, limits).map_err(|err| throw_tone_error(&ctx, &err))?;
 
                 let Some(sound) = &sound else {
                     return Ok(None);
@@ -928,6 +1024,42 @@ pub fn bootstrap_sound_bindings(
         bind(ctx, "__sound_current_time", move || {
             current_time(sound.as_deref())
         })?;
+    }
+
+    {
+        let sound = sound.clone();
+        bind(
+            ctx,
+            "__sound_bend",
+            move |ctx: Ctx<'_>, id: VoiceId, frequency_hz: f32, over_secs: f32| -> Result<()> {
+                let max_frequency_hz = sound
+                    .as_ref()
+                    .map_or(MAX_FREQUENCY_HZ, |sound| sound.max_frequency_hz());
+                let (frequency_hz, over_secs) =
+                    checked_bend(frequency_hz, over_secs, max_frequency_hz)
+                        .map_err(|err| throw_tone_error(&ctx, &err))?;
+                if let Some(sound) = &sound {
+                    sound.ramp(id, RampTarget::Frequency, frequency_hz, over_secs);
+                }
+                Ok(())
+            },
+        )?;
+    }
+
+    {
+        let sound = sound.clone();
+        bind(
+            ctx,
+            "__sound_fade",
+            move |ctx: Ctx<'_>, id: VoiceId, level: f32, over_secs: f32| -> Result<()> {
+                let (level, over_secs) =
+                    checked_fade(level, over_secs).map_err(|err| throw_tone_error(&ctx, &err))?;
+                if let Some(sound) = &sound {
+                    sound.ramp(id, RampTarget::Amplitude, level, over_secs);
+                }
+                Ok(())
+            },
+        )?;
     }
 
     bind(ctx, "__sound_stop", move |id: VoiceId| {
@@ -991,6 +1123,12 @@ pub fn start() -> Option<Sound> {
                         mixer.add(Voice::new(id, owner, tone, starts_at, sample_rate));
                     }
                     Command::Stop(id) => mixer.stop(id),
+                    Command::Ramp {
+                        id,
+                        target,
+                        to,
+                        over_secs,
+                    } => mixer.ramp(id, target, to, (over_secs * sample_rate) as u64),
                     Command::ReleaseSustaining(owner) => mixer.release_sustaining(owner),
                 }
             }
@@ -1058,6 +1196,24 @@ impl SoundLog {
             .iter()
             .filter_map(|command| match command {
                 Command::Play { tone, .. } => Some(*tone),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The ramps asked for so far, as `(id, target, to, over_secs)`.
+    pub(crate) fn ramped(&self) -> Vec<(VoiceId, RampTarget, f32, f32)> {
+        self.drain();
+        self.seen
+            .borrow()
+            .iter()
+            .filter_map(|command| match command {
+                Command::Ramp {
+                    id,
+                    target,
+                    to,
+                    over_secs,
+                } => Some((*id, *target, *to, *over_secs)),
                 _ => None,
             })
             .collect()
@@ -2087,6 +2243,155 @@ mod tests {
 
         assert_eq!(mixer.active(), 1, "its queued voice is dropped");
         assert_eq!(mixer.voices[0].id, 2, "another VM's is not");
+    }
+
+    #[test]
+    fn a_bend_moves_the_pitch_across_its_ramp_rather_than_jumping() {
+        let mut mixer = Mixer::new();
+        mixer.add(voice(1, tone(Waveform::Square, 400.0)));
+        // Half a ramp of 100 samples, so half way geometrically between 400
+        // and 100 — which is 200, their geometric mean, not 250.
+        mixer.ramp(1, super::RampTarget::Frequency, 100.0, 100);
+
+        let sounding = &mixer.voices[0];
+        assert!(
+            (sounding.frequency_at(0) - 400.0).abs() < 1.0,
+            "starts where it was"
+        );
+        assert!(
+            (sounding.frequency_at(50) - 200.0).abs() < 1.0,
+            "half way is the geometric middle, got {}",
+            sounding.frequency_at(50)
+        );
+        assert!(
+            (sounding.frequency_at(100) - 100.0).abs() < 1.0,
+            "and arrives"
+        );
+    }
+
+    #[test]
+    fn a_bend_starts_from_the_pitch_the_voice_actually_had() {
+        // Caught mid-sweep, it carries on from where it was rather than
+        // snapping back to the note's own frequency first.
+        let mut swept = tone(Waveform::Square, 400.0);
+        swept.sweep = Some(Sweep {
+            to_hz: 100.0,
+            over_secs: 1.0,
+        });
+        let mut mixer = Mixer::new();
+        mixer.add(voice(1, swept));
+
+        let mut out = vec![0.0; 500];
+        mixer.render(&mut out, 1, RATE);
+        let mid_sweep = mixer.voices[0].frequency_at(500);
+        assert!((mid_sweep - 200.0).abs() < 1.0, "half way down the sweep");
+
+        mixer.ramp(1, super::RampTarget::Frequency, 800.0, 100);
+        assert!(
+            (mixer.voices[0].frequency_at(500) - mid_sweep).abs() < 1.0,
+            "the bend begins from there, with no step"
+        );
+    }
+
+    #[test]
+    fn a_bend_replaces_a_sweep_still_in_progress() {
+        let mut swept = tone(Waveform::Square, 400.0);
+        swept.sweep = Some(Sweep {
+            to_hz: 100.0,
+            over_secs: 1.0,
+        });
+        let mut mixer = Mixer::new();
+        mixer.add(voice(1, swept));
+        mixer.ramp(1, super::RampTarget::Frequency, 800.0, 100);
+
+        // The sweep was heading for 100; one thing decides a voice's pitch,
+        // and the newer instruction is it.
+        assert!(
+            (mixer.voices[0].frequency_at(100) - 800.0).abs() < 1.0,
+            "the bend's target wins"
+        );
+    }
+
+    #[test]
+    fn a_bend_on_a_scheduled_voice_begins_when_the_voice_does() {
+        // A ramp that ran while the voice was still silent would be over
+        // before anyone heard it.
+        let mut mixer = Mixer::new();
+        mixer.add(Voice::new(1, OWNER, scheduled(1.0), 1000, RATE));
+        mixer.ramp(1, super::RampTarget::Frequency, 100.0, 100);
+
+        let sounding = &mixer.voices[0];
+        assert!(
+            (sounding.frequency_at(1000) - sounding.tone.frequency_hz).abs() < 1e-3,
+            "still at its own pitch when it starts"
+        );
+        assert!(
+            (sounding.frequency_at(1100) - 100.0).abs() < 1.0,
+            "and arrives a ramp after that"
+        );
+    }
+
+    #[test]
+    fn a_fade_moves_the_level_without_a_step() {
+        let mut mixer = Mixer::new();
+        mixer.add(voice(1, tone(Waveform::Square, 100.0)));
+        mixer.ramp(1, super::RampTarget::Amplitude, 0.0, 100);
+
+        let sounding = &mixer.voices[0];
+        assert!(
+            (sounding.amplitude_at(0) - 1.0).abs() < 1e-5,
+            "starts where it was"
+        );
+        assert!(
+            (sounding.amplitude_at(50) - 0.5).abs() < 1e-5,
+            "linear, unlike pitch"
+        );
+        assert!(sounding.amplitude_at(100).abs() < 1e-5, "and arrives");
+    }
+
+    #[test]
+    fn a_fade_still_leaves_the_envelope_shaping_the_note() {
+        // Fading scales the voice's own level; the envelope multiplies on
+        // top rather than being overridden by it.
+        let mut shaped = tone(Waveform::Square, 0.0);
+        shaped.envelope.sustain_level = 0.5;
+        let mut mixer = Mixer::new();
+        mixer.add(voice(1, shaped));
+        mixer.ramp(1, super::RampTarget::Amplitude, 0.4, 0);
+
+        let mut out = vec![0.0; 4];
+        mixer.render(&mut out, 1, RATE);
+        assert!(
+            (unscaled(out)[0] - 0.2).abs() < 1e-5,
+            "half the envelope times four tenths of the level"
+        );
+    }
+
+    #[test]
+    fn a_faded_out_voice_is_the_first_one_stolen() {
+        // It is genuinely inaudible, so it is what a listener misses least.
+        let mut mixer = full_mixer();
+        mixer.ramp(1, super::RampTarget::Amplitude, 0.0, 0);
+        mixer.add(voice(9999, tone(Waveform::Square, 100.0)));
+
+        assert!(
+            !mixer.voices.iter().any(|voice| voice.id == 1),
+            "the faded voice gave up its slot"
+        );
+    }
+
+    #[test]
+    fn bending_a_voice_that_has_finished_does_nothing() {
+        let mut shaped = tone(Waveform::Square, 100.0);
+        shaped.envelope.duration_secs = Some(0.001);
+        let mut mixer = Mixer::new();
+        mixer.add(voice(1, shaped));
+        let mut out = vec![0.0; 10];
+        mixer.render(&mut out, 1, RATE);
+        assert_eq!(mixer.active(), 0);
+
+        mixer.ramp(1, super::RampTarget::Frequency, 200.0, 10);
+        assert_eq!(mixer.active(), 0, "and nothing came back");
     }
 
     #[test]
