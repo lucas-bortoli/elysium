@@ -147,6 +147,84 @@ the same generator at two churn rates.
 
 ---
 
+## Changing a note while it sounds
+
+Everything above is fixed when a note starts. But a note that has begun isn't
+finished being played — a singer bends into a pitch, a string player leans a
+vibrato into a long note, an organist swells a chord. Those are the difference
+between notes and music, and none of them are a second note.
+
+Two functions move a voice that's already sounding:
+
+```ts
+const voice = playTone("C4");
+bendVoice(voice, "E4", { overSeconds: 0.2 });   // glide up a third
+fadeVoice(voice, 0.1, { overSeconds: 1.5 });    // and sink away
+```
+
+The note keeps sounding throughout. Its envelope is undisturbed, so there's
+none of the click a retriggered note would have, and a held chord bent all at
+once glides as one thing rather than restarting as another.
+
+### They slide, they don't jump
+
+Neither of these is a setter, which is why neither is called `set`. A setting
+that changes instantly is a step in the signal, and **a step is heard as a
+click** — the same click the attack exists to remove, arriving in the middle
+of a note instead of at its start. So both take a time to travel over, and
+default to a hundredth of a second when you don't name one, for exactly the
+reason the default attack is a hundredth of a second.
+
+A slide starts from **where the value actually is**, not from where the note
+began. Bend a note that's still moving through its `sweepTo` and it carries on
+from wherever it had got to. That also means a bend *replaces* a sweep still
+in progress: one thing decides a voice's pitch, and the newer instruction is
+it. A sweep, in fact, is the same mechanism — a slide fixed at the note's
+start rather than arriving later.
+
+Fading moves the voice's own loudness, which the envelope still shapes on top
+of. The two multiply rather than fighting: fade to a quarter and a note still
+attacks, decays and sustains, just quieter throughout. A voice faded to `0` is
+silent and **still a voice**, holding its slot until it's released — the same
+as one whose `sustainLevel` is `0`, and the first thing given up when the
+speaker runs short of slots, since it's what nobody can hear.
+
+An id whose voice has already finished, or which lost its slot to a newer
+sound, is quietly ignored, exactly like stopping one.
+
+### Wobbles are described, not driven
+
+Vibrato and tremolo work differently, and it's worth knowing why. They're
+given to a note when it starts, rather than applied to it afterwards:
+
+```ts
+playTone("A4", { vibrato: { depth: 0.3, rate: 6 } });
+playTone("A4", { tremolo: { depth: 0.4, rate: 3 } });
+```
+
+You could imagine building a vibrato out of `bendVoice`, nudging the pitch
+back and forth every frame. It would sound wrong, and the arithmetic says why:
+a frame arrives about thirty times a second, so a 6 Hz wobble would get **five
+steps per cycle**. That isn't a wobble, it's a staircase. Naming it instead
+lets the system compute it for every single sample.
+
+Because it belongs to the note, it needs no sense of timing at all — it starts
+when the note does, and a note waiting on a `startAt` isn't wobbling yet.
+
+A vibrato's depth is in **semitones**, not hertz, which is the unit that makes
+it mean something: 0.3 semitones is the same musical wobble whether it's under
+a low note or a high one, where 3 Hz would be a shrug on one and a lurch on
+the other. A tremolo's depth is a fraction of the note's own loudness.
+
+### Why none of these take `startAt`
+
+Scheduling exists because the ear is exact about *when a note begins*. It's
+much vaguer about when a gesture begins: a slide that starts a frame late is
+undetectable, and the slide's own duration smooths its arrival anyway. So
+these apply when they arrive, and `startAt` goes on meaning exactly one thing.
+
+---
+
 ## Naming notes
 
 `playTone` takes a note name wherever it takes a frequency:
@@ -348,6 +426,8 @@ furthest in the future that gives way first.
 | `sweepOver` | `0.1` | ≥ 0 seconds | how long the slide takes |
 | `duration` | *none* | > 0 seconds | omitted, the voice is yours to stop |
 | `startAt` | *now* | within 2s of now | the instant it begins |
+| `vibrato` | *none* | depth 0-12 semitones, rate 0-50 | pitch wobble |
+| `tremolo` | *none* | depth 0-1, rate 0-50 | loudness wobble |
 
 Voices **add together** rather than replacing one another, so several loud
 ones at once share the room. The system leaves headroom for that, and a mix
@@ -384,6 +464,8 @@ rules apart without reading the message.
 | `ToneOptionError` | a `duration` that isn't greater than zero |
 | `ToneOptionError` | `frequency` or `sweepTo` outside what the speaker can sound |
 | `ToneOptionError` | a `startAt` more than two seconds ahead of now |
+| `ToneOptionError` | a `vibrato` or `tremolo` whose depth or rate is out of range |
+| `ToneOptionError` | a `level` or `overSeconds` `bendVoice`/`fadeVoice` won't take |
 | `TypeError` | a `waveform` that isn't one of the four |
 | `UnknownNoteError` | a note name that isn't one |
 
