@@ -105,6 +105,30 @@ export interface ToneOptions {
    * out is refused: a scheduled voice occupies one of the system's slots
    * before it makes any sound. */
   startAt?: number;
+  /** Wobbles the pitch either side of itself, over and over — `depth` in
+   * semitones, `rate` in wobbles per second. A singer's or a violinist's
+   * vibrato is roughly `{ depth: 0.3, rate: 6 }`.
+   *
+   * Described here rather than driven from your own code because a program
+   * can only nudge a voice once a frame: at 30 frames a second a 6 Hz wobble
+   * would get five steps a cycle and sound like stairs. Named, it is computed
+   * for every sample. */
+  vibrato?: Wobble;
+  /** Wobbles the loudness either side of itself — `depth` as a fraction of
+   * the voice's own level, `rate` in wobbles per second. The same reasoning
+   * as `vibrato`. */
+  tremolo?: Wobble;
+}
+
+/** A setting wobbling either side of itself, over and over. The wobble starts
+ * when its note does. */
+export interface Wobble {
+  /** How far either side. Semitones for a vibrato, up to 12; a fraction of
+   * the level for a tremolo, up to 1. */
+  depth: number;
+  /** Wobbles per second, up to 50 — past which it stops being heard as a
+   * wobble at all and becomes part of the timbre. */
+  rate: number;
 }
 
 interface ResolvedToneOptions {
@@ -118,6 +142,8 @@ interface ResolvedToneOptions {
   sweepOver: number;
   duration: number | undefined;
   startAt: number | undefined;
+  vibrato: number[] | undefined;
+  tremolo: number[] | undefined;
 }
 
 /** Thrown when one of `playTone`'s options is out of range. `option` names
@@ -152,7 +178,15 @@ function withDefaults(options: ToneOptions | undefined): ResolvedToneOptions {
     sweepOver: options?.sweepOver ?? 0.1,
     duration: options?.duration,
     startAt: options?.startAt,
+    vibrato: flatten(options?.vibrato),
+    tremolo: flatten(options?.tremolo),
   };
+}
+
+/** A wobble crosses to the kernel as a `[depth, rate]` pair, the way the
+ * envelope's stages do — the two are one setting, not two. */
+function flatten(wobble: Wobble | undefined): number[] | undefined {
+  return wobble === undefined ? undefined : [wobble.depth, wobble.rate];
 }
 
 /** Every option name the kernel can tag a rejection with. A message whose
@@ -171,6 +205,8 @@ const TONE_OPTIONS = [
   "startAt",
   "level",
   "overSeconds",
+  "vibrato",
+  "tremolo",
 ];
 
 /** Re-throws the kernel's `"<option>: <requirement>"` rejections as a

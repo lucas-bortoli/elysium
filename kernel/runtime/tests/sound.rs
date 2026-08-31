@@ -704,3 +704,38 @@ fn bending_a_voice_that_was_never_played_still_reaches_the_mixer() {
         eval_with_audio("import { bendVoice } from 'ely:sound'; bendVoice(9999, 440);");
     assert_eq!(log.ramped()[0].0, 9999);
 }
+
+#[test]
+fn a_wobble_reaches_the_mixer_as_it_was_written() {
+    let (_runtime, log) = eval_with_audio(
+        "import { playTone } from 'ely:sound'; \
+         playTone(440, { vibrato: { depth: 0.3, rate: 6 }, \
+                         tremolo: { depth: 0.4, rate: 3 } });",
+    );
+    let tone = &log.played()[0];
+    let vibrato = tone.vibrato.expect("a vibrato");
+    assert_eq!((vibrato.depth, vibrato.rate_hz), (0.3, 6.0));
+    let tremolo = tone.tremolo.expect("a tremolo");
+    assert_eq!((tremolo.depth, tremolo.rate_hz), (0.4, 3.0));
+}
+
+#[test]
+fn a_tone_without_a_wobble_carries_none() {
+    let (_runtime, log) = eval_with_audio("import { playTone } from 'ely:sound'; playTone(440);");
+    assert!(log.played()[0].vibrato.is_none());
+    assert!(log.played()[0].tremolo.is_none());
+}
+
+#[test]
+fn an_out_of_range_wobble_blames_the_wobble_rather_than_its_parts() {
+    // A nested option still reports itself the way a flat one does; the
+    // message names which half was wrong.
+    assert_eq!(
+        rejected_option("playTone(440, { vibrato: { depth: 99, rate: 6 } });"),
+        "vibrato"
+    );
+    assert_eq!(
+        rejected_option("playTone(440, { tremolo: { depth: 0.5, rate: 999 } });"),
+        "tremolo"
+    );
+}

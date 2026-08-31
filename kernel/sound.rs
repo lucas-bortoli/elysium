@@ -274,6 +274,28 @@ impl Ramp {
     }
 }
 
+/// A setting wobbling either side of itself, over and over.
+///
+/// Periodic modulation has to be described rather than driven: a program
+/// nudging a voice from its update ticker gets one step per frame, so a 6 Hz
+/// wobble at 30 frames a second is five steps a cycle and sounds like stairs.
+/// Named here, it is computed for every sample.
+#[derive(Debug, Clone, Copy)]
+pub struct Wobble {
+    /// Semitones either side for a vibrato; a fraction of the level for a
+    /// tremolo.
+    pub depth: f32,
+    pub rate_hz: f32,
+}
+
+impl Wobble {
+    /// Where in the wobble `elapsed` seconds sits, in `-1.0..=1.0`. Measured
+    /// from the voice's own start, so a wobble begins when its note does.
+    fn at(&self, elapsed: f32) -> f32 {
+        (elapsed * self.rate_hz * std::f32::consts::TAU).sin()
+    }
+}
+
 /// Everything [`Sound::play`] needs to start one voice.
 #[derive(Debug, Clone, Copy)]
 pub struct Tone {
@@ -284,6 +306,12 @@ pub struct Tone {
     pub envelope: Envelope,
     /// Where the pitch slides to, if it slides at all.
     pub sweep: Option<Sweep>,
+    /// Wobbles the pitch either side of itself, in semitones — the unit the
+    /// effect is described in, and the one that sounds the same depth at
+    /// every pitch.
+    pub vibrato: Option<Wobble>,
+    /// Wobbles the loudness either side of itself.
+    pub tremolo: Option<Wobble>,
     /// When this voice should begin, on the same clock [`Sound::current_time`]
     /// reports. `None` starts it as soon as the mixer sees it.
     ///
@@ -367,6 +395,9 @@ pub struct ToneParts {
     pub sweep_over_secs: f32,
     pub duration_secs: Option<f32>,
     pub starts_at_secs: Option<f64>,
+    /// Depth and rate, as a pair, or absent.
+    pub vibrato: Option<[f32; 2]>,
+    pub tremolo: Option<[f32; 2]>,
 }
 
 /// What the device this tone is bound for can actually do, and when it is.
@@ -375,6 +406,41 @@ pub struct ToneParts {
 pub struct ToneLimits {
     pub max_frequency_hz: f32,
     pub now_secs: f64,
+}
+
+/// The deepest a vibrato may wobble. An octave either side is already far
+/// past anything musical.
+const MAX_VIBRATO_SEMITONES: f32 = 12.0;
+
+/// The fastest either wobble may run. Past this it stops being heard as a
+/// wobble at all and becomes part of the timbre.
+const MAX_WOBBLE_RATE_HZ: f32 = 50.0;
+
+/// Checks one wobble, blaming the option as a whole and naming the part that
+/// was wrong — so a nested option still reports itself the way a flat one
+/// does.
+fn checked_wobble(
+    option: &'static str,
+    wobble: Option<[f32; 2]>,
+    max_depth: f32,
+    depth_units: &str,
+) -> std::result::Result<Option<Wobble>, ToneError> {
+    let Some([depth, rate_hz]) = wobble else {
+        return Ok(None);
+    };
+    if !depth.is_finite() || !(0.0..=max_depth).contains(&depth) {
+        return Err(ToneError::new(
+            option,
+            format!("needs a depth between 0 and {max_depth} {depth_units}"),
+        ));
+    }
+    if !rate_hz.is_finite() || !(0.0..=MAX_WOBBLE_RATE_HZ).contains(&rate_hz) {
+        return Err(ToneError::new(
+            option,
+            format!("needs a rate between 0 and {MAX_WOBBLE_RATE_HZ} Hz"),
+        ));
+    }
+    Ok(Some(Wobble { depth, rate_hz }))
 }
 
 /// Checks a bend's target pitch and the time it takes.
@@ -456,6 +522,8 @@ pub fn tone_from_parts(
             duration_secs: parts.duration_secs,
         },
         sweep,
+        vibrato: checked_wobble("vibrato", parts.vibrato, MAX_VIBRATO_SEMITONES, "semitones")?,
+        tremolo: checked_wobble("tremolo", parts.tremolo, 1.0, "")?,
         starts_at_secs: parts.starts_at_secs,
     })
 }
@@ -535,8 +603,15 @@ impl Voice {
 
     /// This voice's own level at `sample`, before the envelope shapes it.
     fn amplitude_at(&self, sample: u64) -> f32 {
-        self.amplitude_ramp
-            .map_or(self.tone.amplitude, |ramp| ramp.value_at(sample))
+        let level = self
+            .amplitude_ramp
+            .map_or(self.tone.amplitude, |ramp| ramp.value_at(sample));
+        match self.tone.tremolo {
+            Some(tremolo) => {
+                (level * (1.0 + tremolo.depth * tremolo.at(self.elapsed_secs))).clamp(0.0, 1.0)
+            }
+            None => level,
+        }
     }
 
     /// This voice's envelope value right now, in `0.0..=1.0`.
@@ -580,8 +655,15 @@ impl Voice {
     /// This voice's pitch at `sample`: whatever its ramp says, or its own
     /// frequency when nothing is moving it.
     fn frequency_at(&self, sample: u64) -> f32 {
-        self.frequency_ramp
-            .map_or(self.tone.frequency_hz, |ramp| ramp.value_at(sample))
+        let hz = self
+            .frequency_ramp
+            .map_or(self.tone.frequency_hz, |ramp| ramp.value_at(sample));
+        match self.tone.vibrato {
+            // Semitones are multiplicative, so a depth sounds the same
+            // whether it wobbles a low note or a high one.
+            Some(vibrato) => hz * 2.0f32.powf(vibrato.depth * vibrato.at(self.elapsed_secs) / 12.0),
+            None => hz,
+        }
     }
 
     /// Advances the waveform and the envelope by one sample, entering the
@@ -926,6 +1008,23 @@ impl Sound {
     }
 }
 
+/// Reads a `[depth, rate]` pair off the options object, or `None` when the
+/// program didn't ask for one.
+fn wobble_pair(
+    ctx: &Ctx<'_>,
+    options: &rquickjs::Object<'_>,
+    name: &str,
+) -> Result<Option<[f32; 2]>> {
+    let Some(pair) = options.get::<_, Option<Vec<f32>>>(name)? else {
+        return Ok(None);
+    };
+    <[f32; 2]>::try_from(pair.as_slice())
+        .map(Some)
+        .map_err(|_| {
+            rquickjs::Exception::throw_type(ctx, &format!("{name} needs a depth and a rate"))
+        })
+}
+
 /// Turns a refused option into the exception `ely:sound` re-types.
 ///
 /// Tagged `option: requirement`, which the module splits back apart into a
@@ -996,6 +1095,10 @@ pub fn bootstrap_sound_bindings(
                     sweep_over_secs: options.get("sweepOver")?,
                     duration_secs: options.get("duration")?,
                     starts_at_secs: options.get("startAt")?,
+                    // A depth and a rate are one thing, so they cross as a
+                    // pair the way the envelope's stages do.
+                    vibrato: wobble_pair(&ctx, &options, "vibrato")?,
+                    tremolo: wobble_pair(&ctx, &options, "tremolo")?,
                 };
 
                 // A machine with no device still range-checks every option,
@@ -1320,6 +1423,8 @@ mod tests {
                 duration_secs: None,
             },
             sweep: None,
+            vibrato: None,
+            tremolo: None,
             starts_at_secs: None,
         }
     }
@@ -1924,6 +2029,8 @@ mod tests {
             sweep_over_secs: 0.1,
             duration_secs: None,
             starts_at_secs: None,
+            vibrato: None,
+            tremolo: None,
         }
     }
 
@@ -2392,6 +2499,116 @@ mod tests {
 
         mixer.ramp(1, super::RampTarget::Frequency, 200.0, 10);
         assert_eq!(mixer.active(), 0, "and nothing came back");
+    }
+
+    #[test]
+    fn vibrato_carries_the_pitch_either_side_of_the_note() {
+        // A quarter of the way through a cycle is the top of the wobble, and
+        // three quarters is the bottom.
+        let mut wobbled = tone(Waveform::Square, 440.0);
+        wobbled.vibrato = Some(super::Wobble {
+            depth: 12.0,
+            rate_hz: 1.0,
+        });
+        let mut sounding = voice(1, wobbled);
+
+        assert!(
+            (sounding.frequency_at(0) - 440.0).abs() < 1.0,
+            "starts on the note"
+        );
+        sounding.elapsed_secs = 0.25;
+        assert!(
+            (sounding.frequency_at(0) - 880.0).abs() < 1.0,
+            "an octave up at the peak, since depth is in semitones"
+        );
+        sounding.elapsed_secs = 0.75;
+        assert!(
+            (sounding.frequency_at(0) - 220.0).abs() < 1.0,
+            "and an octave down at the trough"
+        );
+    }
+
+    #[test]
+    fn a_vibratos_depth_sounds_the_same_at_every_pitch() {
+        // Semitones are multiplicative, which is the reason for the unit: two
+        // notes an octave apart wobble by the same musical interval rather
+        // than the same number of hertz.
+        let wobble = super::Wobble {
+            depth: 12.0,
+            rate_hz: 1.0,
+        };
+        let peak = |hz| {
+            let mut wobbled = tone(Waveform::Square, hz);
+            wobbled.vibrato = Some(wobble);
+            let mut sounding = voice(1, wobbled);
+            sounding.elapsed_secs = 0.25;
+            sounding.frequency_at(0) / hz
+        };
+        assert!((peak(220.0) - peak(880.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn tremolo_carries_the_level_either_side_of_its_amplitude() {
+        let mut wobbled = tone(Waveform::Square, 100.0);
+        wobbled.amplitude = 0.5;
+        wobbled.tremolo = Some(super::Wobble {
+            depth: 1.0,
+            rate_hz: 1.0,
+        });
+        let mut sounding = voice(1, wobbled);
+
+        assert!(
+            (sounding.amplitude_at(0) - 0.5).abs() < 1e-5,
+            "starts at its level"
+        );
+        sounding.elapsed_secs = 0.25;
+        assert!(
+            (sounding.amplitude_at(0) - 1.0).abs() < 1e-5,
+            "up at the peak"
+        );
+        sounding.elapsed_secs = 0.75;
+        assert!(
+            sounding.amplitude_at(0).abs() < 1e-5,
+            "and down at the trough"
+        );
+    }
+
+    #[test]
+    fn a_wobble_starts_when_its_voice_does_rather_than_when_it_was_queued() {
+        // Measured from the voice's own elapsed time, which doesn't move
+        // while it waits for its moment.
+        let mut wobbled = scheduled(1.0);
+        wobbled.vibrato = Some(super::Wobble {
+            depth: 12.0,
+            rate_hz: 1.0,
+        });
+        let mut mixer = Mixer::new();
+        mixer.add(Voice::new(1, OWNER, wobbled, 1000, RATE));
+
+        let mut out = vec![0.0; 1000];
+        mixer.render(&mut out, 1, RATE);
+        assert_eq!(
+            mixer.voices[0].elapsed_secs, 0.0,
+            "it hasn't aged, so its wobble hasn't started"
+        );
+    }
+
+    #[test]
+    fn a_wobble_that_is_out_of_range_blames_itself() {
+        let broken = |change: fn(&mut super::ToneParts)| {
+            let mut parts = parts();
+            change(&mut parts);
+            blamed(parts)
+        };
+        assert_eq!(broken(|p| p.vibrato = Some([24.0, 6.0])), "vibrato");
+        assert_eq!(broken(|p| p.vibrato = Some([1.0, 200.0])), "vibrato");
+        assert_eq!(broken(|p| p.tremolo = Some([2.0, 6.0])), "tremolo");
+        assert_eq!(broken(|p| p.tremolo = Some([0.5, -1.0])), "tremolo");
+        assert_eq!(
+            broken(|p| p.vibrato = Some([0.3, 6.0])),
+            "",
+            "a real one is fine"
+        );
     }
 
     #[test]
