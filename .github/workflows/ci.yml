@@ -13,8 +13,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install X11 dev headers (softbuffer's x11 feature)
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libx11-dev libx11-xcb-dev
+      - name: Install X11 and ALSA dev headers (softbuffer's x11 feature, cpal's alsa backend)
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libx11-dev libx11-xcb-dev libasound2-dev
       - run: cargo test
 
   typecheck:
@@ -46,9 +46,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install X11 dev headers (softbuffer's x11 feature)
+      - name: Install X11 and ALSA dev headers (softbuffer's x11 feature, cpal's alsa backend)
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libx11-dev libx11-xcb-dev
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libx11-dev libx11-xcb-dev libasound2-dev
       - run: cargo build --release
       - name: zip
         shell: bash
