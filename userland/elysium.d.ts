@@ -1601,6 +1601,30 @@ declare module "ely:sound" {
      * refused, because a scheduled voice holds one of the system's slots
      * before it makes any sound. */
     startAt?: number;
+    /** Wobbles the pitch either side of itself — `depth` in semitones (up to
+     * 12), `rate` in wobbles per second (up to 50). A singer's vibrato is
+     * roughly `{ depth: 0.3, rate: 6 }`. Described rather than driven from
+     * your own code, because a program can only nudge a voice once a frame
+     * and a wobble needs every sample. */
+    vibrato?: Wobble;
+    /** Wobbles the loudness either side of itself — `depth` as a fraction of
+     * the voice's level (up to 1), `rate` in wobbles per second. */
+    tremolo?: Wobble;
+  }
+
+  /** A setting wobbling either side of itself, over and over. The wobble
+   * starts when its note does. */
+  export interface Wobble {
+    depth: number;
+    rate: number;
+  }
+
+  /** How long a `bendVoice` or `fadeVoice` takes to arrive. */
+  export interface BendOptions {
+    /** Seconds the move takes. Defaults to `0.01` — the same hundredth of a
+     * second the default attack uses, and for the same reason: a setting
+     * that jumps is a step in the signal, and a step is heard as a click. */
+    overSeconds?: number;
   }
 
   /** Starts `pitch` — a note name or a frequency in hertz — sounding,
@@ -1620,6 +1644,29 @@ declare module "ely:sound" {
   /** Releases the voice `id` names, fading it over its own release rather
    * than cutting it off. An already-finished id is ignored. */
   export function stopVoice(id: VoiceId): void;
+
+  /** Slides the voice `id` names to a new pitch, given as a note name or a
+   * frequency. The note keeps sounding throughout, so its envelope is
+   * undisturbed and there is no click where a retriggered note would have
+   * one. The slide starts from wherever the pitch actually is and replaces
+   * whatever it was doing. An already-finished id is ignored.
+   * @throws {ToneOptionError} if the pitch or `overSeconds` is out of range. */
+  export function bendVoice(
+    id: VoiceId,
+    pitch: Note | number,
+    options?: BendOptions,
+  ): void;
+
+  /** Slides the voice `id` names to a new loudness, `0` to `1`. This moves
+   * the voice's own level, which its envelope still shapes on top of. A voice
+   * faded to `0` is silent but still a voice, holding its slot until it is
+   * released. An already-finished id is ignored.
+   * @throws {ToneOptionError} if the level or `overSeconds` is out of range. */
+  export function fadeVoice(
+    id: VoiceId,
+    level: number,
+    options?: BendOptions,
+  ): void;
 
   /** Whether `value` names a note, narrowing it to `Note`. For a name built
    * at runtime; a literal is checked as it's written. */
