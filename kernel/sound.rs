@@ -207,6 +207,55 @@ pub struct Sweep {
     pub over_secs: f32,
 }
 
+/// How a ramp travels between its two settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Curve {
+    /// Multiplies its way across, which is how pitch is heard — an octave is
+    /// a doubling, so an even-sounding glide multiplies by a constant each
+    /// moment rather than adding one. A linear ramp from 800 Hz to 200 Hz
+    /// spends most of its time sounding low.
+    Geometric,
+    /// Adds its way across, for loudness, which is not heard that way.
+    Linear,
+}
+
+/// One of a voice's settings moving to another over a stretch of samples.
+///
+/// A [`Sweep`] is this fixed at the note's start, and a bend is this arriving
+/// later — one mechanism, so a voice never has two things deciding its pitch.
+#[derive(Debug, Clone, Copy)]
+struct Ramp {
+    from: f32,
+    to: f32,
+    starts_at_sample: u64,
+    /// Zero snaps straight to `to`.
+    over_samples: u64,
+    curve: Curve,
+}
+
+impl Ramp {
+    /// Where the value sits at `sample`: `from` before the ramp begins, `to`
+    /// once it is done.
+    fn value_at(&self, sample: u64) -> f32 {
+        if sample <= self.starts_at_sample {
+            return self.from;
+        }
+        if self.over_samples == 0 {
+            return self.to;
+        }
+        let through =
+            ((sample - self.starts_at_sample) as f32 / self.over_samples as f32).clamp(0.0, 1.0);
+        match self.curve {
+            // Endpoints at or below zero can't be multiplied toward, so those
+            // fall back to a straight line.
+            Curve::Geometric if self.from > 0.0 && self.to > 0.0 => {
+                self.from * (self.to / self.from).powf(through)
+            }
+            _ => self.from + (self.to - self.from) * through,
+        }
+    }
+}
+
 /// Everything [`Sound::play`] needs to start one voice.
 #[derive(Debug, Clone, Copy)]
 pub struct Tone {
@@ -387,6 +436,12 @@ struct Voice {
     /// start at the instant it was scheduled for rather than at the instant
     /// it was queued.
     starts_at_sample: u64,
+    /// Where the pitch is going, if it is going anywhere. Built from the
+    /// tone's `sweep` when the voice starts, and replaced outright by a bend.
+    /// `None` holds the tone's own frequency.
+    frequency_ramp: Option<Ramp>,
+    /// Where the level is going. `None` holds the tone's own amplitude.
+    amplitude_ramp: Option<Ramp>,
     /// `0.0..1.0`, wraps every cycle.
     phase: f32,
     lfsr: u16,
@@ -397,12 +452,29 @@ struct Voice {
 }
 
 impl Voice {
-    fn new(id: VoiceId, owner: ProcessId, tone: Tone, starts_at_sample: u64) -> Self {
+    fn new(
+        id: VoiceId,
+        owner: ProcessId,
+        tone: Tone,
+        starts_at_sample: u64,
+        sample_rate_hz: f32,
+    ) -> Self {
+        // A swept voice is born already travelling, anchored to its own
+        // start rather than to the moment it was queued.
+        let frequency_ramp = tone.sweep.map(|sweep| Ramp {
+            from: tone.frequency_hz,
+            to: sweep.to_hz,
+            starts_at_sample,
+            over_samples: (sweep.over_secs * sample_rate_hz) as u64,
+            curve: Curve::Geometric,
+        });
         Self {
             id,
             owner,
             tone,
             starts_at_sample,
+            frequency_ramp,
+            amplitude_ramp: None,
             phase: 0.0,
             lfsr: LFSR_SEED,
             elapsed_secs: 0.0,
@@ -419,8 +491,14 @@ impl Voice {
     /// How loud this voice actually is right now: its envelope scaled by its
     /// own amplitude. What [`Mixer::add`] compares when it has to steal a
     /// slot, since neither number alone says which voice is faintest.
-    fn audible_level(&self) -> f32 {
-        self.tone.amplitude * self.amplitude_envelope()
+    fn audible_level(&self, sample: u64) -> f32 {
+        self.amplitude_at(sample) * self.amplitude_envelope()
+    }
+
+    /// This voice's own level at `sample`, before the envelope shapes it.
+    fn amplitude_at(&self, sample: u64) -> f32 {
+        self.amplitude_ramp
+            .map_or(self.tone.amplitude, |ramp| ramp.value_at(sample))
     }
 
     /// This voice's envelope value right now, in `0.0..=1.0`.
@@ -461,37 +539,17 @@ impl Voice {
         envelope.sustain_level
     }
 
-    /// This voice's pitch `elapsed` seconds in: its own frequency, sliding
-    /// toward the sweep's target across the sweep's time and holding there
-    /// afterwards.
-    ///
-    /// The slide is geometric rather than linear in hertz, because pitch is
-    /// heard that way — an octave is a doubling, so an even-sounding glide
-    /// is one that multiplies by a constant each moment rather than adding
-    /// one. A linear ramp from 800 Hz to 200 Hz spends most of its time
-    /// sounding low. Endpoints at or below zero can't be multiplied toward,
-    /// so those fall back to a straight ramp.
-    fn frequency_at(&self, elapsed: f32) -> f32 {
-        let Some(sweep) = self.tone.sweep else {
-            return self.tone.frequency_hz;
-        };
-        if sweep.over_secs <= 0.0 {
-            return sweep.to_hz;
-        }
-
-        let from = self.tone.frequency_hz;
-        let through = (elapsed / sweep.over_secs).clamp(0.0, 1.0);
-        if from > 0.0 && sweep.to_hz > 0.0 {
-            from * (sweep.to_hz / from).powf(through)
-        } else {
-            from + (sweep.to_hz - from) * through
-        }
+    /// This voice's pitch at `sample`: whatever its ramp says, or its own
+    /// frequency when nothing is moving it.
+    fn frequency_at(&self, sample: u64) -> f32 {
+        self.frequency_ramp
+            .map_or(self.tone.frequency_hz, |ramp| ramp.value_at(sample))
     }
 
     /// Advances the waveform and the envelope by one sample, entering the
     /// release once `duration_secs` has run out.
-    fn advance(&mut self, dt_secs: f32) {
-        self.phase += self.frequency_at(self.elapsed_secs) * dt_secs;
+    fn advance(&mut self, dt_secs: f32, sample: u64) {
+        self.phase += self.frequency_at(sample) * dt_secs;
         if self.phase >= 1.0 {
             // Clocked per cycle rather than per sample, so frequency
             // pitches the noise — see `advance_lfsr`. One step per whole
@@ -612,8 +670,8 @@ impl Mixer {
                         // queue again.
                         b.starts_at_sample.cmp(&a.starts_at_sample)
                     } else {
-                        a.audible_level()
-                            .total_cmp(&b.audible_level())
+                        a.audible_level(clock)
+                            .total_cmp(&b.audible_level(clock))
                             .then(b.elapsed_secs.total_cmp(&a.elapsed_secs))
                     }
                 })
@@ -678,9 +736,9 @@ impl Mixer {
                     continue;
                 }
                 mixed += voice.tone.waveform.sample(voice.phase, voice.lfsr)
-                    * voice.tone.amplitude
+                    * voice.amplitude_at(sample)
                     * voice.amplitude_envelope();
-                voice.advance(dt);
+                voice.advance(dt, sample);
             }
             frame.fill((mixed * MASTER_GAIN).clamp(-1.0, 1.0));
             sample += 1;
@@ -930,7 +988,7 @@ pub fn start() -> Option<Sound> {
                 match command {
                     Command::Play { id, owner, tone } => {
                         let starts_at = mixer.sample_index_for(tone.starts_at_secs, sample_rate);
-                        mixer.add(Voice::new(id, owner, tone, starts_at));
+                        mixer.add(Voice::new(id, owner, tone, starts_at, sample_rate));
                     }
                     Command::Stop(id) => mixer.stop(id),
                     Command::ReleaseSustaining(owner) => mixer.release_sustaining(owner),
@@ -1080,6 +1138,17 @@ mod tests {
     /// they all play as the same process.
     const OWNER: crate::process::ProcessId = 1;
 
+    /// The rate every test here renders at: a round 1000 Hz, so a period
+    /// lands on a whole number of samples.
+    const RATE: f32 = 1000.0;
+
+    /// A voice starting at once, owned by `OWNER`. Keeps every test that
+    /// doesn't care about ownership or scheduling out of the way of those
+    /// that do.
+    fn voice(id: VoiceId, tone: Tone) -> Voice {
+        Voice::new(id, OWNER, tone, 0, RATE)
+    }
+
     /// A tone that holds until stopped, with no attack or release ramp, so a
     /// test sees the waveform itself rather than an envelope shaping it.
     fn tone(waveform: Waveform, frequency_hz: f32) -> Tone {
@@ -1103,7 +1172,7 @@ mod tests {
     /// 1000 Hz so that a period lands on a whole number of samples.
     fn render_one(tone: Tone, count: usize) -> Vec<f32> {
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, tone, 0));
+        mixer.add(voice(1, tone));
         let mut out = vec![0.0; count];
         mixer.render(&mut out, 1, 1000.0);
         out
@@ -1273,7 +1342,7 @@ mod tests {
     #[test]
     fn a_voice_with_no_duration_sounds_until_it_is_stopped() {
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, tone(Waveform::Square, 0.0), 0));
+        mixer.add(voice(1, tone(Waveform::Square, 0.0)));
         let mut out = vec![0.0; 1000];
         mixer.render(&mut out, 1, 1000.0);
         assert_eq!(mixer.active(), 1, "still sounding a whole second later");
@@ -1285,7 +1354,7 @@ mod tests {
         let mut shaped = tone(Waveform::Square, 0.0);
         shaped.envelope.release_secs = 0.01;
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, shaped, 0));
+        mixer.add(voice(1, shaped));
 
         let mut before = vec![0.0; 5];
         mixer.render(&mut before, 1, 1000.0);
@@ -1310,7 +1379,7 @@ mod tests {
         shaped.envelope.duration_secs = Some(0.005);
         shaped.envelope.release_secs = 0.005;
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, shaped, 0));
+        mixer.add(voice(1, shaped));
 
         let mut out = vec![0.0; 20];
         mixer.render(&mut out, 1, 1000.0);
@@ -1326,7 +1395,7 @@ mod tests {
         let mut shaped = tone(Waveform::Square, 0.0);
         shaped.envelope.duration_secs = Some(0.001);
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, shaped, 0));
+        mixer.add(voice(1, shaped));
         let mut out = vec![0.0; 10];
         mixer.render(&mut out, 1, 1000.0);
         assert_eq!(mixer.active(), 0);
@@ -1338,7 +1407,7 @@ mod tests {
     #[test]
     fn stopping_an_id_that_was_never_played_does_nothing() {
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, tone(Waveform::Square, 100.0), 0));
+        mixer.add(voice(1, tone(Waveform::Square, 100.0)));
         mixer.stop(9999);
         assert_eq!(mixer.active(), 1, "the sounding voice is untouched");
     }
@@ -1347,7 +1416,7 @@ mod tests {
     fn full_mixer() -> Mixer {
         let mut mixer = Mixer::new();
         for id in 0..MAX_VOICES as u32 {
-            mixer.add(Voice::new(id, OWNER, tone(Waveform::Square, 100.0), 0));
+            mixer.add(voice(id, tone(Waveform::Square, 100.0)));
         }
         mixer
     }
@@ -1355,7 +1424,7 @@ mod tests {
     #[test]
     fn stealing_keeps_the_mixer_at_its_cap() {
         let mut mixer = full_mixer();
-        mixer.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0), 0));
+        mixer.add(voice(9999, tone(Waveform::Square, 100.0)));
         assert_eq!(mixer.active(), MAX_VOICES, "the cap still holds");
         assert!(
             mixer.voices.iter().any(|voice| voice.id == 9999),
@@ -1368,20 +1437,18 @@ mod tests {
         let mut mixer = Mixer::new();
         // One voice is audibly quieter than the rest, so it is the one with
         // the least to lose.
-        mixer.add(Voice::new(
+        mixer.add(voice(
             1,
-            OWNER,
             Tone {
                 amplitude: 0.05,
                 ..tone(Waveform::Square, 100.0)
             },
-            0,
         ));
         for id in 2..=MAX_VOICES as u32 {
-            mixer.add(Voice::new(id, OWNER, tone(Waveform::Square, 100.0), 0));
+            mixer.add(voice(id, tone(Waveform::Square, 100.0)));
         }
 
-        mixer.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0), 0));
+        mixer.add(voice(9999, tone(Waveform::Square, 100.0)));
 
         assert!(
             !mixer.voices.iter().any(|voice| voice.id == 1),
@@ -1399,9 +1466,9 @@ mod tests {
         let mut shaped = tone(Waveform::Square, 100.0);
         shaped.envelope.release_secs = 1.0;
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, shaped, 0));
+        mixer.add(voice(1, shaped));
         for id in 2..=MAX_VOICES as u32 {
-            mixer.add(Voice::new(id, OWNER, tone(Waveform::Square, 100.0), 0));
+            mixer.add(voice(id, tone(Waveform::Square, 100.0)));
         }
 
         // Part-way through a long release, so it is still sounding but on
@@ -1409,7 +1476,7 @@ mod tests {
         mixer.stop(1);
         let mut out = vec![0.0; 500];
         mixer.render(&mut out, 1, 1000.0);
-        mixer.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0), 0));
+        mixer.add(voice(9999, tone(Waveform::Square, 100.0)));
 
         assert!(
             !mixer.voices.iter().any(|voice| voice.id == 1),
@@ -1421,7 +1488,7 @@ mod tests {
     fn a_stolen_voice_leaves_the_others_sounding_as_they_were() {
         let mut untouched = full_mixer();
         let mut stolen_from = full_mixer();
-        stolen_from.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0), 0));
+        stolen_from.add(voice(9999, tone(Waveform::Square, 100.0)));
 
         let mut before = vec![0.0; 50];
         untouched.render(&mut before, 1, 1000.0);
@@ -1441,9 +1508,9 @@ mod tests {
         timed.envelope.duration_secs = Some(10.0);
 
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, 7, held, 0));
-        mixer.add(Voice::new(2, 7, timed, 0));
-        mixer.add(Voice::new(3, 8, held, 0));
+        mixer.add(Voice::new(1, 7, held, 0, RATE));
+        mixer.add(Voice::new(2, 7, timed, 0, RATE));
+        mixer.add(Voice::new(3, 8, held, 0, RATE));
 
         mixer.release_sustaining(7);
 
@@ -1485,7 +1552,7 @@ mod tests {
     #[test]
     fn every_channel_in_a_frame_gets_the_same_sample() {
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, tone(Waveform::Sine, 100.0), 0));
+        mixer.add(voice(1, tone(Waveform::Sine, 100.0)));
         let mut out = vec![0.0; 20];
         mixer.render(&mut out, 2, 1000.0);
         for frame in out.chunks(2) {
@@ -1496,7 +1563,7 @@ mod tests {
     #[test]
     fn a_partial_final_frame_is_still_filled() {
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, tone(Waveform::Square, 0.0), 0));
+        mixer.add(voice(1, tone(Waveform::Square, 0.0)));
         // Seven samples across two channels leaves a one-sample final frame.
         let mut out = vec![0.0; 7];
         mixer.render(&mut out, 2, 1000.0);
@@ -1510,7 +1577,7 @@ mod tests {
     fn the_mix_never_leaves_the_output_range() {
         let mut mixer = Mixer::new();
         for id in 0..MAX_VOICES as u32 {
-            mixer.add(Voice::new(id, OWNER, tone(Waveform::Square, 100.0), 0));
+            mixer.add(voice(id, tone(Waveform::Square, 100.0)));
         }
         let mut out = vec![0.0; 100];
         mixer.render(&mut out, 1, 1000.0);
@@ -1578,7 +1645,7 @@ mod tests {
         shaped.envelope.release_secs = 0.01;
 
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, shaped, 0));
+        mixer.add(voice(1, shaped));
         let mut before = vec![0.0; 10];
         mixer.render(&mut before, 1, 1000.0);
         mixer.stop(1);
@@ -1603,7 +1670,7 @@ mod tests {
         shaped.envelope.decay_secs = 0.005;
         shaped.envelope.sustain_level = 0.0;
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, shaped, 0));
+        mixer.add(voice(1, shaped));
 
         let mut out = vec![0.0; 40];
         mixer.render(&mut out, 1, 1000.0);
@@ -1673,12 +1740,14 @@ mod tests {
             over_secs: 1.0,
         });
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, swept, 0));
+        mixer.add(voice(1, swept));
         let mut out = vec![0.0; 1];
         mixer.render(&mut out, 1, 1000.0);
 
-        let voice = &mixer.voices[0];
-        let middle = voice.frequency_at(0.5);
+        // Half a second into a one-second sweep, which at 1000 Hz is sample
+        // 500.
+        let sounding = &mixer.voices[0];
+        let middle = sounding.frequency_at(500);
         assert!(
             (middle - 200.0).abs() < 1.0,
             "half way should be 200 Hz, got {middle}"
@@ -1842,13 +1911,13 @@ mod tests {
     fn noise_churns_once_per_cycle_even_when_a_sample_spans_several() {
         // Three cycles per sample: the register has to step three times, or
         // the noise stops churning at the pitch it was asked for.
-        let mut voice = Voice::new(1, OWNER, tone(Waveform::Noise, 3000.0), 0);
-        voice.advance(1.0 / 1000.0);
+        let mut sounding = voice(1, tone(Waveform::Noise, 3000.0));
+        sounding.advance(1.0 / 1000.0, 0);
         let mut expected = LFSR_SEED;
         for _ in 0..3 {
             expected = advance_lfsr(expected);
         }
-        assert_eq!(voice.lfsr, expected);
+        assert_eq!(sounding.lfsr, expected);
     }
 
     /// A tone scheduled for `secs`, with a flat envelope so a test sees the
@@ -1876,7 +1945,7 @@ mod tests {
         let mut mixer = Mixer::new();
         let starts_at = mixer.sample_index_for(Some(0.01), 1000.0);
         assert_eq!(starts_at, 10);
-        mixer.add(Voice::new(1, OWNER, scheduled(0.01), starts_at));
+        mixer.add(Voice::new(1, OWNER, scheduled(0.01), starts_at, RATE));
 
         let mut out = vec![0.0; 20];
         mixer.render(&mut out, 1, 1000.0);
@@ -1897,7 +1966,7 @@ mod tests {
         // and a voice placed inside one has to begin inside it rather than
         // waiting for the edge. Sixteen-sample buffers, a voice due at 21.
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, scheduled(0.021), 21));
+        mixer.add(Voice::new(1, OWNER, scheduled(0.021), 21, RATE));
 
         let mut first = vec![0.0; 16];
         mixer.render(&mut first, 1, 1000.0);
@@ -1923,7 +1992,7 @@ mod tests {
         let mut shaped = scheduled(0.01);
         shaped.envelope.attack_secs = 0.01;
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, shaped, 10));
+        mixer.add(Voice::new(1, OWNER, shaped, 10, RATE));
 
         let mut out = vec![0.0; 20];
         mixer.render(&mut out, 1, 1000.0);
@@ -1947,7 +2016,7 @@ mod tests {
         assert_eq!(mixer.clock_samples, 50);
 
         let starts_at = mixer.sample_index_for(Some(0.01), 1000.0);
-        mixer.add(Voice::new(1, OWNER, scheduled(0.01), starts_at));
+        mixer.add(Voice::new(1, OWNER, scheduled(0.01), starts_at, RATE));
         let mut after = vec![0.0; 4];
         mixer.render(&mut after, 1, 1000.0);
         assert!(after.iter().all(|&s| s != 0.0), "sounding at once");
@@ -1959,12 +2028,12 @@ mod tests {
         // obvious thing to discard — and a program queueing a sequence would
         // watch each new voice eat the ones already waiting.
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, scheduled(1.0), 1000));
+        mixer.add(Voice::new(1, OWNER, scheduled(1.0), 1000, RATE));
         for id in 2..=MAX_VOICES as u32 {
-            mixer.add(Voice::new(id, OWNER, tone(Waveform::Square, 100.0), 0));
+            mixer.add(voice(id, tone(Waveform::Square, 100.0)));
         }
 
-        mixer.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0), 0));
+        mixer.add(voice(9999, tone(Waveform::Square, 100.0)));
 
         assert!(
             mixer.voices.iter().any(|voice| voice.id == 1),
@@ -1976,10 +2045,10 @@ mod tests {
     fn the_latest_starting_pending_voice_is_the_one_stolen() {
         let mut mixer = Mixer::new();
         for (id, at) in (1..=MAX_VOICES as u32).zip((1..).map(|n| n * 100)) {
-            mixer.add(Voice::new(id, OWNER, scheduled(1.0), at));
+            mixer.add(Voice::new(id, OWNER, scheduled(1.0), at, RATE));
         }
 
-        mixer.add(Voice::new(9999, OWNER, tone(Waveform::Square, 100.0), 0));
+        mixer.add(voice(9999, tone(Waveform::Square, 100.0)));
 
         assert!(
             !mixer
@@ -1999,7 +2068,7 @@ mod tests {
         // Nothing to ring out, so it goes rather than spending its release
         // fading from silence to silence.
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, scheduled(1.0), 1000));
+        mixer.add(Voice::new(1, OWNER, scheduled(1.0), 1000, RATE));
         mixer.stop(1);
         assert_eq!(mixer.active(), 0);
 
@@ -2011,8 +2080,8 @@ mod tests {
     #[test]
     fn a_vm_going_away_takes_its_scheduled_voices_with_it() {
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, 7, scheduled(1.0), 1000));
-        mixer.add(Voice::new(2, 8, scheduled(1.0), 1000));
+        mixer.add(Voice::new(1, 7, scheduled(1.0), 1000, RATE));
+        mixer.add(Voice::new(2, 8, scheduled(1.0), 1000, RATE));
 
         mixer.release_sustaining(7);
 
@@ -2055,8 +2124,8 @@ mod tests {
         let one = render_one(quiet, 4);
 
         let mut mixer = Mixer::new();
-        mixer.add(Voice::new(1, OWNER, quiet, 0));
-        mixer.add(Voice::new(2, OWNER, quiet, 0));
+        mixer.add(voice(1, quiet));
+        mixer.add(voice(2, quiet));
         let mut two = vec![0.0; 4];
         mixer.render(&mut two, 1, 1000.0);
 
