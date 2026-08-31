@@ -1,0 +1,5 @@
+{
+  "title": "Sequencer",
+  "description": "A loop that keeps time by naming instants rather than counting frames.",
+  "order": 10
+}
