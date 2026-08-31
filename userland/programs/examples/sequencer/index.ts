@@ -144,8 +144,17 @@ let stepSeconds = 60 / beatsPerMinute / STEPS_PER_BEAT;
  * accumulates. */
 let sequenceStart = currentTime() + 0.1;
 /** The next absolute step to queue — an ever-growing count, not a position in
- * the pattern. `index % STEPS` is where in the pattern it lands. */
+ * the pattern. `index % STEPS` is where in the pattern it lands.
+ *
+ * Absolute is the part to be careful with: anything that re-anchors
+ * `sequenceStart` has to do it against this number and not against the
+ * position within the pattern, or the two disagree by however many whole
+ * loops have gone by and nothing lands where it should. */
 let nextIndex = 0;
+
+/** Where the playhead stopped, as an absolute fractional step, so resuming can
+ * pick it up from exactly there. */
+let pausedAt = 0;
 
 const timeOf = (index: number): number => sequenceStart + index * stepSeconds;
 
@@ -295,8 +304,18 @@ addUpdateTicker(() => {
   if (wasKeyPressed(Key.Space)) {
     playing = !playing;
     if (playing) {
-      // Pick up from where the playhead stopped rather than from step zero.
-      sequenceStart = currentTime() - (nextIndex % STEPS) * stepSeconds;
+      // Re-anchor so that the step the playhead stopped on is the one that
+      // sounds now. Both numbers move together: the anchor is set from the
+      // absolute position, and the next step to queue is the first one at or
+      // after it.
+      //
+      // Anything already queued when the pause began still sounds — up to a
+      // lookahead of it. There is no unsaying a scheduled note, and pretending
+      // otherwise would mean not scheduling ahead in the first place.
+      sequenceStart = currentTime() - pausedAt * stepSeconds;
+      nextIndex = Math.ceil(pausedAt);
+    } else {
+      pausedAt = playhead();
     }
   }
   if (wasKeyPressed(Key.KeyR)) rewind();
@@ -390,7 +409,9 @@ function squiggle(x: number, y: number, width: number, color: Color): void {
 addDrawHandler(() => {
   clearScreen(Color.Slate950);
 
-  const position = playing ? playhead() : nextIndex % STEPS;
+  // Paused, the playhead holds where it was heard to stop — not where
+  // scheduling had got to, which is a lookahead further on.
+  const position = playing ? playhead() : pausedAt;
   const sounding = ((Math.floor(position) % STEPS) + STEPS) % STEPS;
   const through = position - Math.floor(position);
 
