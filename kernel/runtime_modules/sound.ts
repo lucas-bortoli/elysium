@@ -11,6 +11,8 @@ declare function __sound_play(
 ): Option<number>;
 declare function __sound_stop(id: number): void;
 declare function __sound_current_time(): number;
+declare function __sound_bend(id: number, frequency: number, overSeconds: number): void;
+declare function __sound_fade(id: number, level: number, overSeconds: number): void;
 
 /** Opaque handle to a sounding voice, returned by `playTone`. */
 export type VoiceId = number;
@@ -167,6 +169,8 @@ const TONE_OPTIONS = [
   "sweepOver",
   "duration",
   "startAt",
+  "level",
+  "overSeconds",
 ];
 
 /** Re-throws the kernel's `"<option>: <requirement>"` rejections as a
@@ -192,12 +196,8 @@ function rethrowToneError(err: unknown): never {
  * A tone given a `duration` ends on its own, and outlives the code that
  * started it — destroy whatever made the noise and the noise still finishes.
  * A tone given none holds until `stopVoice`, and is released for you when
- * your program ends.
- *
- * TODO: a sounding voice can be started and stopped but not changed. Bending
- * a held note's pitch or fading its amplitude wants `setVoiceFrequency` and
- * `setVoiceAmplitude`; until those exist, everything about a voice is fixed
- * at the moment it starts. */
+ * your program ends. Bend or fade one while it sounds with `bendVoice` and
+ * `fadeVoice`. */
 export function playTone(
   pitch: Note | number,
   options?: ToneOptions,
@@ -240,6 +240,58 @@ export function currentTime(): number {
  * already finished is ignored. */
 export function stopVoice(id: VoiceId): void {
   __sound_stop(id);
+}
+
+/** How long a `bendVoice` or `fadeVoice` takes to arrive. */
+export interface BendOptions {
+  /** Seconds the move takes. Defaults to `0.01` — the same hundredth of a
+   * second the default attack uses, and for the same reason: a setting that
+   * jumps is a step in the signal, and a step is heard as a click. */
+  overSeconds?: number;
+}
+
+/** Slides the voice `id` names to a new pitch, given as a note name or a
+ * frequency in hertz.
+ *
+ * The note keeps sounding throughout — this bends it rather than replacing
+ * it, so its envelope is undisturbed and there is no click where a
+ * retriggered note would have one. The slide starts from wherever the pitch
+ * actually is, so a note caught mid-sweep carries on from there, and it
+ * replaces whatever the pitch was doing before.
+ *
+ * An id whose voice has already finished, or which lost its slot to a newer
+ * sound, is ignored — the same as stopping one. */
+export function bendVoice(
+  id: VoiceId,
+  pitch: Note | number,
+  options?: BendOptions,
+): void {
+  const frequency = typeof pitch === "number" ? pitch : noteToFrequency(pitch);
+  try {
+    __sound_bend(id, frequency, options?.overSeconds ?? 0.01);
+  } catch (err) {
+    rethrowToneError(err);
+  }
+}
+
+/** Slides the voice `id` names to a new loudness, `0` to `1`.
+ *
+ * This moves the voice's own amplitude, which its envelope still shapes on
+ * top of — so fading doesn't fight the envelope, it scales it. A voice faded
+ * to `0` goes quiet but is still a voice, holding its slot until it is
+ * released, exactly like one whose `sustainLevel` is `0`.
+ *
+ * An id whose voice has already finished is ignored. */
+export function fadeVoice(
+  id: VoiceId,
+  level: number,
+  options?: BendOptions,
+): void {
+  try {
+    __sound_fade(id, level, options?.overSeconds ?? 0.01);
+  } catch (err) {
+    rethrowToneError(err);
+  }
 }
 
 export class UnknownNoteError extends Error {

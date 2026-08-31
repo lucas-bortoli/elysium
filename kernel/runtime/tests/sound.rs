@@ -2,7 +2,7 @@
 //! mixer, what happens when there's no device, and naming notes.
 
 use super::*;
-use crate::sound::{SoundLog, Waveform};
+use crate::sound::{RampTarget, SoundLog, Waveform};
 
 #[test]
 fn playing_a_tone_returns_a_voice_id() {
@@ -151,6 +151,16 @@ fn playing_a_tone_with_no_sound_device_reports_nothing_rather_than_throwing() {
         !global::<bool>(&runtime, "threw"),
         "stopping is still a no-op"
     );
+}
+
+/// The option a rejected `bendVoice`/`fadeVoice` blamed, or `""`.
+fn rejected_bend(source: &str) -> String {
+    let (runtime, _log) = eval_with_audio(&format!(
+        "import {{ bendVoice, fadeVoice }} from 'ely:sound'; \
+         globalThis.blamed = ''; \
+         try {{ {source} }} catch (err) {{ globalThis.blamed = err.option ?? ''; }}"
+    ));
+    global::<String>(&runtime, "blamed")
 }
 
 /// Whether the one tone played carried no sweep.
@@ -622,4 +632,75 @@ fn a_sequence_derived_from_one_clock_reading_keeps_its_gaps_exact() {
             pair[1] - pair[0]
         );
     }
+}
+
+#[test]
+fn bending_a_voice_reaches_the_mixer() {
+    let (_runtime, log) = eval_with_audio(
+        "import { bendVoice, playTone } from 'ely:sound'; \
+         const id = playTone(440); bendVoice(id, 880, { overSeconds: 0.2 });",
+    );
+    let ramped = log.ramped();
+    assert_eq!(ramped.len(), 1);
+    let (id, target, to, over) = ramped[0];
+    assert_eq!(id, 1);
+    assert_eq!(target, RampTarget::Frequency);
+    assert_eq!(to, 880.0);
+    assert_eq!(over, 0.2);
+}
+
+#[test]
+fn a_voice_can_be_bent_to_a_note_name() {
+    // The same spellings playTone accepts, so a melody doesn't have to switch
+    // units half way through.
+    let (_runtime, log) = eval_with_audio(
+        "import { bendVoice, playTone } from 'ely:sound'; \
+         const id = playTone('A4'); bendVoice(id, 'A5');",
+    );
+    assert_eq!(log.ramped()[0].2, 880.0);
+}
+
+#[test]
+fn a_bend_takes_a_hundredth_of_a_second_unless_told_otherwise() {
+    // Long enough not to click, which is the same reason the default attack
+    // is what it is.
+    let (_runtime, log) = eval_with_audio(
+        "import { bendVoice, playTone } from 'ely:sound'; \
+         bendVoice(playTone(440), 880);",
+    );
+    assert_eq!(log.ramped()[0].3, 0.01);
+}
+
+#[test]
+fn fading_a_voice_reaches_the_mixer() {
+    let (_runtime, log) = eval_with_audio(
+        "import { fadeVoice, playTone } from 'ely:sound'; \
+         fadeVoice(playTone(440), 0.25, { overSeconds: 0.5 });",
+    );
+    let (_, target, to, over) = log.ramped()[0];
+    assert_eq!(target, RampTarget::Amplitude);
+    assert_eq!(to, 0.25);
+    assert_eq!(over, 0.5);
+}
+
+#[test]
+fn a_rejected_bend_or_fade_names_the_option_it_blames() {
+    let cases = [
+        ("bendVoice(1, 40000);", "frequency"),
+        ("bendVoice(1, 880, { overSeconds: -1 });", "overSeconds"),
+        ("fadeVoice(1, 2);", "level"),
+        ("fadeVoice(1, 0.5, { overSeconds: -1 });", "overSeconds"),
+    ];
+    for (source, blamed) in cases {
+        assert_eq!(rejected_bend(source), blamed, "{source}");
+    }
+}
+
+#[test]
+fn bending_a_voice_that_was_never_played_still_reaches_the_mixer() {
+    // Whether the id names anything is the mixer's to know — it holds the
+    // only truthful account of what is sounding.
+    let (_runtime, log) =
+        eval_with_audio("import { bendVoice } from 'ely:sound'; bendVoice(9999, 440);");
+    assert_eq!(log.ramped()[0].0, 9999);
 }
