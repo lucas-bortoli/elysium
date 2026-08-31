@@ -34,9 +34,11 @@ import { addUpdateTicker } from "ely:lifecycle";
 import { hasValue } from "ely:container";
 import {
   Waveform,
+  bendVoice,
   currentTime,
   isNote,
   noiseSequence,
+  noteToFrequency,
   playTone,
   stopVoice,
   waveformSample,
@@ -326,6 +328,15 @@ let nextBeat = 0;
 /** Counts through the bar, so the downbeat can be the one that stands out. */
 let beatInBar = 0;
 
+/** Whether new notes are given a vibrato. Held voices keep whatever they
+ * started with, like everything else about them. */
+let vibrato = false;
+/** How far the held voices have been bent from the notes they started on, in
+ * semitones. Bending doesn't retrigger, so a chord slides as one. */
+let bentBy = 0;
+const BEND_LIMIT = 12;
+const BEND_SECONDS = 0.15;
+
 let selected: Waveform = Waveform.Triangle;
 /** The envelope every new voice is given. Index 0 is `organ`, which is a
  * plain hold — so the example starts sounding as it did before envelopes
@@ -390,10 +401,29 @@ addUpdateTicker(() => {
     if (wasKeyPressed(candidate.key)) preset = candidate;
   }
 
-  // Held voices keep the pitch and envelope they started on, the same way
-  // they keep their shape — all of it is fixed when a voice starts.
+  // Held voices keep the envelope and shape they started on — those are
+  // fixed when a voice starts. The octave only moves the next note played.
   if (wasKeyPressed(Key.ArrowLeft)) octave = Math.max(LOWEST_OCTAVE, octave - 1);
   if (wasKeyPressed(Key.ArrowRight)) octave = Math.min(HIGHEST_OCTAVE, octave + 1);
+
+  if (wasKeyPressed(Key.KeyB)) vibrato = !vibrato;
+
+  // Pitch, unlike the rest, can move on a note already sounding. Up and Down
+  // bend every held voice a whole tone without retriggering any of them, so a
+  // held chord glides as one — try holding three keys and pressing Up.
+  const bend = (wasKeyPressed(Key.ArrowUp) ? 2 : 0) - (wasKeyPressed(Key.ArrowDown) ? 2 : 0);
+  if (bend !== 0) {
+    bentBy = Math.max(-BEND_LIMIT, Math.min(BEND_LIMIT, bentBy + bend));
+    for (const [key, voice] of voices) {
+      const pad = PADS.find((candidate) => candidate.key === key);
+      const note = pad === undefined ? undefined : noteFor(pad, octave);
+      if (note !== undefined) {
+        bendVoice(voice, noteToFrequency(note) * 2 ** (bentBy / 12), {
+          overSeconds: BEND_SECONDS,
+        });
+      }
+    }
+  }
 
   for (const drum of DRUMS) {
     // Every drum carries a duration, so it sees itself out — there is
@@ -415,12 +445,13 @@ addUpdateTicker(() => {
       // affects the next key pressed.
       const note = noteFor(pad, octave);
       if (note !== undefined) {
-        const voice = playTone(note, {
+        const voice = playTone(noteToFrequency(note) * 2 ** (bentBy / 12), {
           waveform: selected,
           attack: preset.attack,
           decay: preset.decay,
           sustainLevel: preset.sustainLevel,
           release: preset.release,
+          ...(vibrato ? { vibrato: { depth: 0.3, rate: 6 } } : {}),
         });
         // Absent means nothing sounded — no output device, or every voice
         // already in use. Neither is an error: the key simply has no voice to
@@ -488,6 +519,13 @@ addDrawHandler(() => {
   drawText(CONTENT_RIGHT, 206, `← octave ${octave} →`, Color.Slate300, {
     align: "right",
   });
+  drawText(
+    CONTENT_RIGHT,
+    222,
+    `↑ bend ${bentBy > 0 ? "+" : ""}${bentBy} ↓    B vibrato ${vibrato ? "on" : "off"}`,
+    bentBy === 0 && !vibrato ? Color.Slate600 : Color.Amber300,
+    { align: "right" },
+  );
 
   for (const [index, pad] of WHITE.entries()) {
     const x = KEYS_X + index * WHITE_PITCH;
