@@ -55,7 +55,7 @@ jobs:
         run: |
           mkdir -p dist
           cp target/release/${{ matrix.bin }} dist/
-          cp -r target/release/userland dist/
+          cp -r userland dist/
           cd dist && 7z a ../${{ matrix.artifact }}.zip .
       - uses: actions/upload-artifact@v4
         with:
