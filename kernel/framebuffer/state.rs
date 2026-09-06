@@ -31,6 +31,14 @@ pub struct ClipRect {
 }
 
 impl ClipRect {
+    /// An empty box — drawing confined to it is confined to nothing.
+    const NOTHING: ClipRect = ClipRect {
+        x0: 0,
+        y0: 0,
+        x1: 0,
+        y1: 0,
+    };
+
     fn surface(width: u32, height: u32) -> ClipRect {
         ClipRect {
             x0: 0,
@@ -97,6 +105,25 @@ struct ClipRegion {
     mask: Option<tiny_skia::Mask>,
 }
 
+impl ClipRegion {
+    /// A region that confines drawing to nothing.
+    fn nothing() -> ClipRegion {
+        ClipRegion {
+            bounds: ClipRect::NOTHING,
+            mask: None,
+        }
+    }
+}
+
+/// The clip in effect, for a caller that enforces it itself rather than
+/// through tiny-skia: `bounds` is the box drawing is confined to, and `mask`
+/// the coverage within it when the region isn't a bare rectangle.
+#[derive(Clone, Copy)]
+pub struct Clip<'a> {
+    pub bounds: Option<ClipRect>,
+    pub mask: Option<&'a tiny_skia::Mask>,
+}
+
 /// The drawing state in effect at one point in a frame's command list.
 pub struct DrawState {
     /// Each entry already composed with everything below it, so the last is
@@ -139,6 +166,14 @@ impl DrawState {
     /// plain rectangle its box already describes.
     pub fn clip_mask(&self) -> Option<&tiny_skia::Mask> {
         self.clips.last().and_then(|region| region.mask.as_ref())
+    }
+
+    /// The clip in effect, for a caller that confines its own drawing.
+    pub fn clip(&self) -> Clip<'_> {
+        Clip {
+            bounds: self.clip_bounds(),
+            mask: self.clip_mask(),
+        }
     }
 
     /// The clip to hand a tiny-skia fill that covers `shape` (a surface-space
@@ -214,63 +249,31 @@ impl DrawState {
     }
 
     /// Narrows the clip to the rectangle `(x, y, w, h)`, taken in the
-    /// coordinates currently in effect. An axis-aligned transform keeps this
-    /// a bare rectangle; rotation or shear turns it into a masked region.
+    /// coordinates currently in effect. An upright rectangle not nested in a
+    /// mask stays a bare box; rotation, shear, or a masked parent turns it
+    /// into a masked region.
     pub fn push_clip_rect(&mut self, x: f32, y: f32, w: f32, h: f32) {
         let transform = self.transform();
-        let parent_bounds = self.parent_bounds();
-        let parent_mask = self.clips.last().and_then(|region| region.mask.as_ref());
-
         let Some(local) = tiny_skia::Rect::from_xywh(x, y, w, h) else {
-            // A non-positive rectangle confines drawing to nothing.
-            self.clips.push(ClipRegion {
-                bounds: ClipRect {
-                    x0: 0,
-                    y0: 0,
-                    x1: 0,
-                    y1: 0,
-                },
-                mask: None,
-            });
+            self.clips.push(ClipRegion::nothing());
+            return;
+        };
+        let Some(bounds) = self.narrowed_bounds(local, transform) else {
+            self.clips.push(ClipRegion::nothing());
             return;
         };
 
-        let axis_aligned = transform.kx == 0.0 && transform.ky == 0.0;
-        let mut corners = [
-            tiny_skia::Point::from_xy(local.left(), local.top()),
-            tiny_skia::Point::from_xy(local.right(), local.top()),
-            tiny_skia::Point::from_xy(local.right(), local.bottom()),
-            tiny_skia::Point::from_xy(local.left(), local.bottom()),
-        ];
-        transform.map_points(&mut corners);
-        let mapped = bounding_rect(&corners);
-        let bounds = mapped
-            .map(|rect| ClipRect::covering(rect, self.surface_bounds()))
-            .unwrap_or(ClipRect {
-                x0: 0,
-                y0: 0,
-                x1: 0,
-                y1: 0,
-            })
-            .intersect(parent_bounds);
-
-        if axis_aligned && parent_mask.is_none() {
+        let upright = transform.kx == 0.0 && transform.ky == 0.0;
+        if upright && self.clips.last().is_none_or(|region| region.mask.is_none()) {
             self.clips.push(ClipRegion { bounds, mask: None });
             return;
         }
-
-        // Rotated, sheared, or nested inside a mask: the region is no longer
-        // a bare rectangle, so it needs its own coverage mask.
-        let mask = self.masked_region(parent_mask, |mask| {
-            let rect_path = tiny_skia::PathBuilder::from_rect(local);
-            match parent_mask {
-                Some(_) => {
-                    mask.intersect_path(&rect_path, tiny_skia::FillRule::Winding, false, transform)
-                }
-                None => mask.fill_path(&rect_path, tiny_skia::FillRule::Winding, false, transform),
-            }
-        });
-        self.clips.push(ClipRegion { bounds, mask });
+        self.narrow_to_path(
+            bounds,
+            &tiny_skia::PathBuilder::from_rect(local),
+            tiny_skia::FillRule::Winding,
+            transform,
+        );
     }
 
     /// Narrows the clip to the inside of `path` (in the current coordinates),
@@ -278,75 +281,64 @@ impl DrawState {
     /// region — an arbitrary shape is never just a box.
     pub fn push_clip(&mut self, path: Option<&tiny_skia::Path>, rule: tiny_skia::FillRule) {
         let transform = self.transform();
-        let parent_bounds = self.parent_bounds();
-        let parent_mask = self.clips.last().and_then(|region| region.mask.as_ref());
-
         let Some(path) = path else {
-            self.clips.push(ClipRegion {
-                bounds: ClipRect {
-                    x0: 0,
-                    y0: 0,
-                    x1: 0,
-                    y1: 0,
-                },
-                mask: None,
-            });
+            self.clips.push(ClipRegion::nothing());
             return;
         };
-
-        let mut corners = [
-            tiny_skia::Point::from_xy(path.bounds().left(), path.bounds().top()),
-            tiny_skia::Point::from_xy(path.bounds().right(), path.bounds().top()),
-            tiny_skia::Point::from_xy(path.bounds().right(), path.bounds().bottom()),
-            tiny_skia::Point::from_xy(path.bounds().left(), path.bounds().bottom()),
-        ];
-        transform.map_points(&mut corners);
-        let bounds = bounding_rect(&corners)
-            .map(|rect| ClipRect::covering(rect, self.surface_bounds()))
-            .unwrap_or(ClipRect {
-                x0: 0,
-                y0: 0,
-                x1: 0,
-                y1: 0,
-            })
-            .intersect(parent_bounds);
-
-        let mask = self.masked_region(parent_mask, |mask| match parent_mask {
-            Some(_) => mask.intersect_path(path, rule, false, transform),
-            None => mask.fill_path(path, rule, false, transform),
-        });
-        self.clips.push(ClipRegion { bounds, mask });
+        let Some(bounds) = self.narrowed_bounds(path.bounds(), transform) else {
+            self.clips.push(ClipRegion::nothing());
+            return;
+        };
+        self.narrow_to_path(bounds, path, rule, transform);
     }
 
     pub fn pop_clip(&mut self) {
         self.clips.pop();
     }
 
-    /// Builds a coverage mask, seeded from `parent` when the clip nests
-    /// inside one, and lets `fill` lay the new region into it. `None` only if
-    /// the surface is too large to allocate a mask for.
-    fn masked_region(
+    /// The clip box for a local-space rectangle placed by `transform`: its
+    /// bounding box mapped onto the surface, then narrowed to the parent
+    /// clip. `None` if there is no rectangle, or it maps to no area.
+    fn narrowed_bounds(
         &self,
-        parent: Option<&tiny_skia::Mask>,
-        fill: impl FnOnce(&mut tiny_skia::Mask),
-    ) -> Option<tiny_skia::Mask> {
-        let mut mask = match parent {
-            Some(parent) => parent.clone(),
-            None => tiny_skia::Mask::new(self.width, self.height)?,
-        };
-        fill(&mut mask);
-        Some(mask)
+        local: tiny_skia::Rect,
+        transform: tiny_skia::Transform,
+    ) -> Option<ClipRect> {
+        let mapped = super::mapped_bounds(local, transform)?;
+        Some(ClipRect::covering(mapped, self.surface_bounds()).intersect(self.parent_bounds()))
     }
-}
 
-/// The axis-aligned bounding rectangle of a set of points, or `None` if it
-/// has no area.
-fn bounding_rect(points: &[tiny_skia::Point]) -> Option<tiny_skia::Rect> {
-    let min_x = points.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
-    let max_x = points.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
-    let min_y = points.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
-    let max_y = points.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
-    tiny_skia::Rect::from_ltrb(min_x, min_y, max_x, max_y)
+    /// Pushes a masked clip: `bounds` as its box and `path` — filled with
+    /// `rule` under `transform` — as its coverage, intersected with the
+    /// parent mask when the clip nests inside one. Confines drawing to
+    /// nothing if no mask can be allocated.
+    fn narrow_to_path(
+        &mut self,
+        bounds: ClipRect,
+        path: &tiny_skia::Path,
+        rule: tiny_skia::FillRule,
+        transform: tiny_skia::Transform,
+    ) {
+        let mask = match self.clips.last().and_then(|region| region.mask.as_ref()) {
+            Some(parent) => {
+                let mut mask = parent.clone();
+                mask.intersect_path(path, rule, false, transform);
+                mask
+            }
+            None => {
+                let Some(mut mask) = tiny_skia::Mask::new(self.width, self.height) else {
+                    self.clips.push(ClipRegion::nothing());
+                    return;
+                };
+                mask.fill_path(path, rule, false, transform);
+                mask
+            }
+        };
+        self.clips.push(ClipRegion {
+            bounds,
+            mask: Some(mask),
+        });
+    }
 }
 
 #[cfg(test)]

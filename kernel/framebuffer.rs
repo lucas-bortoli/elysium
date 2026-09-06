@@ -28,7 +28,7 @@ mod paths;
 mod state;
 pub use colors::Color;
 
-use state::{ClipRect, DrawState};
+use state::{Clip, ClipRect, DrawState};
 
 use crate::bindings::bind;
 use crate::text;
@@ -639,16 +639,7 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
                 transform,
             } => {
                 let full = state.transform().pre_concat(*transform);
-                let clip_bounds = state.clip_bounds();
-                blit_transformed(
-                    pixmap,
-                    image,
-                    *source,
-                    full,
-                    *opaque,
-                    clip_bounds,
-                    state.clip_mask(),
-                );
+                blit_transformed(pixmap, image, *source, full, *opaque, state.clip());
             }
             DrawCommand::DrawText {
                 x,
@@ -734,58 +725,48 @@ fn mapped_bounds(
 /// the source rect's own coordinates onto the surface. Nearest-neighbour and
 /// nothing else: every pixel written is a verbatim texel, so however the
 /// image is turned or resized it stays on the palette, and there is no
-/// sampler pipeline to pay for per pixel. `clip_bounds` tightens the walked
-/// box; `clip_mask`, when the clip isn't a bare rectangle, is checked per
-/// pixel on top of it.
-#[allow(clippy::too_many_arguments)]
+/// sampler pipeline to pay for per pixel.
+///
+/// The walk is incremental. The source point under a surface pixel is an
+/// affine function of that pixel, so it advances by a fixed vector per column
+/// and another per row — a couple of adds a pixel, whether the image is
+/// scaled, flipped or turned. `clip.bounds` tightens the walked box (all a
+/// rectangular clip needs); `clip.mask`, when the region isn't a rectangle,
+/// is tested per pixel on top of it.
 fn blit_transformed(
     dest: &mut tiny_skia::Pixmap,
     image: &tiny_skia::Pixmap,
     source: tiny_skia::Rect,
     transform: tiny_skia::Transform,
     opaque: bool,
-    clip_bounds: Option<ClipRect>,
-    clip_mask: Option<&tiny_skia::Mask>,
+    clip: Clip<'_>,
 ) {
-    // A degenerate transform — a zero scale, say — collapses the image to
-    // nothing, and there is no inverse to walk back through.
+    // `inverse` walks a surface pixel back to a point in the source rect's
+    // own space; a degenerate transform has no inverse and covers nothing.
     let Some(inverse) = transform.invert() else {
         return;
     };
-
-    // The destination bounding box: the source rect's four corners mapped
-    // onto the surface, clamped to it.
-    let mut corners = [
-        tiny_skia::Point::from_xy(0.0, 0.0),
-        tiny_skia::Point::from_xy(source.width(), 0.0),
-        tiny_skia::Point::from_xy(source.width(), source.height()),
-        tiny_skia::Point::from_xy(0.0, source.height()),
-    ];
-    transform.map_points(&mut corners);
-    let min_x = corners.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
-    let max_x = corners
-        .iter()
-        .map(|p| p.x)
-        .fold(f32::NEG_INFINITY, f32::max);
-    let min_y = corners.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
-    let max_y = corners
-        .iter()
-        .map(|p| p.y)
-        .fold(f32::NEG_INFINITY, f32::max);
+    let Some(footprint) = tiny_skia::Rect::from_xywh(0.0, 0.0, source.width(), source.height())
+        .and_then(|local| mapped_bounds(local, transform))
+    else {
+        return;
+    };
 
     let dest_w = dest.width() as i32;
     let dest_h = dest.height() as i32;
-    // A rectangular clip is enforced just by not walking outside it.
-    let box_ = clip_bounds.unwrap_or(ClipRect {
+    let bounds = clip.bounds.unwrap_or(ClipRect {
         x0: 0,
         y0: 0,
         x1: dest_w,
         y1: dest_h,
     });
-    let x0 = (min_x.floor() as i32).max(0).max(box_.x0);
-    let y0 = (min_y.floor() as i32).max(0).max(box_.y0);
-    let x1 = (max_x.ceil() as i32).min(dest_w).min(box_.x1);
-    let y1 = (max_y.ceil() as i32).min(dest_h).min(box_.y1);
+    // The image's footprint, the surface, and any rectangular clip at once.
+    let x0 = (footprint.left().floor() as i32).max(0).max(bounds.x0);
+    let y0 = (footprint.top().floor() as i32).max(0).max(bounds.y0);
+    let x1 = (footprint.right().ceil() as i32).min(dest_w).min(bounds.x1);
+    let y1 = (footprint.bottom().ceil() as i32)
+        .min(dest_h)
+        .min(bounds.y1);
     if x0 >= x1 || y0 >= y1 {
         return;
     }
@@ -794,79 +775,43 @@ fn blit_transformed(
     let src_h = image.height() as i32;
     let (sl, st, sw, sh) = (source.left(), source.top(), source.width(), source.height());
     let src_pixels = image.pixels();
-    let clip = clip_mask.map(|mask| mask.data());
+    let mask = clip.mask.map(|mask| mask.data());
     let dest_pixels = dest.pixels_mut();
 
-    // Writes one sampled texel at `target`, honouring the opacity rule.
-    let mut place = |target: usize, texel: tiny_skia::PremultipliedColorU8| {
-        if opaque || texel.alpha() == 255 {
-            dest_pixels[target] = texel;
-        } else if texel.alpha() != 0 {
-            dest_pixels[target] = over(texel, dest_pixels[target]);
-        }
-    };
-
-    // With no rotation or shear the source coordinate is separable: it moves
-    // by a fixed step per column and per row, so the inverse map is one add
-    // and one floor per pixel rather than a full point transform. `invert`
-    // already ruled out a zero scale, so the reciprocals are finite.
-    if transform.kx == 0.0 && transform.ky == 0.0 {
-        let step_u = 1.0 / transform.sx;
-        let step_v = 1.0 / transform.sy;
-        for py in y0..y1 {
-            let v = (py as f32 + 0.5 - transform.ty) * step_v;
-            if v < 0.0 || v >= sh {
-                continue;
-            }
-            let ty = (st + v).floor() as i32;
-            if ty < 0 || ty >= src_h {
-                continue;
-            }
-            let src_row = (ty * src_w) as usize;
-            let row = (py * dest_w) as usize;
-            let mut u = (x0 as f32 + 0.5 - transform.tx) * step_u;
-            for px in x0..x1 {
-                let this_u = u;
-                u += step_u;
-                if let Some(clip) = clip
-                    && clip[row + px as usize] == 0
-                {
-                    continue;
-                }
-                if this_u < 0.0 || this_u >= sw {
-                    continue;
-                }
-                let tx = (sl + this_u).floor() as i32;
-                if tx < 0 || tx >= src_w {
-                    continue; // a fractional source rect can round one past its edge
-                }
-                place(row + px as usize, src_pixels[src_row + tx as usize]);
-            }
-        }
-        return;
-    }
+    // How the source point moves for one pixel to the right.
+    let (du_dx, dv_dx) = (inverse.sx, inverse.ky);
 
     for py in y0..y1 {
+        // The source point under this row's first pixel centre; it then
+        // advances by (du_dx, dv_dx) per column.
+        let mut probe = [tiny_skia::Point::from_xy(x0 as f32 + 0.5, py as f32 + 0.5)];
+        inverse.map_points(&mut probe);
+        let (mut u, mut v) = (probe[0].x, probe[0].y);
         let row = (py * dest_w) as usize;
         for px in x0..x1 {
-            if let Some(clip) = clip
-                && clip[row + px as usize] == 0
+            let (su, sv) = (u, v);
+            u += du_dx;
+            v += dv_dx;
+            let target = row + px as usize;
+            if let Some(mask) = mask
+                && mask[target] == 0
             {
                 continue;
             }
-            // Sample at the pixel's centre, in the source rect's own space.
-            let mut probe = [tiny_skia::Point::from_xy(px as f32 + 0.5, py as f32 + 0.5)];
-            inverse.map_points(&mut probe);
-            let (u, v) = (probe[0].x, probe[0].y);
-            if u < 0.0 || v < 0.0 || u >= sw || v >= sh {
+            if su < 0.0 || su >= sw || sv < 0.0 || sv >= sh {
                 continue;
             }
-            let tx = (sl + u).floor() as i32;
-            let ty = (st + v).floor() as i32;
-            if tx < 0 || ty < 0 || tx >= src_w || ty >= src_h {
+            let tx = (sl + su).floor() as i32;
+            let ty = (st + sv).floor() as i32;
+            if tx < 0 || tx >= src_w || ty < 0 || ty >= src_h {
                 continue; // a fractional source rect can round one past its edge
             }
-            place(row + px as usize, src_pixels[(ty * src_w + tx) as usize]);
+            let texel = src_pixels[(ty * src_w + tx) as usize];
+            if opaque || texel.alpha() == 255 {
+                dest_pixels[target] = texel;
+            } else if texel.alpha() != 0 {
+                dest_pixels[target] = over(texel, dest_pixels[target]);
+            }
         }
     }
 }
