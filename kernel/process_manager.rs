@@ -371,7 +371,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
-    use crate::framebuffer::DEFAULT_SCALE;
+    use crate::graphics::{DEFAULT_SCALE, SCREEN_HEIGHT, SCREEN_WIDTH, Surface};
     use crate::input::Input;
 
     /// A private userland root seeded with `programs`, each entry a
@@ -395,13 +395,10 @@ mod tests {
         let input = Rc::new(Input::new(Rc::clone(&scale)));
         // Scheduling has nothing to do with sound, and a kernel with no
         // output device has to schedule exactly the same way.
-        ProcessManager::new(Devices::new(
-            Rc::new(RefCell::new(Vec::new())),
-            input,
-            scale,
-            None,
-            root,
-        ))
+        let screen = Rc::new(RefCell::new(
+            Surface::new(SCREEN_WIDTH, SCREEN_HEIGHT).expect("test screen surface"),
+        ));
+        ProcessManager::new(Devices::new(screen, input, scale, None, root))
     }
 
     #[test]

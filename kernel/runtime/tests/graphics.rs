@@ -2,7 +2,7 @@
 //! call sits behind, paths and shapes, the transform and clip stacks, and
 //! individual pixels. Text lives in `text.rs`, and what a frame's commands
 //! actually rasterize to is tested against a bare pixmap in
-//! `kernel/framebuffer.rs`.
+//! `kernel/graphics.rs`.
 
 use super::*;
 

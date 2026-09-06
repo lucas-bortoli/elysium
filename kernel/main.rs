@@ -1,7 +1,7 @@
 mod bindings;
 mod esm_resolver;
 mod filesystem;
-mod framebuffer;
+mod graphics;
 mod image;
 mod input;
 mod process;
@@ -17,7 +17,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::Instant;
 
-use framebuffer::Framebuffer;
+use graphics::{Display, Surface};
 use input::Input;
 use process_manager::{GRACE, ProcessManager};
 use runtime::Devices;
@@ -46,12 +46,18 @@ fn main() {
 
     let sound = sound::start().map(Rc::new);
 
-    let draw_commands = Rc::new(RefCell::new(Vec::new()));
-    let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
+    // The screen is a Surface like any other, created here and shared: every
+    // VM's `ely:graphics` bindings draw straight onto it, and the frame loop
+    // below presents it once per tick.
+    let screen = Rc::new(RefCell::new(
+        Surface::new(graphics::SCREEN_WIDTH, graphics::SCREEN_HEIGHT)
+            .expect("failed to allocate the screen surface"),
+    ));
+    let scale = Rc::new(Cell::new(graphics::DEFAULT_SCALE));
     let input = Rc::new(Input::new(Rc::clone(&scale)));
 
     let devices = Devices::new(
-        Rc::clone(&draw_commands),
+        Rc::clone(&screen),
         Rc::clone(&input),
         Rc::clone(&scale),
         sound,
@@ -72,17 +78,17 @@ fn main() {
     let manager = Rc::new(RefCell::new(manager));
     let close_deadline: Rc<Cell<Option<Instant>>> = Rc::new(Cell::new(None));
 
-    let mut framebuffer: Option<Framebuffer> = None;
+    let mut display: Option<Display> = None;
 
     // The window is created before any process runs (init evaluates on
-    // frame 1), so it opens at DEFAULT_SCALE. A process that calls
-    // `setScale` during startup resizes the window live on that first
-    // frame via `Framebuffer::apply_scale` rather than changing the
-    // initial size.
+    // frame 1), so it opens at DEFAULT_SCALE and the screen surface's
+    // initial size. A process that calls `setScale` or resizes the screen
+    // during startup resizes the window live on that first frame via
+    // `Display::present` rather than changing the initial size.
     ElysiumWindow::new(
         "Elysium",
-        framebuffer::FRAMEBUFFER_WIDTH * scale.get(),
-        framebuffer::FRAMEBUFFER_HEIGHT * scale.get(),
+        graphics::SCREEN_WIDTH * scale.get(),
+        graphics::SCREEN_HEIGHT * scale.get(),
     )
     .run(
         {
@@ -91,7 +97,7 @@ fn main() {
         },
         {
             let manager = Rc::clone(&manager);
-            let draw_commands = Rc::clone(&draw_commands);
+            let screen = Rc::clone(&screen);
             let scale = Rc::clone(&scale);
             let input = Rc::clone(&input);
             let mut fps_frames: u32 = 0;
@@ -103,18 +109,25 @@ fn main() {
             let mut tick_time = std::time::Duration::ZERO;
             let mut render_time = std::time::Duration::ZERO;
             move |window, _dt| {
-                let framebuffer = framebuffer
-                    .get_or_insert_with(|| Framebuffer::new(window.clone(), Rc::clone(&scale)));
+                let display = display.get_or_insert_with(|| {
+                    Display::new(
+                        window.clone(),
+                        Rc::clone(&scale),
+                        (screen.borrow().width(), screen.borrow().height()),
+                    )
+                });
 
                 let tick_start = Instant::now();
                 manager.borrow_mut().tick(tick_start);
                 tick_time += tick_start.elapsed();
 
+                // The screen surface already holds this tick's drawing —
+                // every process drew straight onto it. All that's left is
+                // to get it in front of the viewer.
                 let render_start = Instant::now();
-                framebuffer.render(&draw_commands.borrow());
+                display.present(&screen.borrow());
                 render_time += render_start.elapsed();
 
-                draw_commands.borrow_mut().clear();
                 input.end_frame();
 
                 // Report the average frame rate over the last second, split

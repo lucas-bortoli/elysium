@@ -1,5 +1,5 @@
 //! The kernel's built-in bitmap fonts and the text-layout math the
-//! Framebuffer device draws strings with.
+//! drawing surface draws strings with.
 //!
 //! The font data itself — one `FontData` per built-in font, each carrying
 //! its own metrics and a table of `Glyph`s with the BDF's own 1bpp row

@@ -1,12 +1,12 @@
-//! Path building for the Framebuffer device.
+//! Path building for the drawing surface.
 //!
 //! Every outline and filled shape a program can draw — a line, a polygon, a
 //! circle, a rounded rectangle, an arc — is one path, filled or stroked. A
 //! program describes a path one segment at a time, so the kernel keeps a
-//! single path under construction for the current draw handler and appends to
-//! it as those calls arrive. Filling or stroking snapshots that path into a
-//! [`DrawCommand`](super::DrawCommand) and leaves it in place, so the same
-//! path can be filled and then stroked without describing it twice.
+//! single path under construction and appends to it as those calls arrive.
+//! Filling or stroking draws that path straight onto the screen surface and
+//! leaves it in place, so the same path can be filled and then stroked
+//! without describing it twice.
 //!
 //! The curved shapes are all approximated with cubics, because that's the
 //! only curve the rasterizer takes. That approximation is invisible: nothing
@@ -19,7 +19,7 @@ use std::rc::Rc;
 use crate::bindings::bind;
 use rquickjs::{Ctx, Result};
 
-use super::{DrawCommand, resolve_color};
+use super::{ScreenSurface, resolve_color};
 
 /// The path a program is currently describing. Shared between every path
 /// binding below, and cleared by `beginPath`.
@@ -175,13 +175,13 @@ fn resolve_line_join(ctx: &Ctx<'_>, join: &str) -> Result<tiny_skia::LineJoin> {
     }
 }
 
-/// Binds the hidden globals `ely:framebuffer`'s path calls wrap. Split out
-/// from `super::bootstrap_framebuffer_bindings` only because the path half of
-/// the device is large enough to read on its own; the two are bootstrapped
-/// together and share the same draw command list.
+/// Binds the hidden globals `ely:graphics`'s path calls wrap. Split out from
+/// `super::bootstrap_graphics_bindings` only because the path half of the
+/// surface API is large enough to read on its own; the two are bootstrapped
+/// together and draw onto the same screen surface.
 pub fn bootstrap_path_bindings(
     ctx: &Ctx<'_>,
-    draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
+    screen: ScreenSurface,
     path: PathScratch,
 ) -> Result<()> {
     // Each of these appends to the path under construction and is a plain
@@ -285,7 +285,7 @@ pub fn bootstrap_path_bindings(
 
     {
         let path = Rc::clone(&path);
-        let draw_commands = Rc::clone(&draw_commands);
+        let screen = Rc::clone(&screen);
         bind(
             ctx,
             "__framebuffer_fill_path",
@@ -297,9 +297,7 @@ pub fn bootstrap_path_bindings(
                 let Some(path) = path.borrow().clone().finish() else {
                     return Ok(()); // fewer than two points, or not finite
                 };
-                draw_commands
-                    .borrow_mut()
-                    .push(DrawCommand::FillPath { path, rule, color });
+                screen.borrow_mut().fill_path(&path, rule, color);
                 Ok(())
             },
         )?;
@@ -307,7 +305,7 @@ pub fn bootstrap_path_bindings(
 
     {
         let path = Rc::clone(&path);
-        let draw_commands = Rc::clone(&draw_commands);
+        let screen = Rc::clone(&screen);
         bind(
             ctx,
             "__framebuffer_stroke_path",
@@ -333,32 +331,24 @@ pub fn bootstrap_path_bindings(
                 let Some(path) = path.borrow().clone().finish() else {
                     return Ok(());
                 };
-                draw_commands.borrow_mut().push(DrawCommand::StrokePath {
-                    path,
-                    stroke,
-                    color,
-                });
+                screen.borrow_mut().stroke_path(&path, &stroke, color);
                 Ok(())
             },
         )?;
     }
 
     {
-        let draw_commands = Rc::clone(&draw_commands);
+        let screen = Rc::clone(&screen);
         bind(
             ctx,
             "__framebuffer_push_clip_rect",
-            move |x: f32, y: f32, w: f32, h: f32| {
-                draw_commands
-                    .borrow_mut()
-                    .push(DrawCommand::PushClipRect { x, y, w, h })
-            },
+            move |x: f32, y: f32, w: f32, h: f32| screen.borrow_mut().push_clip_rect(x, y, w, h),
         )?;
     }
 
     {
         let path = Rc::clone(&path);
-        let draw_commands = Rc::clone(&draw_commands);
+        let screen = Rc::clone(&screen);
         bind(
             ctx,
             "__framebuffer_push_clip",
@@ -368,16 +358,14 @@ pub fn bootstrap_path_bindings(
                 // all, which is what an empty clip region means; still
                 // push, so the matching pop stays balanced.
                 let path = path.borrow().clone().finish();
-                draw_commands
-                    .borrow_mut()
-                    .push(DrawCommand::PushClip { path, rule });
+                screen.borrow_mut().push_clip(path.as_ref(), rule);
                 Ok(())
             },
         )?;
     }
 
     bind(ctx, "__framebuffer_pop_clip", move || {
-        draw_commands.borrow_mut().push(DrawCommand::PopClip)
+        screen.borrow_mut().pop_clip()
     })?;
 
     Ok(())

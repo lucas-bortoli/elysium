@@ -36,7 +36,7 @@ fn load_image_outside_userland_root_throws_image_load_error() {
          globalThis.threw = false; \
          globalThis.correctType = false; \
          try { \
-             loadImage('/../../framebuffer.rs'); \
+             loadImage('/../../graphics.rs'); \
          } catch (err) { \
              globalThis.threw = true; \
              globalThis.correctType = err instanceof ImageLoadError; \
