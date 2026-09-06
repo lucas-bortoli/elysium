@@ -11,8 +11,8 @@ const CHIME: Note[] = ["A4", "C#5", "E5"];
 
 addPostInitHandler(async () => {
   print("Welcome to Elysium!");
-  // Spawned before the chime, so the examples browser doesn't wait on it.
-  spawn(`${import.meta.directoryName}/../bench/index.ts`, none());
+
+  spawn(`${import.meta.directoryName}/../examples/index.ts`, none());
 
   for (const note of CHIME) {
     await delay(100);
