@@ -605,8 +605,9 @@ declare module "ely:framebuffer" {
   export function popTransform(): void;
 
   /** Confines everything drawn afterwards to the rectangle at `(x, y)`,
-   * until the matching `popClip`. Clips nest by narrowing. Starts a new
-   * path. */
+   * until the matching `popClip`. Clips nest by narrowing. Under a rotated
+   * or sheared transform the region is the turned rectangle itself, not its
+   * bounding box. */
   export function pushClip(x: number, y: number, w: number, h: number): void;
 
   /** Confines everything drawn afterwards to the inside of the current
