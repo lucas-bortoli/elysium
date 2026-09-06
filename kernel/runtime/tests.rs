@@ -6,8 +6,9 @@
 //! the JS is the input, and what it observes is the assertion. A test that
 //! exercises a device's own internals, with no JS involved, belongs in a
 //! `mod tests` inside that device's module instead: the clip and transform
-//! algebra in `framebuffer/state.rs`, path geometry in `framebuffer/paths.rs`,
-//! window-event folding in `input.rs`, glyph metrics in `text.rs`. The two
+//! algebra in `graphics/state.rs`, path geometry in `graphics/paths.rs`,
+//! surface drawing in `graphics/surface.rs`, window-event folding in
+//! `input.rs`, glyph metrics in `text.rs`. The two
 //! layers are complementary, and a mechanism is usually worth covering at
 //! both: `ely:process`'s bindings are tested here against a detached runtime,
 //! while the scheduling they feed — spawning, mailboxes, reaping, faults — is
@@ -19,7 +20,7 @@ use std::rc::Rc;
 
 use rquickjs::FromJs;
 
-use crate::framebuffer;
+use crate::graphics::{DEFAULT_SCALE, SCREEN_HEIGHT, SCREEN_WIDTH, ScreenSurface, Surface};
 use crate::input::Input;
 use crate::process::ProcessChannel;
 
@@ -49,11 +50,11 @@ mod timers;
 /// later `playTone` reports the audio thread as gone. Helpers that discard
 /// it are fine only because their tests never play anything.
 fn build_runtime(root: PathBuf) -> (ElysiumRuntime, Rc<Input>, SoundLog) {
-    let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
+    let scale = Rc::new(Cell::new(DEFAULT_SCALE));
     let input = Rc::new(Input::new(Rc::clone(&scale)));
     let (audio, audio_log) = Sound::detached();
     let devices = Devices::new(
-        Rc::new(RefCell::new(Vec::new())),
+        test_screen(),
         Rc::clone(&input),
         scale,
         Some(Rc::new(audio)),
@@ -103,7 +104,7 @@ fn eval_with_root(root: PathBuf, source: &str) -> ElysiumRuntime {
 /// The default `userland_root` for tests that don't need a writable one: a
 /// fixed fixtures directory holding a small real PNG (`test.png`), a small
 /// real module (`meta_module.ts`), and a relative-import target.
-/// `kernel/framebuffer.rs`, two levels up, is a real file outside the
+/// `kernel/graphics.rs`, two levels up, is a real file outside the
 /// directory a path-traversal test can point at.
 fn test_userland_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("kernel/image/fixtures")
@@ -142,21 +143,24 @@ fn eval_with_audio(source: &str) -> (ElysiumRuntime, SoundLog) {
 /// A VM built against a machine with no working output device, for the
 /// bindings' silent-no-op path.
 fn eval_without_audio(source: &str) -> ElysiumRuntime {
-    let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
+    let scale = Rc::new(Cell::new(DEFAULT_SCALE));
     let input = Rc::new(Input::new(Rc::clone(&scale)));
-    let devices = Devices::new(
-        Rc::new(RefCell::new(Vec::new())),
-        input,
-        scale,
-        None,
-        test_userland_root(),
-    );
+    let devices = Devices::new(test_screen(), input, scale, None, test_userland_root());
     let runtime = ElysiumRuntime::new(&devices, 0, ProcessChannel::new(), None)
         .expect("failed to construct runtime");
     runtime
         .eval_module("test.ts", source)
         .expect("module failed to evaluate");
     runtime
+}
+
+/// A fresh screen surface at the boot resolution, behind the shared handle
+/// every VM's `ely:graphics` bindings draw onto.
+fn test_screen() -> ScreenSurface {
+    Rc::new(RefCell::new(
+        Surface::new(SCREEN_WIDTH, SCREEN_HEIGHT)
+            .expect("failed to allocate the test screen surface"),
+    ))
 }
 
 /// Reads `globalThis[name]` out of a VM and converts it to `T`.

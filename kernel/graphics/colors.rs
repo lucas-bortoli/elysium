@@ -1,8 +1,8 @@
-//! The Framebuffer device's fixed color palette: 26 hue families x 11 shades
+//! The drawing system's fixed color palette: 26 hue families x 11 shades
 //! (50-950, the familiar Tailwind scale) plus black and white.
 //!
 //! The palette itself — every entry's name and sRGB value — lives in
-//! `kernel/framebuffer/palette.rs`, the one table the `Color` enum here, the
+//! `kernel/graphics/palette.rs`, the one table the `Color` enum here, the
 //! `Color` constant `ely:framebuffer` exports, and the ambient declaration
 //! userland typechecks against are all generated from. The enum and its
 //! `hex` match are emitted into `$OUT_DIR/palette.rs` at build time and

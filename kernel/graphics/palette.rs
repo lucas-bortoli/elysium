@@ -1,4 +1,4 @@
-//! The Framebuffer device's fixed color palette, and the single table every
+//! The drawing system's fixed color palette, and the single table every
 //! copy of it is generated from.
 //!
 //! A palette entry has to be spelled out in three places: the kernel's

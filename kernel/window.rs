@@ -1,10 +1,10 @@
 //! The kernel's one owner of the OS-level windowing/event loop.
 //!
-//! No other module ever names a `winit` type: `kernel/framebuffer.rs`'s
-//! `Framebuffer` only ever sees a shared `Arc<Window>` handle, never the event
+//! No other module ever names a `winit` type: `kernel/graphics.rs`'s
+//! `Display` only ever sees a shared `Arc<Window>` handle, never the event
 //! loop itself. That's deliberate — a future Input device needs the same
 //! window's keyboard/mouse events (`winit::event::WindowEvent`s arriving
-//! here), and shouldn't have to reach through Framebuffer to get them. This is
+//! here), and shouldn't have to reach through `Display` to get them. This is
 //! the one seam both devices attach to.
 
 use std::sync::Arc;

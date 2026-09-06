@@ -1,5 +1,5 @@
-//! Loading PNGs off disk into images a program can draw with the
-//! Framebuffer device (see `kernel/framebuffer.rs`'s `DrawCommand::DrawImage`).
+//! Loading PNGs off disk into images a program can draw onto a
+//! `graphics::Surface`.
 //!
 //! Loaded images are tracked in a per-VM [`ImageTable`], keyed by an
 //! incrementing numeric id handed back to `ely:image`'s `loadImage` —
@@ -19,14 +19,14 @@ use crate::bindings::bind;
 use rquickjs::{Ctx, Result};
 
 use crate::filesystem;
-use crate::framebuffer::Color;
+use crate::graphics::Color;
 
 struct ImageEntry {
     id: u32,
     image: LoadedImage,
 }
 
-/// A quantized image plus whether it has any transparency. The Framebuffer
+/// A quantized image plus whether it has any transparency. A surface
 /// blits a fully opaque image with a straight copy instead of a per-pixel
 /// `source-over` blend.
 #[derive(Clone)]
@@ -95,9 +95,9 @@ impl ImageTable {
 
 /// Resolves a numeric image id to its `Pixmap`, throwing a `TypeError` if
 /// it's never been loaded (or was already unloaded) — mirrors
-/// `framebuffer::resolve_color`'s handling of an out-of-range color id.
+/// `graphics::resolve_color`'s handling of an out-of-range color id.
 /// Used both by `__image_width`/`__image_height` below and by
-/// `framebuffer::bootstrap_framebuffer_bindings`'s `__framebuffer_draw_image`.
+/// `graphics::bootstrap_graphics_bindings`'s `__framebuffer_draw_image`.
 pub fn resolve_image(ctx: &Ctx<'_>, images: &ImageTable, id: u32) -> Result<LoadedImage> {
     images
         .get(id)
@@ -110,7 +110,7 @@ pub fn resolve_image(ctx: &Ctx<'_>, images: &ImageTable, id: u32) -> Result<Load
 /// promise: a pixel this image contributes to a frame is either absent or
 /// an exact palette color, never a blend of one with whatever sits behind
 /// it. Runs once, at load time, never per frame. Also reports whether the
-/// image ends up fully opaque, so the Framebuffer can blit it with a plain
+/// image ends up fully opaque, so a surface can blit it with a plain
 /// copy.
 fn quantize_to_palette(mut pixmap: tiny_skia::Pixmap) -> (tiny_skia::Pixmap, bool) {
     let mut opaque = true;
