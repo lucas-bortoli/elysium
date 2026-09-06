@@ -344,6 +344,19 @@ pub fn bootstrap_path_bindings(
     }
 
     {
+        let draw_commands = Rc::clone(&draw_commands);
+        bind(
+            ctx,
+            "__framebuffer_push_clip_rect",
+            move |x: f32, y: f32, w: f32, h: f32| {
+                draw_commands
+                    .borrow_mut()
+                    .push(DrawCommand::PushClipRect { x, y, w, h })
+            },
+        )?;
+    }
+
+    {
         let path = Rc::clone(&path);
         let draw_commands = Rc::clone(&draw_commands);
         bind(

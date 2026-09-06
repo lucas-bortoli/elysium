@@ -28,7 +28,7 @@ mod paths;
 mod state;
 pub use colors::Color;
 
-use state::DrawState;
+use state::{ClipRect, DrawState};
 
 use crate::bindings::bind;
 use crate::text;
@@ -113,7 +113,16 @@ pub enum DrawCommand {
         transform: tiny_skia::Transform,
     },
     PopTransform,
-    /// Narrows the region drawing is confined to, until the matching
+    /// Narrows the clip to a rectangle in the current coordinates, until the
+    /// matching `PopClip`. Stays a bare rectangle under an axis-aligned
+    /// transform; a non-positive size confines drawing to nothing.
+    PushClipRect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    },
+    /// Narrows the clip to the inside of a path, until the matching
     /// `PopClip`. `None` confines it to nothing.
     PushClip {
         path: Option<tiny_skia::Path>,
@@ -547,11 +556,15 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
                     continue; // negative or non-finite size
                 };
                 paint.set_color(color.to_skia());
-                pixmap.fill_rect(rect, &paint, state.transform(), state.clip());
+                let t = state.transform();
+                let clip = state.clip_for(mapped_bounds(rect, t));
+                pixmap.fill_rect(rect, &paint, t, clip);
             }
             DrawCommand::FillPath { path, rule, color } => {
                 paint.set_color(color.to_skia());
-                pixmap.fill_path(path, &paint, *rule, state.transform(), state.clip());
+                let t = state.transform();
+                let clip = state.clip_for(mapped_bounds(path.bounds(), t));
+                pixmap.fill_path(path, &paint, *rule, t, clip);
             }
             DrawCommand::StrokePath {
                 path,
@@ -559,7 +572,17 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
                 color,
             } => {
                 paint.set_color(color.to_skia());
-                pixmap.stroke_path(path, &paint, stroke, state.transform(), state.clip());
+                let t = state.transform();
+                // The outline reaches half the stroke width past the path.
+                let reach = stroke.width * 0.5;
+                let outset = tiny_skia::Rect::from_ltrb(
+                    path.bounds().left() - reach,
+                    path.bounds().top() - reach,
+                    path.bounds().right() + reach,
+                    path.bounds().bottom() + reach,
+                );
+                let clip = state.clip_for(outset.and_then(|rect| mapped_bounds(rect, t)));
+                pixmap.stroke_path(path, &paint, stroke, t, clip);
             }
             DrawCommand::SetPixel { x, y, color } => {
                 let (px, py) = state.map_point(*x, *y);
@@ -584,6 +607,7 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
             }
             DrawCommand::PushTransform { transform } => state.push_transform(*transform),
             DrawCommand::PopTransform => state.pop_transform(),
+            DrawCommand::PushClipRect { x, y, w, h } => state.push_clip_rect(*x, *y, *w, *h),
             DrawCommand::PushClip { path, rule } => state.push_clip(path.as_ref(), *rule),
             DrawCommand::PopClip => state.pop_clip(),
             DrawCommand::DrawImage {
@@ -595,13 +619,17 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
                 // draw_pixmap places by whole pixels, so the transform's
                 // shift has to be folded into the position itself.
                 let (dx, dy) = state.map_point(*x, *y);
+                let (dx, dy) = (dx.round(), dy.round());
+                let bounds =
+                    tiny_skia::Rect::from_xywh(dx, dy, image.width() as f32, image.height() as f32);
+                let clip = state.clip_for(bounds);
                 pixmap.draw_pixmap(
-                    dx.round() as i32,
-                    dy.round() as i32,
+                    dx as i32,
+                    dy as i32,
                     (**image).as_ref(),
                     if *opaque { &copy_paint } else { &blend_paint },
                     tiny_skia::Transform::identity(),
-                    state.clip(),
+                    clip,
                 );
             }
             DrawCommand::DrawImageTransformed {
@@ -610,13 +638,16 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
                 source,
                 transform,
             } => {
+                let full = state.transform().pre_concat(*transform);
+                let clip_bounds = state.clip_bounds();
                 blit_transformed(
                     pixmap,
                     image,
                     *source,
-                    state.transform().pre_concat(*transform),
+                    full,
                     *opaque,
-                    state.clip(),
+                    clip_bounds,
+                    state.clip_mask(),
                 );
             }
             DrawCommand::DrawText {
@@ -672,19 +703,49 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
     }
 }
 
+/// The axis-aligned surface box a shape whose local bounds are `local` lands
+/// in under `transform`. `None` when it has no area — a caller treats that as
+/// "extent unknown" and clips conservatively.
+fn mapped_bounds(
+    local: tiny_skia::Rect,
+    transform: tiny_skia::Transform,
+) -> Option<tiny_skia::Rect> {
+    let mut corners = [
+        tiny_skia::Point::from_xy(local.left(), local.top()),
+        tiny_skia::Point::from_xy(local.right(), local.top()),
+        tiny_skia::Point::from_xy(local.right(), local.bottom()),
+        tiny_skia::Point::from_xy(local.left(), local.bottom()),
+    ];
+    transform.map_points(&mut corners);
+    let min_x = corners.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+    let max_x = corners
+        .iter()
+        .map(|p| p.x)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_y = corners.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+    let max_y = corners
+        .iter()
+        .map(|p| p.y)
+        .fold(f32::NEG_INFINITY, f32::max);
+    tiny_skia::Rect::from_ltrb(min_x, min_y, max_x, max_y)
+}
+
 /// Draws `source` out of `image` onto `dest` under `transform`, which maps
 /// the source rect's own coordinates onto the surface. Nearest-neighbour and
 /// nothing else: every pixel written is a verbatim texel, so however the
 /// image is turned or resized it stays on the palette, and there is no
-/// sampler pipeline to pay for per pixel. `clip`, when present, is the
-/// surface-space mask drawing is confined to.
+/// sampler pipeline to pay for per pixel. `clip_bounds` tightens the walked
+/// box; `clip_mask`, when the clip isn't a bare rectangle, is checked per
+/// pixel on top of it.
+#[allow(clippy::too_many_arguments)]
 fn blit_transformed(
     dest: &mut tiny_skia::Pixmap,
     image: &tiny_skia::Pixmap,
     source: tiny_skia::Rect,
     transform: tiny_skia::Transform,
     opaque: bool,
-    clip: Option<&tiny_skia::Mask>,
+    clip_bounds: Option<ClipRect>,
+    clip_mask: Option<&tiny_skia::Mask>,
 ) {
     // A degenerate transform — a zero scale, say — collapses the image to
     // nothing, and there is no inverse to walk back through.
@@ -714,10 +775,17 @@ fn blit_transformed(
 
     let dest_w = dest.width() as i32;
     let dest_h = dest.height() as i32;
-    let x0 = (min_x.floor() as i32).max(0);
-    let y0 = (min_y.floor() as i32).max(0);
-    let x1 = (max_x.ceil() as i32).min(dest_w);
-    let y1 = (max_y.ceil() as i32).min(dest_h);
+    // A rectangular clip is enforced just by not walking outside it.
+    let box_ = clip_bounds.unwrap_or(ClipRect {
+        x0: 0,
+        y0: 0,
+        x1: dest_w,
+        y1: dest_h,
+    });
+    let x0 = (min_x.floor() as i32).max(0).max(box_.x0);
+    let y0 = (min_y.floor() as i32).max(0).max(box_.y0);
+    let x1 = (max_x.ceil() as i32).min(dest_w).min(box_.x1);
+    let y1 = (max_y.ceil() as i32).min(dest_h).min(box_.y1);
     if x0 >= x1 || y0 >= y1 {
         return;
     }
@@ -726,7 +794,7 @@ fn blit_transformed(
     let src_h = image.height() as i32;
     let (sl, st, sw, sh) = (source.left(), source.top(), source.width(), source.height());
     let src_pixels = image.pixels();
-    let clip = clip.map(|mask| mask.data());
+    let clip = clip_mask.map(|mask| mask.data());
     let dest_pixels = dest.pixels_mut();
 
     // Writes one sampled texel at `target`, honouring the opacity rule.

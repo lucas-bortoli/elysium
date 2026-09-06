@@ -97,6 +97,12 @@ declare function __framebuffer_push_transform(
   ty: number,
 ): void;
 declare function __framebuffer_pop_transform(): void;
+declare function __framebuffer_push_clip_rect(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): void;
 declare function __framebuffer_push_clip(rule: FillRule): void;
 declare function __framebuffer_pop_clip(): void;
 declare function __framebuffer_draw_image_transformed(
@@ -833,13 +839,13 @@ export function popTransform(): void {
 
 /** Confines everything drawn afterwards to the rectangle at `(x, y)`, until
  * the matching `popClip`. Clips nest by narrowing: drawing can never escape
- * a region an enclosing clip already confined it to. Starts a new path. */
+ * a region an enclosing clip already confined it to. Under a rotated or
+ * sheared transform the region is the turned rectangle itself, not its
+ * bounding box. */
 export function pushClip(x: number, y: number, w: number, h: number): void {
   if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_path_begin();
-  __framebuffer_path_rect(x, y, w, h);
   clipDepth++;
-  __framebuffer_push_clip("nonzero");
+  __framebuffer_push_clip_rect(x, y, w, h);
 }
 
 /** Confines everything drawn afterwards to the inside of the current path,
