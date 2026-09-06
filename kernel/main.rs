@@ -11,7 +11,6 @@ mod sound;
 mod text;
 mod timers;
 mod window;
-mod workers;
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;

@@ -14,7 +14,6 @@
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use crate::bindings::bind;
 use rquickjs::{Ctx, Result};
@@ -30,16 +29,9 @@ struct ImageEntry {
 /// A quantized image plus whether it has any transparency. The Framebuffer
 /// blits a fully opaque image with a straight copy instead of a per-pixel
 /// `source-over` blend.
-///
-/// The pixmap is held behind an `Arc` rather than an `Rc` so a frame's
-/// [`DrawCommand`](crate::framebuffer::DrawCommand) list stays `Send`: the
-/// rasterizer splits the surface into horizontal bands and replays the list
-/// against each on its own thread, and every band shares these same texels
-/// by reference. Nothing else about an image crosses a thread boundary — the
-/// [`ImageTable`] and its ids stay VM-local and single-threaded.
 #[derive(Clone)]
 pub struct LoadedImage {
-    pub pixmap: Arc<tiny_skia::Pixmap>,
+    pub pixmap: Rc<tiny_skia::Pixmap>,
     pub opaque: bool,
 }
 
@@ -72,7 +64,7 @@ impl ImageTable {
         self.images.borrow_mut().push(ImageEntry {
             id,
             image: LoadedImage {
-                pixmap: Arc::new(pixmap),
+                pixmap: Rc::new(pixmap),
                 opaque,
             },
         });
