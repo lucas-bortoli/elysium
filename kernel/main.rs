@@ -14,6 +14,7 @@ mod window;
 mod workers;
 
 use std::cell::{Cell, RefCell};
+use std::path::Path;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -31,7 +32,18 @@ fn main() {
         .parent()
         .expect("binary path has no parent directory")
         .to_path_buf();
-    let userland_root = exe_dir.join("userland");
+    // Prefer the userland tree in the source checkout this binary was built
+    // from, so editing a program never feeds into `cargo build` and forces a
+    // relink. When that path is gone — a binary packaged and shipped
+    // elsewhere — fall back to `userland` sitting beside the executable.
+    let userland_root = {
+        let in_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("userland");
+        if in_source.is_dir() {
+            in_source
+        } else {
+            exe_dir.join("userland")
+        }
+    };
 
     let sound = sound::start().map(Rc::new);
 
@@ -50,7 +62,7 @@ fn main() {
 
     // The init process is spawned like any other — a fault in it drops it
     // and empties the table, no different from a fault in a child.
-    if let Err(err) = manager.spawn_from_path("/programs/init/index.ts", None) {
+    if let Err(err) = manager.spawn_from_path("/init.ts", None) {
         eprintln!("failed to start the init process: {err:?}");
     }
     if manager.is_empty() {

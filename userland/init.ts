@@ -12,7 +12,7 @@ const CHIME: Note[] = ["A4", "C#5", "E5"];
 addPostInitHandler(async () => {
   print("Welcome to Elysium!");
 
-  spawn(`${import.meta.directoryName}/../examples/index.ts`, none());
+  spawn(`${import.meta.directoryName}/programs/examples/index.ts`, none());
 
   for (const note of CHIME) {
     await delay(100);
@@ -24,4 +24,6 @@ addPostInitHandler(async () => {
       duration: 0.4,
     });
   }
+
+  print("Init is finished!");
 });
