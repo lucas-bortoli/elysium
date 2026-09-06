@@ -63,6 +63,8 @@ pub enum DrawCommand {
     /// case of a whole image at its natural size stays a straight blit.
     DrawImageTransformed {
         pixmap: Rc<tiny_skia::Pixmap>,
+        /// Fully opaque — write texels straight in, no `source-over` blend.
+        opaque: bool,
         /// The part of the image to draw, in its own pixels.
         source: tiny_skia::Rect,
         /// Where that part lands, mapping the source rect's own top-left
@@ -297,6 +299,7 @@ pub fn bootstrap_framebuffer_bindings(
                 .borrow_mut()
                 .push(DrawCommand::DrawImageTransformed {
                     pixmap: image.pixmap,
+                    opaque: image.opaque,
                     source,
                     transform: tiny_skia::Transform::from_row(a, b, c, d, e, f),
                 });
@@ -603,35 +606,16 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
             }
             DrawCommand::DrawImageTransformed {
                 pixmap: image,
+                opaque,
                 source,
                 transform,
             } => {
-                // The pattern is shifted so the source rect's own top-left
-                // lands at the local origin, which crops to it without
-                // copying the pixels out first. Nearest sampling keeps every
-                // pixel drawn an exact palette color however the image is
-                // turned or resized.
-                let pattern = tiny_skia::Pattern::new(
-                    (**image).as_ref(),
-                    tiny_skia::SpreadMode::Pad,
-                    tiny_skia::FilterQuality::Nearest,
-                    1.0,
-                    tiny_skia::Transform::from_translate(-source.x(), -source.y()),
-                );
-                let patterned = tiny_skia::Paint {
-                    shader: pattern,
-                    anti_alias: false,
-                    ..Default::default()
-                };
-                let Some(local) =
-                    tiny_skia::Rect::from_xywh(0.0, 0.0, source.width(), source.height())
-                else {
-                    continue;
-                };
-                pixmap.fill_rect(
-                    local,
-                    &patterned,
+                blit_transformed(
+                    pixmap,
+                    image,
+                    *source,
                     state.transform().pre_concat(*transform),
+                    *opaque,
                     state.clip(),
                 );
             }
@@ -686,6 +670,112 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
             }
         }
     }
+}
+
+/// Draws `source` out of `image` onto `dest` under `transform`, which maps
+/// the source rect's own coordinates onto the surface. Nearest-neighbour and
+/// nothing else: every pixel written is a verbatim texel, so however the
+/// image is turned or resized it stays on the palette, and there is no
+/// sampler pipeline to pay for per pixel. `clip`, when present, is the
+/// surface-space mask drawing is confined to.
+fn blit_transformed(
+    dest: &mut tiny_skia::Pixmap,
+    image: &tiny_skia::Pixmap,
+    source: tiny_skia::Rect,
+    transform: tiny_skia::Transform,
+    opaque: bool,
+    clip: Option<&tiny_skia::Mask>,
+) {
+    // A degenerate transform — a zero scale, say — collapses the image to
+    // nothing, and there is no inverse to walk back through.
+    let Some(inverse) = transform.invert() else {
+        return;
+    };
+
+    // The destination bounding box: the source rect's four corners mapped
+    // onto the surface, clamped to it.
+    let mut corners = [
+        tiny_skia::Point::from_xy(0.0, 0.0),
+        tiny_skia::Point::from_xy(source.width(), 0.0),
+        tiny_skia::Point::from_xy(source.width(), source.height()),
+        tiny_skia::Point::from_xy(0.0, source.height()),
+    ];
+    transform.map_points(&mut corners);
+    let min_x = corners.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+    let max_x = corners
+        .iter()
+        .map(|p| p.x)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_y = corners.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+    let max_y = corners
+        .iter()
+        .map(|p| p.y)
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    let dest_w = dest.width() as i32;
+    let dest_h = dest.height() as i32;
+    let x0 = (min_x.floor() as i32).max(0);
+    let y0 = (min_y.floor() as i32).max(0);
+    let x1 = (max_x.ceil() as i32).min(dest_w);
+    let y1 = (max_y.ceil() as i32).min(dest_h);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+
+    let src_w = image.width() as i32;
+    let src_h = image.height() as i32;
+    let (sx, sy, sw, sh) = (source.left(), source.top(), source.width(), source.height());
+    let src_pixels = image.pixels();
+    let clip = clip.map(|mask| mask.data());
+    let dest_pixels = dest.pixels_mut();
+
+    for py in y0..y1 {
+        let row = (py * dest_w) as usize;
+        for px in x0..x1 {
+            if let Some(clip) = clip
+                && clip[row + px as usize] == 0
+            {
+                continue;
+            }
+            // Sample at the pixel's centre, in the source rect's own space.
+            let mut probe = [tiny_skia::Point::from_xy(px as f32 + 0.5, py as f32 + 0.5)];
+            inverse.map_points(&mut probe);
+            let (u, v) = (probe[0].x, probe[0].y);
+            if u < 0.0 || v < 0.0 || u >= sw || v >= sh {
+                continue;
+            }
+            let tx = (sx + u).floor() as i32;
+            let ty = (sy + v).floor() as i32;
+            if tx < 0 || ty < 0 || tx >= src_w || ty >= src_h {
+                continue; // a fractional source rect can round one past its edge
+            }
+            let texel = src_pixels[(ty * src_w + tx) as usize];
+            let target = row + px as usize;
+            if opaque || texel.alpha() == 255 {
+                dest_pixels[target] = texel;
+            } else if texel.alpha() != 0 {
+                dest_pixels[target] = over(texel, dest_pixels[target]);
+            }
+        }
+    }
+}
+
+/// `source-over` of two premultiplied pixels. Images are quantized so every
+/// texel is fully opaque or fully clear before they ever reach here, so this
+/// runs only for a partial texel a test constructs by hand.
+fn over(
+    src: tiny_skia::PremultipliedColorU8,
+    dst: tiny_skia::PremultipliedColorU8,
+) -> tiny_skia::PremultipliedColorU8 {
+    let inv = 255 - src.alpha() as u32;
+    let blend = |s: u8, d: u8| (s as u32 + (d as u32 * inv + 127) / 255) as u8;
+    tiny_skia::PremultipliedColorU8::from_rgba(
+        blend(src.red(), dst.red()),
+        blend(src.green(), dst.green()),
+        blend(src.blue(), dst.blue()),
+        blend(src.alpha(), dst.alpha()),
+    )
+    .unwrap_or(src)
 }
 
 #[cfg(test)]
@@ -1041,6 +1131,7 @@ mod tests {
                 },
                 DrawCommand::DrawImageTransformed {
                     pixmap: marked_image(),
+                    opaque: true,
                     // Just the marked pixel.
                     source: tiny_skia::Rect::from_xywh(1.0, 1.0, 1.0, 1.0).unwrap(),
                     transform: tiny_skia::Transform::from_translate(10.0, 10.0),
@@ -1064,6 +1155,7 @@ mod tests {
                 },
                 DrawCommand::DrawImageTransformed {
                     pixmap: marked_image(),
+                    opaque: true,
                     source: tiny_skia::Rect::from_xywh(1.0, 1.0, 1.0, 1.0).unwrap(),
                     transform: tiny_skia::Transform::from_row(4.0, 0.0, 0.0, 4.0, 10.0, 10.0),
                 },
@@ -1096,6 +1188,7 @@ mod tests {
                     },
                     DrawCommand::DrawImageTransformed {
                         pixmap: marked_image(),
+                        opaque: true,
                         source: tiny_skia::Rect::from_xywh(0.0, 0.0, 4.0, 4.0).unwrap(),
                         transform: tiny_skia::Transform::from_translate(10.0, 10.0)
                             .pre_concat(flip),
@@ -1120,6 +1213,7 @@ mod tests {
                 },
                 DrawCommand::DrawImageTransformed {
                     pixmap: marked_image(),
+                    opaque: true,
                     source: tiny_skia::Rect::from_xywh(0.0, 0.0, 4.0, 4.0).unwrap(),
                     transform: tiny_skia::Transform::from_translate(20.0, 20.0)
                         .pre_concat(tiny_skia::Transform::from_rotate(37.0))
@@ -1128,6 +1222,66 @@ mod tests {
             ],
         );
         assert_every_pixel_is_a_palette_color(&pixmap);
+    }
+
+    #[test]
+    fn a_transformed_image_is_confined_by_a_clip() {
+        let mut pixmap = surface();
+        rasterize(
+            &mut pixmap,
+            &[
+                DrawCommand::ClearScreen {
+                    color: Color::Slate900,
+                },
+                DrawCommand::PushClip {
+                    // Only the left half of where the scaled image lands.
+                    path: Some(rect_path(0.0, 0.0, 18.0, 64.0)),
+                    rule: tiny_skia::FillRule::Winding,
+                },
+                DrawCommand::DrawImageTransformed {
+                    pixmap: marked_image(),
+                    opaque: true,
+                    source: tiny_skia::Rect::from_xywh(0.0, 0.0, 4.0, 4.0).unwrap(),
+                    transform: tiny_skia::Transform::from_row(4.0, 0.0, 0.0, 4.0, 10.0, 10.0),
+                },
+                DrawCommand::PopClip,
+            ],
+        );
+        // Inside the clip the image's fill shows; past it the background does.
+        assert_eq!(pixel_at(&pixmap, 12, 12), Color::Teal300.hex());
+        assert_eq!(pixel_at(&pixmap, 24, 12), Color::Slate900.hex());
+    }
+
+    #[test]
+    fn a_clear_texel_in_a_transformed_image_leaves_the_background() {
+        let mut image = tiny_skia::Pixmap::new(2, 2).expect("test image");
+        // One opaque pixel at (0, 0); the rest fully transparent.
+        image.pixels_mut()[0] = tiny_skia::ColorU8::from_rgba(
+            ((Color::Rose500.hex() >> 16) & 0xff) as u8,
+            ((Color::Rose500.hex() >> 8) & 0xff) as u8,
+            (Color::Rose500.hex() & 0xff) as u8,
+            255,
+        )
+        .premultiply();
+
+        let mut pixmap = surface();
+        rasterize(
+            &mut pixmap,
+            &[
+                DrawCommand::ClearScreen {
+                    color: Color::Slate900,
+                },
+                DrawCommand::DrawImageTransformed {
+                    pixmap: std::rc::Rc::new(image),
+                    opaque: false,
+                    source: tiny_skia::Rect::from_xywh(0.0, 0.0, 2.0, 2.0).unwrap(),
+                    transform: tiny_skia::Transform::from_row(5.0, 0.0, 0.0, 5.0, 10.0, 10.0),
+                },
+            ],
+        );
+        // The opaque corner drew; a transparent texel left the clear colour.
+        assert_eq!(pixel_at(&pixmap, 12, 12), Color::Rose500.hex());
+        assert_eq!(pixel_at(&pixmap, 20, 20), Color::Slate900.hex());
     }
 
     fn assert_every_pixel_is_a_palette_color(pixmap: &tiny_skia::Pixmap) {
