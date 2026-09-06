@@ -36,9 +36,14 @@ use crate::text;
 /// One drawing instruction accumulated during a program's `draw()` call.
 /// Colors are always a [`Color`] from the fixed palette, never raw,
 /// program-supplied RGBA channels. Not `Copy` — `DrawImage` carries an
-/// `Rc<tiny_skia::Pixmap>`, already resolved from a JS-supplied image id at
+/// `Arc<tiny_skia::Pixmap>`, already resolved from a JS-supplied image id at
 /// the binding boundary (see `__framebuffer_draw_image` below), the same
 /// way `resolve_color` resolves a color id before it ever reaches here.
+///
+/// The whole enum is `Send`: [`Framebuffer::render`] hands a shared reference
+/// to one frame's list to every band thread, so an image's texels are reached
+/// through an `Arc` rather than an `Rc`. Every other field is a plain value or
+/// an already-`Send` tiny-skia type.
 #[derive(Debug, Clone)]
 pub enum DrawCommand {
     ClearScreen {
@@ -52,7 +57,7 @@ pub enum DrawCommand {
         color: Color,
     },
     DrawImage {
-        pixmap: Rc<tiny_skia::Pixmap>,
+        pixmap: Arc<tiny_skia::Pixmap>,
         /// Fully opaque — blit with a plain copy, no `source-over` blend.
         opaque: bool,
         x: f32,
@@ -62,7 +67,7 @@ pub enum DrawCommand {
     /// a size, a flip, a turn. Kept apart from `DrawImage` so the common
     /// case of a whole image at its natural size stays a straight blit.
     DrawImageTransformed {
-        pixmap: Rc<tiny_skia::Pixmap>,
+        pixmap: Arc<tiny_skia::Pixmap>,
         /// Fully opaque — write texels straight in, no `source-over` blend.
         opaque: bool,
         /// The part of the image to draw, in its own pixels.
@@ -368,17 +373,12 @@ pub struct Framebuffer {
     // tiny-skia with no per-draw scaling math; the upscale to the window's
     // physical size happens once, in `present`.
     pixmap: tiny_skia::Pixmap,
-    // Reused every frame in `present`: one packed-XRGB row, built once per
-    // source row and duplicated `applied_scale` times into the destination
-    // buffer, instead of allocating a fresh row each frame. Reallocated
-    // whenever `applied_scale` changes.
-    row_scratch: Vec<u32>,
     // Shared with `ely:framebuffer`'s `setScale` binding — the scale a
     // program most recently requested, checked once per `render` call.
     scale: Rc<Cell<u32>>,
-    // The scale `pixmap`/`row_scratch`/`surface`/`window` are currently
-    // configured for. Compared against `scale` each frame; `render`
-    // reconfigures everything through `apply_scale` when the two differ.
+    // The scale `pixmap`/`surface`/`window` are currently configured for.
+    // Compared against `scale` each frame; `render` reconfigures everything
+    // through `apply_scale` when the two differ.
     applied_scale: u32,
     // Needed to resize the OS window itself when the scale changes — see
     // `apply_scale`. `Framebuffer` never touches the event loop, only this
@@ -421,7 +421,6 @@ impl Framebuffer {
 
         Framebuffer {
             pixmap,
-            row_scratch: vec![0u32; physical_width as usize],
             scale,
             applied_scale,
             window,
@@ -440,17 +439,18 @@ impl Framebuffer {
             self.apply_scale(requested_scale);
         }
 
-        rasterize(&mut self.pixmap, commands);
-        self.present();
+        let pool = crate::workers::Pool::global();
+        rasterize_parallel(pool, &mut self.pixmap, commands);
+        self.present(pool);
     }
 
     /// Reconfigures everything that depends on the physical-pixels-per-
     /// logical-pixel ratio for a newly requested `scale`: resizes the OS
     /// window to match (still not user-resizable — `.with_resizable(false)`
     /// only blocks resize via OS chrome, not a program calling this),
-    /// resizes the softbuffer surface to the new physical size, and
-    /// reallocates `row_scratch` at the new width. `pixmap` itself is
-    /// untouched — it's always logical resolution, regardless of scale.
+    /// and resizes the softbuffer surface to the new physical size. `pixmap`
+    /// itself is untouched — it's always logical resolution, regardless of
+    /// scale.
     fn apply_scale(&mut self, scale: u32) {
         self.applied_scale = scale;
         let physical_width = FRAMEBUFFER_WIDTH * scale;
@@ -465,7 +465,6 @@ impl Framebuffer {
                 NonZeroU32::new(physical_height).expect("scale is 0"),
             )
             .expect("failed to resize the softbuffer surface");
-        self.row_scratch = vec![0u32; physical_width as usize];
     }
 
     /// Copies the logical `Pixmap` into the window's physical-resolution
@@ -475,7 +474,13 @@ impl Framebuffer {
     /// x `FRAMEBUFFER_HEIGHT * applied_scale` — Elysium doesn't follow the
     /// OS's DPI scale factor, so a host reporting one other than 1.0 will
     /// see a mismatched/clipped presentation.
-    fn present(&mut self) {
+    ///
+    /// The upscale is spread across `pool`: one source row expands to a
+    /// self-contained block of `scale` destination rows, so cutting the
+    /// destination into runs of whole such blocks gives each thread a
+    /// disjoint, contiguous slice to fill from a shared read-only view of the
+    /// source.
+    fn present(&mut self, pool: &crate::workers::Pool) {
         let mut buffer = self
             .surface
             .buffer_mut()
@@ -490,19 +495,42 @@ impl Framebuffer {
         let src_h = self.pixmap.height() as usize;
         let scale = self.applied_scale as usize;
         let dst_w = src_w * scale;
+        // One source row's worth of destination: `scale` rows of `dst_w`.
+        let block = dst_w * scale;
 
-        for sy in 0..src_h {
-            for sx in 0..src_w {
-                let i = (sy * src_w + sx) * 4;
-                let (r, g, b) = (src[i], src[i + 1], src[i + 2]);
-                let color = (b as u32) | ((g as u32) << 8) | ((r as u32) << 16); // packed XRGB
-                self.row_scratch[sx * scale..sx * scale + scale].fill(color);
-            }
-            for dy in 0..scale {
-                let dst_start = (sy * scale + dy) * dst_w;
-                buffer[dst_start..dst_start + dst_w].copy_from_slice(&self.row_scratch);
-            }
+        let pieces = band_count(src_h as u32, pool.thread_count());
+        let base_rows = src_h / pieces;
+        let extra = src_h % pieces;
+        let mut ranges = Vec::with_capacity(pieces);
+        let mut first = 0usize;
+        for p in 0..pieces {
+            let rows = base_rows + usize::from(p < extra);
+            ranges.push((first, rows));
+            first += rows;
         }
+
+        let dst = BandBase(buffer.as_mut_ptr());
+        pool.run(pieces, |p| {
+            let (first_row, rows) = ranges[p];
+            // SAFETY: `ranges` partitions the source rows into disjoint runs,
+            // each mapping to `block` destination entries, and `run` gives
+            // each `p` to one thread. `src` is shared read-only.
+            let chunk = unsafe { dst.range(first_row * block, rows * block) };
+            let mut scratch = vec![0u32; dst_w];
+            for r in 0..rows {
+                let sy = first_row + r;
+                for sx in 0..src_w {
+                    let i = (sy * src_w + sx) * 4;
+                    let (rr, gg, bb) = (src[i], src[i + 1], src[i + 2]);
+                    let color = (bb as u32) | ((gg as u32) << 8) | ((rr as u32) << 16); // packed XRGB
+                    scratch[sx * scale..sx * scale + scale].fill(color);
+                }
+                for dy in 0..scale {
+                    let start = (r * scale + dy) * dst_w;
+                    chunk[start..start + dst_w].copy_from_slice(&scratch);
+                }
+            }
+        });
 
         buffer.present().expect("failed to present the frame");
     }
@@ -525,13 +553,99 @@ impl Framebuffer {
 ///
 /// Separate from [`Framebuffer::render`] so that a frame can be drawn onto
 /// any pixmap, with no window and no presentation — which is how the palette
-/// promise above is tested.
+/// promise above is tested. The kernel itself always goes through
+/// [`rasterize_parallel`]; this is the single-band reference the banded
+/// version is checked against.
+#[allow(dead_code)]
 pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
+    let mut whole = pixmap.as_mut();
+    rasterize_band(&mut whole, commands, 0);
+}
+
+/// How many bands to cut a `height`-row surface into for `threads` workers.
+/// Capped so a band is never thinner than a floor: below it the fixed
+/// per-band cost — a fresh [`DrawState`], the clear-colour scan, one pass
+/// over the command list — stops being worth the extra thread.
+fn band_count(height: u32, threads: usize) -> usize {
+    const MIN_BAND_ROWS: u32 = 16;
+    ((height / MIN_BAND_ROWS).max(1) as usize)
+        .min(threads)
+        .max(1)
+}
+
+/// A raw base pointer to a buffer a parallel pass writes. Shareable across
+/// the band threads because the caller partitions the buffer into disjoint
+/// ranges and [`crate::workers::Pool::run`] hands each range to one thread.
+#[derive(Clone, Copy)]
+struct BandBase<T>(*mut T);
+unsafe impl<T> Send for BandBase<T> {}
+unsafe impl<T> Sync for BandBase<T> {}
+
+impl<T> BandBase<T> {
+    /// The sub-slice `[offset, offset + len)` of the buffer.
+    ///
+    /// # Safety
+    /// The caller must ensure this range is disjoint from every other range
+    /// taken from the same base for the lifetime `'a` — which is what
+    /// partitioning the buffer one-piece-per-thread guarantees.
+    unsafe fn range<'a>(self, offset: usize, len: usize) -> &'a mut [T] {
+        unsafe { std::slice::from_raw_parts_mut(self.0.add(offset), len) }
+    }
+}
+
+/// Draws `commands` onto `pixmap` across the worker pool: the surface is cut
+/// into horizontal bands and the whole command list is replayed against each
+/// on its own thread. Bands share no pixels and each replays commands in list
+/// order, so the frame is byte-for-byte what [`rasterize`] produces serially.
+pub fn rasterize_parallel(
+    pool: &crate::workers::Pool,
+    pixmap: &mut tiny_skia::Pixmap,
+    commands: &[DrawCommand],
+) {
+    let width = pixmap.width();
+    let height = pixmap.height();
+    let row_bytes = width as usize * 4;
+    let bands = band_count(height, pool.thread_count());
+
+    // Near-equal row splits, the remainder spread one row at a time over the
+    // leading bands. Each entry: byte offset, byte length, top row, row count.
+    let base_rows = height as usize / bands;
+    let extra = height as usize % bands;
+    let mut ranges = Vec::with_capacity(bands);
+    let mut top = 0usize;
+    for b in 0..bands {
+        let rows = base_rows + usize::from(b < extra);
+        ranges.push((top * row_bytes, rows * row_bytes, top as i32, rows as u32));
+        top += rows;
+    }
+
+    // Take the base pointer without keeping a named `&mut [u8]` alive across
+    // the parallel section — the band slices below are the only live borrows.
+    let base = BandBase(pixmap.data_mut().as_mut_ptr());
+    pool.run(bands, |b| {
+        let (offset, len, top, rows) = ranges[b];
+        // SAFETY: `ranges` partitions the pixmap bytes into disjoint spans and
+        // `run` gives each `b` to one thread, so this is the only live
+        // reference to that span.
+        let bytes = unsafe { base.range(offset, len) };
+        let mut band = tiny_skia::PixmapMut::from_bytes(bytes, width, rows)
+            .expect("a band's bytes are a whole sub-pixmap");
+        rasterize_band(&mut band, commands, top);
+    });
+}
+
+/// Draws `commands` onto `band`, one horizontal slice of a surface whose top
+/// row sits `band_top` rows below the surface's own top. Coordinates are
+/// shifted up by `band_top` so a program's surface-space positions land in
+/// the band's rows, and clip regions are sized to the band. Called once per
+/// band, in parallel, by [`rasterize_parallel`]; [`rasterize`] calls it once
+/// for the whole surface with `band_top` zero.
+fn rasterize_band(band: &mut tiny_skia::PixmapMut<'_>, commands: &[DrawCommand], band_top: i32) {
     if let Some(color) = commands.iter().rev().find_map(|c| match c {
         DrawCommand::ClearScreen { color } => Some(*color),
         _ => None,
     }) {
-        pixmap.fill(color.to_skia());
+        band.fill(color.to_skia());
     }
 
     let mut paint = tiny_skia::Paint {
@@ -546,7 +660,9 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
         ..tiny_skia::PixmapPaint::default()
     };
 
-    let mut state = DrawState::new(pixmap.width(), pixmap.height());
+    let base = tiny_skia::Transform::from_translate(0.0, -(band_top as f32));
+    let mut state = DrawState::with_base_transform(band.width(), band.height(), base);
+    let band_h = band.height() as f32;
 
     for command in commands {
         match command {
@@ -555,23 +671,30 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
                 let Some(rect) = tiny_skia::Rect::from_xywh(*x, *y, *w, *h) else {
                     continue; // negative or non-finite size
                 };
-                paint.set_color(color.to_skia());
                 let t = state.transform();
-                let clip = state.clip_for(mapped_bounds(rect, t));
-                pixmap.fill_rect(rect, &paint, t, clip);
+                let mb = mapped_bounds(rect, t);
+                if outside_band(mb, band_h) {
+                    continue;
+                }
+                paint.set_color(color.to_skia());
+                let clip = state.clip_for(mb);
+                band.fill_rect(rect, &paint, t, clip);
             }
             DrawCommand::FillPath { path, rule, color } => {
-                paint.set_color(color.to_skia());
                 let t = state.transform();
-                let clip = state.clip_for(mapped_bounds(path.bounds(), t));
-                pixmap.fill_path(path, &paint, *rule, t, clip);
+                let mb = mapped_bounds(path.bounds(), t);
+                if outside_band(mb, band_h) {
+                    continue;
+                }
+                paint.set_color(color.to_skia());
+                let clip = state.clip_for(mb);
+                band.fill_path(path, &paint, *rule, t, clip);
             }
             DrawCommand::StrokePath {
                 path,
                 stroke,
                 color,
             } => {
-                paint.set_color(color.to_skia());
                 let t = state.transform();
                 // The outline reaches half the stroke width past the path.
                 let reach = stroke.width * 0.5;
@@ -581,28 +704,32 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
                     path.bounds().right() + reach,
                     path.bounds().bottom() + reach,
                 );
-                let clip = state.clip_for(outset.and_then(|rect| mapped_bounds(rect, t)));
-                pixmap.stroke_path(path, &paint, stroke, t, clip);
+                let mb = outset.and_then(|rect| mapped_bounds(rect, t));
+                if outside_band(mb, band_h) {
+                    continue;
+                }
+                paint.set_color(color.to_skia());
+                let clip = state.clip_for(mb);
+                band.stroke_path(path, &paint, stroke, t, clip);
             }
             DrawCommand::SetPixel { x, y, color } => {
                 let (px, py) = state.map_point(*x, *y);
                 let (px, py) = (px.floor() as i32, py.floor() as i32);
                 if px >= 0
                     && py >= 0
-                    && px < pixmap.width() as i32
-                    && py < pixmap.height() as i32
+                    && px < band.width() as i32
+                    && py < band.height() as i32
                     && state.is_visible(px, py)
                 {
                     let hex = color.hex();
-                    let width = pixmap.width() as i32;
-                    pixmap.pixels_mut()[(py * width + px) as usize] =
-                        tiny_skia::ColorU8::from_rgba(
-                            ((hex >> 16) & 0xff) as u8,
-                            ((hex >> 8) & 0xff) as u8,
-                            (hex & 0xff) as u8,
-                            255,
-                        )
-                        .premultiply();
+                    let width = band.width() as i32;
+                    band.pixels_mut()[(py * width + px) as usize] = tiny_skia::ColorU8::from_rgba(
+                        ((hex >> 16) & 0xff) as u8,
+                        ((hex >> 8) & 0xff) as u8,
+                        (hex & 0xff) as u8,
+                        255,
+                    )
+                    .premultiply();
                 }
             }
             DrawCommand::PushTransform { transform } => state.push_transform(*transform),
@@ -622,8 +749,11 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
                 let (dx, dy) = (dx.round(), dy.round());
                 let bounds =
                     tiny_skia::Rect::from_xywh(dx, dy, image.width() as f32, image.height() as f32);
+                if outside_band(bounds, band_h) {
+                    continue;
+                }
                 let clip = state.clip_for(bounds);
-                pixmap.draw_pixmap(
+                band.draw_pixmap(
                     dx as i32,
                     dy as i32,
                     (**image).as_ref(),
@@ -639,7 +769,13 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
                 transform,
             } => {
                 let full = state.transform().pre_concat(*transform);
-                blit_transformed(pixmap, image, *source, full, *opaque, state.clip());
+                let footprint =
+                    tiny_skia::Rect::from_xywh(0.0, 0.0, source.width(), source.height())
+                        .and_then(|local| mapped_bounds(local, full));
+                if outside_band(footprint, band_h) {
+                    continue;
+                }
+                blit_transformed(band, image, *source, full, *opaque, state.clip());
             }
             DrawCommand::DrawText {
                 x,
@@ -668,9 +804,15 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
                 let (ox, oy) = state.map_point(*x, *y);
                 let (ox, oy) = (ox.round() as i32, oy.round() as i32);
                 let scale = (*scale).max(1) as i32;
-                let width = pixmap.width() as i32;
-                let height = pixmap.height() as i32;
-                let pixels = pixmap.pixels_mut();
+                let width = band.width() as i32;
+                let height = band.height() as i32;
+                // Skip a run of text that lands entirely above or below this
+                // band — its glyphs are upright, so a plain height check does.
+                let (_, text_h) = text::measure(font, string);
+                if oy + text_h as i32 * scale <= 0 || oy >= height {
+                    continue;
+                }
+                let pixels = band.pixels_mut();
                 // Walked in the font's own pixels, so each one can be laid
                 // down as a `scale` x `scale` block.
                 text::for_each_lit_pixel(font, string, 0, 0, |gx, gy| {
@@ -691,6 +833,19 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
                 });
             }
         }
+    }
+}
+
+/// Whether a shape whose surface-space (band-local) vertical extent is
+/// `[top, bottom)` falls entirely outside a band `band_h` rows tall, so the
+/// band can skip the command outright. `None` bounds mean "extent unknown" —
+/// never skipped. This is what keeps a call-bound frame (thousands of tiny
+/// fills) from paying its whole command list once per band: a band only does
+/// real work for the commands that reach its rows.
+fn outside_band(bounds: Option<tiny_skia::Rect>, band_h: f32) -> bool {
+    match bounds {
+        Some(b) => b.bottom() <= 0.0 || b.top() >= band_h,
+        None => false,
     }
 }
 
@@ -734,7 +889,7 @@ fn mapped_bounds(
 /// rectangular clip needs); `clip.mask`, when the region isn't a rectangle,
 /// is tested per pixel on top of it.
 fn blit_transformed(
-    dest: &mut tiny_skia::Pixmap,
+    dest: &mut tiny_skia::PixmapMut<'_>,
     image: &tiny_skia::Pixmap,
     source: tiny_skia::Rect,
     transform: tiny_skia::Transform,
@@ -836,7 +991,7 @@ fn over(
 
 #[cfg(test)]
 mod tests {
-    use super::{Color, DrawCommand, rasterize};
+    use super::{Color, DrawCommand, rasterize, rasterize_parallel};
 
     fn surface() -> tiny_skia::Pixmap {
         tiny_skia::Pixmap::new(64, 64).expect("failed to allocate a test surface")
@@ -1158,7 +1313,7 @@ mod tests {
 
     /// A 4x4 image with a single distinct pixel at `(1, 1)`, so a source
     /// rect can be told apart from the whole image.
-    fn marked_image() -> std::rc::Rc<tiny_skia::Pixmap> {
+    fn marked_image() -> std::sync::Arc<tiny_skia::Pixmap> {
         let mut image = tiny_skia::Pixmap::new(4, 4).expect("test image");
         image.fill(Color::Teal300.to_skia());
         let hex = Color::Rose500.hex();
@@ -1169,7 +1324,7 @@ mod tests {
             255,
         )
         .premultiply();
-        std::rc::Rc::new(image)
+        std::sync::Arc::new(image)
     }
 
     fn identity() -> tiny_skia::Transform {
@@ -1351,7 +1506,7 @@ mod tests {
                     color: Color::Slate900,
                 },
                 DrawCommand::DrawImageTransformed {
-                    pixmap: std::rc::Rc::new(image),
+                    pixmap: std::sync::Arc::new(image),
                     opaque: false,
                     source: tiny_skia::Rect::from_xywh(0.0, 0.0, 2.0, 2.0).unwrap(),
                     transform: tiny_skia::Transform::from_row(5.0, 0.0, 0.0, 5.0, 10.0, 10.0),
@@ -1361,6 +1516,100 @@ mod tests {
         // The opaque corner drew; a transparent texel left the clear colour.
         assert_eq!(pixel_at(&pixmap, 12, 12), Color::Rose500.hex());
         assert_eq!(pixel_at(&pixmap, 20, 20), Color::Slate900.hex());
+    }
+
+    #[test]
+    fn banding_the_surface_never_changes_a_pixel() {
+        // Every command type, laid out to straddle band seams: a rectangle
+        // spanning the full height, a circle and text crossing a seam, a
+        // rotated clip and a rotated blit covering several bands, a lone
+        // pixel on a seam row, and a transform stack left unbalanced.
+        let commands = || {
+            vec![
+                DrawCommand::ClearScreen {
+                    color: Color::Slate900,
+                },
+                DrawCommand::FillRectangle {
+                    x: 8.0,
+                    y: 0.0,
+                    w: 20.0,
+                    h: 200.0,
+                    color: Color::Slate700,
+                },
+                fill(circle(40.0, 50.0, 22.0), Color::Amber400),
+                fill(circle(30.0, 150.0, 18.0), Color::Sky400),
+                DrawCommand::StrokePath {
+                    path: circle(55.0, 100.0, 25.0),
+                    stroke: tiny_skia::Stroke {
+                        width: 3.0,
+                        ..Default::default()
+                    },
+                    color: Color::Teal300,
+                },
+                DrawCommand::PushClipRect {
+                    x: 10.0,
+                    y: 40.0,
+                    w: 40.0,
+                    h: 60.0,
+                },
+                fill(rect_path(0.0, 0.0, 80.0, 200.0), Color::Rose500),
+                DrawCommand::PopClip,
+                DrawCommand::PushTransform {
+                    transform: tiny_skia::Transform::from_translate(45.0, 120.0)
+                        .pre_concat(tiny_skia::Transform::from_rotate(28.0)),
+                },
+                DrawCommand::PushClip {
+                    path: Some(rect_path(-15.0, -15.0, 30.0, 30.0)),
+                    rule: tiny_skia::FillRule::Winding,
+                },
+                DrawCommand::FillRectangle {
+                    x: -20.0,
+                    y: -20.0,
+                    w: 40.0,
+                    h: 40.0,
+                    color: Color::Emerald400,
+                },
+                DrawCommand::PopClip,
+                DrawCommand::PopTransform,
+                DrawCommand::DrawText {
+                    x: 4.0,
+                    y: 92.0,
+                    text: "band seam".to_string(),
+                    font: 0,
+                    scale: 2,
+                    color: Color::Teal300,
+                },
+                DrawCommand::DrawImageTransformed {
+                    pixmap: marked_image(),
+                    opaque: true,
+                    source: tiny_skia::Rect::from_xywh(0.0, 0.0, 4.0, 4.0).unwrap(),
+                    transform: tiny_skia::Transform::from_translate(20.0, 60.0)
+                        .pre_concat(tiny_skia::Transform::from_rotate(41.0))
+                        .pre_concat(tiny_skia::Transform::from_scale(9.0, 14.0)),
+                },
+                DrawCommand::SetPixel {
+                    x: 60.0,
+                    y: 50.0,
+                    color: Color::Amber400,
+                },
+                // Popped one time too many — must not shift a band's rows.
+                DrawCommand::PopTransform,
+                DrawCommand::PopTransform,
+            ]
+        };
+
+        let mut serial = tiny_skia::Pixmap::new(80, 200).expect("test surface");
+        rasterize(&mut serial, &commands());
+
+        let mut parallel = tiny_skia::Pixmap::new(80, 200).expect("test surface");
+        let pool = crate::workers::Pool::with_threads(4);
+        rasterize_parallel(&pool, &mut parallel, &commands());
+
+        assert_eq!(
+            serial.data(),
+            parallel.data(),
+            "banded rasterization diverged from the serial result"
+        );
     }
 
     fn assert_every_pixel_is_a_palette_color(pixmap: &tiny_skia::Pixmap) {
