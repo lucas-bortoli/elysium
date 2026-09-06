@@ -724,10 +724,59 @@ fn blit_transformed(
 
     let src_w = image.width() as i32;
     let src_h = image.height() as i32;
-    let (sx, sy, sw, sh) = (source.left(), source.top(), source.width(), source.height());
+    let (sl, st, sw, sh) = (source.left(), source.top(), source.width(), source.height());
     let src_pixels = image.pixels();
     let clip = clip.map(|mask| mask.data());
     let dest_pixels = dest.pixels_mut();
+
+    // Writes one sampled texel at `target`, honouring the opacity rule.
+    let mut place = |target: usize, texel: tiny_skia::PremultipliedColorU8| {
+        if opaque || texel.alpha() == 255 {
+            dest_pixels[target] = texel;
+        } else if texel.alpha() != 0 {
+            dest_pixels[target] = over(texel, dest_pixels[target]);
+        }
+    };
+
+    // With no rotation or shear the source coordinate is separable: it moves
+    // by a fixed step per column and per row, so the inverse map is one add
+    // and one floor per pixel rather than a full point transform. `invert`
+    // already ruled out a zero scale, so the reciprocals are finite.
+    if transform.kx == 0.0 && transform.ky == 0.0 {
+        let step_u = 1.0 / transform.sx;
+        let step_v = 1.0 / transform.sy;
+        for py in y0..y1 {
+            let v = (py as f32 + 0.5 - transform.ty) * step_v;
+            if v < 0.0 || v >= sh {
+                continue;
+            }
+            let ty = (st + v).floor() as i32;
+            if ty < 0 || ty >= src_h {
+                continue;
+            }
+            let src_row = (ty * src_w) as usize;
+            let row = (py * dest_w) as usize;
+            let mut u = (x0 as f32 + 0.5 - transform.tx) * step_u;
+            for px in x0..x1 {
+                let this_u = u;
+                u += step_u;
+                if let Some(clip) = clip
+                    && clip[row + px as usize] == 0
+                {
+                    continue;
+                }
+                if this_u < 0.0 || this_u >= sw {
+                    continue;
+                }
+                let tx = (sl + this_u).floor() as i32;
+                if tx < 0 || tx >= src_w {
+                    continue; // a fractional source rect can round one past its edge
+                }
+                place(row + px as usize, src_pixels[src_row + tx as usize]);
+            }
+        }
+        return;
+    }
 
     for py in y0..y1 {
         let row = (py * dest_w) as usize;
@@ -744,18 +793,12 @@ fn blit_transformed(
             if u < 0.0 || v < 0.0 || u >= sw || v >= sh {
                 continue;
             }
-            let tx = (sx + u).floor() as i32;
-            let ty = (sy + v).floor() as i32;
+            let tx = (sl + u).floor() as i32;
+            let ty = (st + v).floor() as i32;
             if tx < 0 || ty < 0 || tx >= src_w || ty >= src_h {
                 continue; // a fractional source rect can round one past its edge
             }
-            let texel = src_pixels[(ty * src_w + tx) as usize];
-            let target = row + px as usize;
-            if opaque || texel.alpha() == 255 {
-                dest_pixels[target] = texel;
-            } else if texel.alpha() != 0 {
-                dest_pixels[target] = over(texel, dest_pixels[target]);
-            }
+            place(row + px as usize, src_pixels[(ty * src_w + tx) as usize]);
         }
     }
 }
@@ -1218,6 +1261,29 @@ mod tests {
                     transform: tiny_skia::Transform::from_translate(20.0, 20.0)
                         .pre_concat(tiny_skia::Transform::from_rotate(37.0))
                         .pre_concat(tiny_skia::Transform::from_scale(3.5, 2.25)),
+                },
+            ],
+        );
+        assert_every_pixel_is_a_palette_color(&pixmap);
+    }
+
+    #[test]
+    fn a_fractionally_scaled_axis_aligned_image_only_paints_palette_colors() {
+        // The rotation-free fast path samples the source with its own
+        // incremental map; a fractional scale is where an off-grid step
+        // would land between texels if anything were being blended.
+        let mut pixmap = surface();
+        rasterize(
+            &mut pixmap,
+            &[
+                DrawCommand::ClearScreen {
+                    color: Color::Slate900,
+                },
+                DrawCommand::DrawImageTransformed {
+                    pixmap: marked_image(),
+                    opaque: true,
+                    source: tiny_skia::Rect::from_xywh(0.0, 0.0, 4.0, 4.0).unwrap(),
+                    transform: tiny_skia::Transform::from_row(3.5, 0.0, 0.0, 2.25, 12.0, 9.0),
                 },
             ],
         );
