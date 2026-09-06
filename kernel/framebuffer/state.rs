@@ -129,6 +129,12 @@ pub struct DrawState {
     /// Each entry already composed with everything below it, so the last is
     /// the transform in effect. Empty means no transform.
     transforms: Vec<tiny_skia::Transform>,
+    /// The number of transforms at the bottom of the stack that belong to
+    /// the renderer rather than the program — the band offset a parallel
+    /// rasterize seeds (see [`DrawState::with_base_transform`]). `pop_transform`
+    /// will not pop below this, so an unbalanced program cannot shift its
+    /// band's drawing off its rows.
+    base_transforms: usize,
     /// Each entry already narrowed by everything below it, so the last is the
     /// region drawing is confined to. Empty means unconfined.
     clips: Vec<ClipRegion>,
@@ -138,10 +144,31 @@ pub struct DrawState {
 
 impl DrawState {
     /// A state with nothing pushed, for a surface `width` x `height` — the
-    /// size every clip region is rasterized at.
+    /// size every clip region is rasterized at. The renderer always seeds a
+    /// band offset through [`DrawState::with_base_transform`]; this bare
+    /// constructor is used by the state tests.
+    #[allow(dead_code)]
     pub fn new(width: u32, height: u32) -> DrawState {
         DrawState {
             transforms: Vec::new(),
+            base_transforms: 0,
+            clips: Vec::new(),
+            width,
+            height,
+        }
+    }
+
+    /// A state seeded with `base` already in effect, for rasterizing one
+    /// horizontal band of a larger surface. `base` shifts surface-space
+    /// coordinates up into the band's own rows; `width` x `height` is the
+    /// band's own size, so clip regions are allocated at band height rather
+    /// than full-surface height. The seeded transform is the renderer's, not
+    /// the program's: `pop_transform` treats it as a floor and will not pop
+    /// it away.
+    pub fn with_base_transform(width: u32, height: u32, base: tiny_skia::Transform) -> DrawState {
+        DrawState {
+            transforms: vec![base],
+            base_transforms: 1,
             clips: Vec::new(),
             width,
             height,
@@ -234,7 +261,9 @@ impl DrawState {
     }
 
     pub fn pop_transform(&mut self) {
-        self.transforms.pop();
+        if self.transforms.len() > self.base_transforms {
+            self.transforms.pop();
+        }
     }
 
     fn surface_bounds(&self) -> ClipRect {
@@ -525,5 +554,46 @@ mod tests {
         let mut state = DrawState::new(64, 64);
         state.push_clip_rect(10.0, 10.0, 0.0, 20.0);
         assert!(!state.is_visible(10, 10));
+    }
+
+    #[test]
+    fn a_base_transform_shifts_a_bands_drawing_into_its_own_rows() {
+        // A band whose top row is row 40 of the surface: a program drawing at
+        // surface y=45 lands at band-local y=5.
+        let state = DrawState::with_base_transform(
+            64,
+            24,
+            tiny_skia::Transform::from_translate(0.0, -40.0),
+        );
+        assert_eq!(state.map_point(10.0, 45.0), (10.0, 5.0));
+    }
+
+    #[test]
+    fn an_unbalanced_pop_cannot_remove_a_bands_base_transform() {
+        let mut state = DrawState::with_base_transform(
+            64,
+            24,
+            tiny_skia::Transform::from_translate(0.0, -40.0),
+        );
+        state.push_transform(tiny_skia::Transform::from_translate(3.0, 0.0));
+        // One legitimate pop, then three the program never earned.
+        for _ in 0..4 {
+            state.pop_transform();
+        }
+        assert_eq!(state.map_point(10.0, 45.0), (10.0, 5.0));
+    }
+
+    #[test]
+    fn a_clip_under_a_base_transform_is_sized_to_the_band() {
+        let mut state = DrawState::with_base_transform(
+            64,
+            24,
+            tiny_skia::Transform::from_translate(0.0, -40.0),
+        );
+        // A clip a program places at surface rows 44..54 confines to band
+        // rows 4..14.
+        state.push_clip_rect(0.0, 44.0, 64.0, 10.0);
+        assert!(state.is_visible(10, 8));
+        assert!(!state.is_visible(10, 20));
     }
 }
