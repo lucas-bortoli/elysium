@@ -4,27 +4,7 @@
 // Like every example, this one never reads Escape — that key belongs to the
 // menu, which is still running and listening while this draws.
 
-import {
-  Color,
-  addDrawHandler,
-  clearScreen,
-  drawArc,
-  drawLine,
-  drawPolyline,
-  drawText,
-  fillCircle,
-  fillEllipse,
-  fillPolygon,
-  fillRectangle,
-  fillRoundedRectangle,
-  fillTriangle,
-  getWidth,
-  strokeCircle,
-  strokeEllipse,
-  strokePolygon,
-  strokeRectangle,
-  strokeRoundedRectangle,
-} from "ely:framebuffer";
+import { Color, screen } from "ely:graphics";
 import { addUpdateTicker } from "ely:lifecycle";
 
 let elapsed = 0;
@@ -48,12 +28,12 @@ function star(cx: number, cy: number, radius: number) {
 }
 
 function label(x: number, y: number, text: string) {
-  drawText(x, y, text, Color.Slate400);
+  screen.drawText(x, y, text, Color.Slate400);
 }
 
-addDrawHandler(() => {
-  clearScreen(Color.Slate900);
-  drawText(getWidth() / 2, 8, "Shapes", Color.Amber300, {
+addUpdateTicker(() => {
+  screen.clear(Color.Slate900);
+  screen.drawText(screen.width / 2, 8, "Shapes", Color.Amber300, {
     align: "center",
     scale: 2,
   });
@@ -62,23 +42,23 @@ addDrawHandler(() => {
   const line = Color.Amber400;
 
   label(40, 44, "rectangle");
-  fillRectangle(40, 58, 54, 40, fill);
-  strokeRectangle(104, 58, 54, 40, line, 2);
+  screen.fillRectangle(40, 58, 54, 40, fill);
+  screen.strokeRectangle(104, 58, 54, 40, line, 2);
 
   label(180, 44, "rounded");
-  fillRoundedRectangle(180, 58, 54, 40, 10, fill);
-  strokeRoundedRectangle(244, 58, 54, 40, 10, line, 2);
+  screen.fillRoundedRectangle(180, 58, 54, 40, 10, fill);
+  screen.strokeRoundedRectangle(244, 58, 54, 40, 10, line, 2);
 
   label(320, 44, "circle");
-  fillCircle(347, 78, 20, fill);
-  strokeCircle(411, 78, 20, line, 2);
+  screen.fillCircle(347, 78, 20, fill);
+  screen.strokeCircle(411, 78, 20, line, 2);
 
   label(460, 44, "ellipse");
-  fillEllipse(487, 78, 27, 20, fill);
-  strokeEllipse(551, 78, 27, 20, line, 2);
+  screen.fillEllipse(487, 78, 27, 20, fill);
+  screen.strokeEllipse(551, 78, 27, 20, line, 2);
 
   label(600, 44, "triangle");
-  fillTriangle(
+  screen.fillTriangle(
     { x: 600, y: 98 },
     { x: 627, y: 58 },
     { x: 654, y: 98 },
@@ -86,15 +66,15 @@ addDrawHandler(() => {
   );
 
   label(40, 120, "polygon (nonzero / evenodd / outline)");
-  fillPolygon(star(67, 168, 32), fill);
-  fillPolygon(star(157, 168, 32), fill, "evenodd");
-  strokePolygon(star(247, 168, 32), line, 2);
+  screen.fillPolygon(star(67, 168, 32), fill);
+  screen.fillPolygon(star(157, 168, 32), fill, "evenodd");
+  screen.strokePolygon(star(247, 168, 32), line, 2);
 
   label(320, 120, "line and polyline");
-  drawLine(320, 140, 460, 200, line, 3);
+  screen.drawLine(320, 140, 460, 200, line, 3);
   // Half-pixel offsets put a one-thick line down the middle of a pixel
   // column instead of straddling two, which is what keeps it crisp.
-  drawLine(320.5, 205.5, 460.5, 205.5, Color.Slate500, 1);
+  screen.drawLine(320.5, 205.5, 460.5, 205.5, Color.Slate500, 1);
   const wave = [];
   for (let i = 0; i <= 28; i++) {
     wave.push({
@@ -102,13 +82,13 @@ addDrawHandler(() => {
       y: 170 + Math.sin(i / 3 + elapsed * 3) * 26,
     });
   }
-  drawPolyline(wave, Color.Rose400, 2);
+  screen.drawPolyline(wave, Color.Rose400, 2);
 
   label(40, 224, "arc — swept either way round");
   const sweep = (Math.sin(elapsed) * 0.5 + 0.5) * Math.PI * 2;
-  drawArc(90, 288, 34, 0, sweep, Color.Amber400, 8);
-  drawArc(200, 288, 34, 0, -sweep, Color.Teal400, 8);
+  screen.drawArc(90, 288, 34, 0, sweep, Color.Amber400, 8);
+  screen.drawArc(200, 288, 34, 0, -sweep, Color.Teal400, 8);
   // A ring the sweeping arcs are measured against.
-  strokeCircle(310, 288, 34, Color.Slate700, 8);
-  drawArc(310, 288, 34, -Math.PI / 2, -Math.PI / 2 + sweep, Color.Rose400, 8);
+  screen.strokeCircle(310, 288, 34, Color.Slate700, 8);
+  screen.drawArc(310, 288, 34, -Math.PI / 2, -Math.PI / 2 + sweep, Color.Rose400, 8);
 });
