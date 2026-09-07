@@ -14,13 +14,13 @@
 //! while the scheduling they feed — spawning, mailboxes, reaping, faults — is
 //! tested against a real process table in `process_manager.rs`.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use rquickjs::FromJs;
 
-use crate::graphics::{DEFAULT_SCALE, SCREEN_HEIGHT, SCREEN_WIDTH, ScreenSurface, Surface};
+use crate::graphics::{DEFAULT_SCALE, SCREEN_HEIGHT, SCREEN_WIDTH, SurfaceTable};
 use crate::input::Input;
 use crate::process::ProcessChannel;
 
@@ -54,7 +54,7 @@ fn build_runtime(root: PathBuf) -> (ElysiumRuntime, Rc<Input>, SoundLog) {
     let input = Rc::new(Input::new(Rc::clone(&scale)));
     let (audio, audio_log) = Sound::detached();
     let devices = Devices::new(
-        test_screen(),
+        test_surfaces(),
         Rc::clone(&input),
         scale,
         Some(Rc::new(audio)),
@@ -145,7 +145,7 @@ fn eval_with_audio(source: &str) -> (ElysiumRuntime, SoundLog) {
 fn eval_without_audio(source: &str) -> ElysiumRuntime {
     let scale = Rc::new(Cell::new(DEFAULT_SCALE));
     let input = Rc::new(Input::new(Rc::clone(&scale)));
-    let devices = Devices::new(test_screen(), input, scale, None, test_userland_root());
+    let devices = Devices::new(test_surfaces(), input, scale, None, test_userland_root());
     let runtime = ElysiumRuntime::new(&devices, 0, ProcessChannel::new(), None)
         .expect("failed to construct runtime");
     runtime
@@ -154,13 +154,10 @@ fn eval_without_audio(source: &str) -> ElysiumRuntime {
     runtime
 }
 
-/// A fresh screen surface at the boot resolution, behind the shared handle
-/// every VM's `ely:graphics` bindings draw onto.
-fn test_screen() -> ScreenSurface {
-    Rc::new(RefCell::new(
-        Surface::new(SCREEN_WIDTH, SCREEN_HEIGHT)
-            .expect("failed to allocate the test screen surface"),
-    ))
+/// A fresh surface table seeded with the screen at the boot resolution —
+/// the shared table every VM's `ely:graphics` bindings draw through.
+fn test_surfaces() -> Rc<SurfaceTable> {
+    Rc::new(SurfaceTable::with_screen(SCREEN_WIDTH, SCREEN_HEIGHT))
 }
 
 /// Reads `globalThis[name]` out of a VM and converts it to `T`.

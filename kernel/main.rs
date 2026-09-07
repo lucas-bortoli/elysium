@@ -17,7 +17,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::Instant;
 
-use graphics::{Display, Surface};
+use graphics::{Display, SCREEN_ID, SurfaceTable};
 use input::Input;
 use process_manager::{GRACE, ProcessManager};
 use runtime::Devices;
@@ -46,18 +46,18 @@ fn main() {
 
     let sound = sound::start().map(Rc::new);
 
-    // The screen is a Surface like any other, created here and shared: every
-    // VM's `ely:graphics` bindings draw straight onto it, and the frame loop
-    // below presents it once per tick.
-    let screen = Rc::new(RefCell::new(
-        Surface::new(graphics::SCREEN_WIDTH, graphics::SCREEN_HEIGHT)
-            .expect("failed to allocate the screen surface"),
+    // The one kernel-wide surface table, seeded with the screen (id 0).
+    // Every VM's `ely:graphics` bindings draw through it by id; the frame
+    // loop below presents the screen entry once per tick.
+    let surfaces = Rc::new(SurfaceTable::with_screen(
+        graphics::SCREEN_WIDTH,
+        graphics::SCREEN_HEIGHT,
     ));
     let scale = Rc::new(Cell::new(graphics::DEFAULT_SCALE));
     let input = Rc::new(Input::new(Rc::clone(&scale)));
 
     let devices = Devices::new(
-        Rc::clone(&screen),
+        Rc::clone(&surfaces),
         Rc::clone(&input),
         Rc::clone(&scale),
         sound,
@@ -97,7 +97,7 @@ fn main() {
         },
         {
             let manager = Rc::clone(&manager);
-            let screen = Rc::clone(&screen);
+            let surfaces = Rc::clone(&surfaces);
             let scale = Rc::clone(&scale);
             let input = Rc::clone(&input);
             let mut fps_frames: u32 = 0;
@@ -110,11 +110,10 @@ fn main() {
             let mut render_time = std::time::Duration::ZERO;
             move |window, _dt| {
                 let display = display.get_or_insert_with(|| {
-                    Display::new(
-                        window.clone(),
-                        Rc::clone(&scale),
-                        (screen.borrow().width(), screen.borrow().height()),
-                    )
+                    let (w, h) = surfaces
+                        .dimensions(SCREEN_ID)
+                        .expect("the screen surface is always present");
+                    Display::new(window.clone(), Rc::clone(&scale), (w, h))
                 });
 
                 let tick_start = Instant::now();
@@ -125,7 +124,9 @@ fn main() {
                 // every process drew straight onto it. All that's left is
                 // to get it in front of the viewer.
                 let render_start = Instant::now();
-                display.present(&screen.borrow());
+                surfaces
+                    .with(SCREEN_ID, |screen| display.present(screen))
+                    .expect("the screen surface is always present");
                 render_time += render_start.elapsed();
 
                 input.end_frame();

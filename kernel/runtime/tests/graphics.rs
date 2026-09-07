@@ -310,6 +310,84 @@ fn setting_a_pixel_to_an_unknown_color_throws() {
 }
 
 #[test]
+fn a_created_surface_can_be_revived_drawn_to_and_destroyed() {
+    let runtime = eval(
+        "import { createSurface, useSurface, destroySurface, Color } from 'ely:framebuffer'; \
+         globalThis.error = ''; \
+         try { \
+             const handle = createSurface(64, 48); \
+             const s = useSurface(handle); \
+             globalThis.size = [s.width, s.height]; \
+             s.clear(Color.Slate900); \
+             s.fillRectangle(0, 0, 10, 10, Color.Amber400); \
+             s.resize(80, 80); \
+             globalThis.resized = [s.width, s.height]; \
+             destroySurface(handle); \
+             globalThis.error = 'none'; \
+         } catch (err) { globalThis.error = String(err); }",
+    );
+    assert_eq!(global::<String>(&runtime, "error"), "none");
+    assert_eq!(global::<Vec<u32>>(&runtime, "size"), vec![64, 48]);
+    assert_eq!(global::<Vec<u32>>(&runtime, "resized"), vec![80, 80]);
+}
+
+#[test]
+fn reviving_a_handle_that_names_no_surface_throws() {
+    let runtime = eval(
+        "import { useSurface } from 'ely:framebuffer'; \
+         globalThis.threw = false; \
+         try { useSurface(9999); } \
+         catch (err) { globalThis.threw = err instanceof TypeError; }",
+    );
+    assert!(global::<bool>(&runtime, "threw"));
+}
+
+#[test]
+fn the_screen_is_a_surface_and_can_be_drawn_to_outside_a_handler() {
+    // The Surface methods aren't behind the draw-handler gate the legacy
+    // free functions are — a program can draw whenever it holds a surface.
+    let runtime = eval(
+        "import { screen, Color } from 'ely:framebuffer'; \
+         globalThis.error = ''; \
+         try { \
+             screen.clear(Color.Slate900); \
+             screen.fillCircle(20, 20, 8, Color.Amber400); \
+             globalThis.handle = screen.handle; \
+             globalThis.error = 'none'; \
+         } catch (err) { globalThis.error = String(err); }",
+    );
+    assert_eq!(global::<String>(&runtime, "error"), "none");
+    assert_eq!(global::<u32>(&runtime, "handle"), 0);
+}
+
+#[test]
+fn drawing_a_surface_onto_itself_throws() {
+    let runtime = eval(
+        "import { screen } from 'ely:framebuffer'; \
+         globalThis.threw = false; \
+         try { screen.drawSurface(screen.handle, 0, 0); } \
+         catch (err) { globalThis.threw = err instanceof TypeError; }",
+    );
+    assert!(global::<bool>(&runtime, "threw"));
+}
+
+#[test]
+fn one_surface_can_be_drawn_onto_another() {
+    let runtime = eval(
+        "import { createSurface, useSurface, screen, Color } from 'ely:framebuffer'; \
+         globalThis.error = ''; \
+         try { \
+             const badge = useSurface(createSurface(16, 16)); \
+             badge.clear(Color.Amber400); \
+             screen.drawSurface(badge.handle, 4, 4); \
+             screen.drawSurfaceRotated(badge.handle, 40, 40, 0.5, { scale: 2 }); \
+             globalThis.error = 'none'; \
+         } catch (err) { globalThis.error = String(err); }",
+    );
+    assert_eq!(global::<String>(&runtime, "error"), "none");
+}
+
+#[test]
 fn a_handler_that_leaves_a_clip_pushed_does_not_confine_the_next_one() {
     // Every running program's handlers draw into one frame in turn, so a
     // clip one of them leaves open would go on confining drawing that isn't
