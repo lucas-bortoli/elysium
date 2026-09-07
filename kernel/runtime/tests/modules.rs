@@ -15,6 +15,16 @@ fn relative_import_resolves_and_evaluates() {
 }
 
 #[test]
+fn a_relative_import_may_name_a_vendored_js_bundle() {
+    let entry = test_userland_root().join("entry.ts");
+    let (runtime, _input) = eval_named_with_input(
+        entry.to_str().unwrap(),
+        "import { bundled } from './js_bundle.js'; globalThis.bundled = bundled;",
+    );
+    assert_eq!(global::<String>(&runtime, "bundled"), "from a .js bundle");
+}
+
+#[test]
 fn relative_import_escaping_userland_root_fails_to_resolve() {
     let entry = test_userland_root().join("entry.ts");
     let (runtime, _input, _audio) = build_runtime(test_userland_root());
