@@ -16,18 +16,7 @@
 // still running while this draws. There is no input focus in Elysium: this
 // program and the menu are seeing exactly the same key presses.
 
-import {
-  Color,
-  addDrawHandler,
-  clearScreen,
-  drawLine,
-  drawPolyline,
-  drawText,
-  fillRoundedRectangle,
-  getHeight,
-  getWidth,
-  strokeRectangle,
-} from "ely:framebuffer";
+import { Color, screen } from "ely:graphics";
 import type { Vector2d } from "ely:math";
 import { Key, isKeyDown, wasKeyPressed } from "ely:input";
 import { addUpdateTicker } from "ely:lifecycle";
@@ -471,21 +460,21 @@ addUpdateTicker(() => {
 /** One picker cell, filled when it is the current selection. */
 function pickerCell(index: number, y: number, label: string, active: boolean): void {
   const x = PICKER_X + index * PICKER_PITCH;
-  fillRoundedRectangle(x, y, PICKER_W, PICKER_H, 6, active ? Color.Teal500 : Color.Slate800);
-  drawText(x + PICKER_W / 2, y + 10, label, active ? Color.Slate900 : Color.Slate300, {
+  screen.fillRoundedRectangle(x, y, PICKER_W, PICKER_H, 6, active ? Color.Teal500 : Color.Slate800);
+  screen.drawText(x + PICKER_W / 2, y + 10, label, active ? Color.Slate900 : Color.Slate300, {
     align: "center",
   });
 }
 
-addDrawHandler(() => {
-  clearScreen(Color.Slate900);
-  drawText(getWidth() / 2, 8, "Sound", Color.Amber300, {
+addUpdateTicker(() => {
+  screen.clear(Color.Slate900);
+  screen.drawText(screen.width / 2, 8, "Sound", Color.Amber300, {
     align: "center",
     scale: 2,
   });
 
-  drawText(PICKER_X, 34, "waveform — press 1 to 4", Color.Slate400);
-  drawText(CONTENT_RIGHT, 34, "envelope — press 5 to 8", Color.Slate400, {
+  screen.drawText(PICKER_X, 34, "waveform — press 1 to 4", Color.Slate400);
+  screen.drawText(CONTENT_RIGHT, 34, "envelope — press 5 to 8", Color.Slate400, {
     align: "right",
   });
 
@@ -498,28 +487,28 @@ addDrawHandler(() => {
 
   // The shape itself, twelve cycles of it, drawn whether or not anything is
   // sounding — it is a legend for the picker above, not a meter.
-  strokeRectangle(SCOPE_X, SCOPE_Y, SCOPE_W, SCOPE_H, Color.Slate700, 1);
+  screen.strokeRectangle(SCOPE_X, SCOPE_Y, SCOPE_W, SCOPE_H, Color.Slate700, 1);
   const middle = SCOPE_Y + SCOPE_H / 2;
-  drawLine(SCOPE_X + 1, middle + 0.5, SCOPE_X + SCOPE_W - 1, middle + 0.5, Color.Slate800, 1);
-  drawPolyline(traced, Color.Rose400, 2);
+  screen.drawLine(SCOPE_X + 1, middle + 0.5, SCOPE_X + SCOPE_W - 1, middle + 0.5, Color.Slate800, 1);
+  screen.drawPolyline(traced, Color.Rose400, 2);
 
   // The envelope beside the shape: what the note's loudness does, next to
   // what one cycle of it looks like. A different accent so two panels side
   // by side don't read as one graph.
-  strokeRectangle(GRAPH_X, SCOPE_Y, GRAPH_W, SCOPE_H, Color.Slate700, 1);
-  drawPolyline(preset.points, Color.Amber400, 2);
+  screen.strokeRectangle(GRAPH_X, SCOPE_Y, GRAPH_W, SCOPE_H, Color.Slate700, 1);
+  screen.drawPolyline(preset.points, Color.Amber400, 2);
 
-  drawText(PICKER_X, 206, "hold a key to sustain — let go to hear the release", Color.Slate400);
-  drawText(
+  screen.drawText(PICKER_X, 206, "hold a key to sustain — let go to hear the release", Color.Slate400);
+  screen.drawText(
     PICKER_X,
-    getHeight() - 24,
+    screen.height - 24,
     metronome ? "space  metronome on" : "space  metronome off",
     metronome ? Color.Amber300 : Color.Slate600,
   );
-  drawText(CONTENT_RIGHT, 206, `← octave ${octave} →`, Color.Slate300, {
+  screen.drawText(CONTENT_RIGHT, 206, `← octave ${octave} →`, Color.Slate300, {
     align: "right",
   });
-  drawText(
+  screen.drawText(
     CONTENT_RIGHT,
     222,
     `↑ bend ${bentBy > 0 ? "+" : ""}${bentBy} ↓    B vibrato ${vibrato ? "on" : "off"}`,
@@ -530,11 +519,11 @@ addDrawHandler(() => {
   for (const [index, pad] of WHITE.entries()) {
     const x = KEYS_X + index * WHITE_PITCH;
     const down = isKeyDown(pad.key);
-    fillRoundedRectangle(x, WHITE_Y, WHITE_W, WHITE_H, 4, down ? Color.Teal500 : Color.Slate200);
-    drawText(x + WHITE_W / 2, WHITE_Y + WHITE_H - 34, noteFor(pad, octave) ?? "", Color.Slate900, {
+    screen.fillRoundedRectangle(x, WHITE_Y, WHITE_W, WHITE_H, 4, down ? Color.Teal500 : Color.Slate200);
+    screen.drawText(x + WHITE_W / 2, WHITE_Y + WHITE_H - 34, noteFor(pad, octave) ?? "", Color.Slate900, {
       align: "center",
     });
-    drawText(x + WHITE_W / 2, WHITE_Y + WHITE_H - 18, pad.label, Color.Slate600, {
+    screen.drawText(x + WHITE_W / 2, WHITE_Y + WHITE_H - 18, pad.label, Color.Slate600, {
       align: "center",
     });
   }
@@ -542,11 +531,11 @@ addDrawHandler(() => {
   for (const pad of BLACK) {
     const x = KEYS_X + (pad.seam + 1) * WHITE_PITCH - 4 - BLACK_W / 2;
     const down = isKeyDown(pad.key);
-    fillRoundedRectangle(x, WHITE_Y, BLACK_W, BLACK_H, 3, down ? Color.Teal300 : Color.Slate800);
-    drawText(x + BLACK_W / 2, WHITE_Y + 6, noteFor(pad, octave) ?? "", down ? Color.Slate900 : Color.Slate400, {
+    screen.fillRoundedRectangle(x, WHITE_Y, BLACK_W, BLACK_H, 3, down ? Color.Teal300 : Color.Slate800);
+    screen.drawText(x + BLACK_W / 2, WHITE_Y + 6, noteFor(pad, octave) ?? "", down ? Color.Slate900 : Color.Slate400, {
       align: "center",
     });
-    drawText(x + BLACK_W / 2, WHITE_Y + 22, pad.label, down ? Color.Slate900 : Color.Slate600, {
+    screen.drawText(x + BLACK_W / 2, WHITE_Y + 22, pad.label, down ? Color.Slate900 : Color.Slate600, {
       align: "center",
     });
   }
@@ -554,15 +543,15 @@ addDrawHandler(() => {
   for (const [index, drum] of DRUMS.entries()) {
     const y = WHITE_Y + index * DRUMS_PITCH;
     const down = isKeyDown(drum.key);
-    fillRoundedRectangle(DRUMS_X, y, DRUMS_W, DRUMS_H, 4, down ? Color.Rose400 : Color.Slate800);
-    drawText(DRUMS_X + DRUMS_W / 2, y + 6, drum.label, down ? Color.Slate900 : Color.Slate400, {
+    screen.fillRoundedRectangle(DRUMS_X, y, DRUMS_W, DRUMS_H, 4, down ? Color.Rose400 : Color.Slate800);
+    screen.drawText(DRUMS_X + DRUMS_W / 2, y + 6, drum.label, down ? Color.Slate900 : Color.Slate400, {
       align: "center",
     });
   }
 
-  drawText(
-    getWidth() - 40,
-    getHeight() - 24,
+  screen.drawText(
+    screen.width - 40,
+    screen.height - 24,
     "one speaker, shared — the menu hears these keys too",
     Color.Slate600,
     { align: "right" },

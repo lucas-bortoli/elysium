@@ -4,15 +4,8 @@
 //
 // This example never reads Escape — that key belongs to the menu.
 
-import {
-  Color,
-  addDrawHandler,
-  clearScreen,
-  drawText,
-  fillRectangle,
-  getWidth,
-  strokeRectangle,
-} from "ely:framebuffer";
+import { Color, screen } from "ely:graphics";
+import { addUpdateTicker } from "ely:lifecycle";
 import { getPointerPosition } from "ely:input";
 
 // The 26 hue families, in the order their ids run. Each has eleven shades,
@@ -30,9 +23,9 @@ const CELL_H = 10;
 const GRID_X = 62;
 const GRID_Y = 46;
 
-addDrawHandler(() => {
-  clearScreen(Color.Slate900);
-  drawText(getWidth() / 2, 6, "Palette", Color.Amber300, {
+addUpdateTicker(() => {
+  screen.clear(Color.Slate900);
+  screen.drawText(screen.width / 2, 6, "Palette", Color.Amber300, {
     align: "center",
     scale: 2,
   });
@@ -42,7 +35,7 @@ addDrawHandler(() => {
 
   for (const [family, name] of FAMILIES.entries()) {
     const y = GRID_Y + family * CELL_H;
-    drawText(GRID_X - 6, y + 1, name, Color.Slate500, {
+    screen.drawText(GRID_X - 6, y + 1, name, Color.Slate500, {
       align: "right",
     });
 
@@ -51,7 +44,7 @@ addDrawHandler(() => {
       // Ids run family by family, eleven shades each, in this same order —
       // so the id is just the position in the grid.
       const id = (family * SHADES.length + shade) as Color;
-      fillRectangle(x, y, CELL_W - 1, CELL_H - 1, id);
+      screen.fillRectangle(x, y, CELL_W - 1, CELL_H - 1, id);
 
       if (
         pointer.x >= x &&
@@ -60,21 +53,21 @@ addDrawHandler(() => {
         pointer.y < y + CELL_H - 1
       ) {
         hovered = `Color.${name}${level}`;
-        strokeRectangle(x - 1, y - 1, CELL_W + 1, CELL_H + 1, Color.White, 1);
+        screen.strokeRectangle(x - 1, y - 1, CELL_W + 1, CELL_H + 1, Color.White, 1);
       }
     }
   }
 
   // Black and White are the two entries that belong to no family.
   const tailY = GRID_Y + FAMILIES.length * CELL_H + 6;
-  drawText(GRID_X - 6, tailY + 1, "and", Color.Slate500, { align: "right" });
-  fillRectangle(GRID_X, tailY, CELL_W - 1, CELL_H - 1, Color.Black);
-  strokeRectangle(GRID_X, tailY, CELL_W - 1, CELL_H - 1, Color.Slate700, 1);
-  fillRectangle(GRID_X + CELL_W, tailY, CELL_W - 1, CELL_H - 1, Color.White);
-  drawText(GRID_X + CELL_W * 2 + 8, tailY + 1, "Black and White", Color.Slate500);
+  screen.drawText(GRID_X - 6, tailY + 1, "and", Color.Slate500, { align: "right" });
+  screen.fillRectangle(GRID_X, tailY, CELL_W - 1, CELL_H - 1, Color.Black);
+  screen.strokeRectangle(GRID_X, tailY, CELL_W - 1, CELL_H - 1, Color.Slate700, 1);
+  screen.fillRectangle(GRID_X + CELL_W, tailY, CELL_W - 1, CELL_H - 1, Color.White);
+  screen.drawText(GRID_X + CELL_W * 2 + 8, tailY + 1, "Black and White", Color.Slate500);
 
-  drawText(
-    getWidth() - 20,
+  screen.drawText(
+    screen.width - 20,
     tailY + 1,
     hovered === "" ? "point at a swatch to name it" : hovered,
     hovered === "" ? Color.Slate600 : Color.Amber300,

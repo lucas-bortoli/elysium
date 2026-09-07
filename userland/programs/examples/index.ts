@@ -13,21 +13,8 @@
 // The menu only acts on Escape while an example is running, so a press is
 // never ambiguous.
 
-import {
-  Color,
-  addDrawHandler,
-  clearScreen,
-  drawLine,
-  drawText,
-  fillRoundedRectangle,
-  getHeight,
-  getWidth,
-  measureText,
-  popClip,
-  pushClip,
-  removeDrawHandler,
-} from "ely:framebuffer";
-import type { DrawTickerId } from "ely:framebuffer";
+import { Color, screen } from "ely:graphics";
+
 import {
   Key,
   getPointerDelta,
@@ -103,12 +90,12 @@ function loadExamples(): Example[] {
 const examples = loadExamples();
 print(`[examples] found ${examples.length} example(s)`);
 
-const lineHeight = measureText("X").height;
+const lineHeight = screen.measureText("X").height;
 const ROW_HEIGHT = lineHeight * 2 + 14;
 const LIST_X = 48;
 const LIST_Y = 74;
-const LIST_WIDTH = getWidth() - LIST_X * 2;
-const LIST_HEIGHT = getHeight() - LIST_Y - 40;
+const LIST_WIDTH = screen.width - LIST_X * 2;
+const LIST_HEIGHT = screen.height - LIST_Y - 40;
 
 let selected = 0;
 /** How far the list is scrolled, in pixels from the top of the first row. */
@@ -117,7 +104,8 @@ let scroll = 0;
 let child: ProcessHandle | undefined;
 /** Absent exactly while an example is running — that's what hands the
  * screen over. */
-let drawHandler: DrawTickerId | undefined = addDrawHandler(draw);
+// The menu draws itself from the update ticker below whenever no example
+// is running; launching one just stops that by setting `child`.
 
 function maxScroll(): number {
   return Math.max(0, examples.length * ROW_HEIGHT - LIST_HEIGHT);
@@ -146,10 +134,6 @@ function launch(row: number): void {
     return;
   }
   print(`[examples] running ${example.title} as process ${child}`);
-  if (drawHandler !== undefined) {
-    removeDrawHandler(drawHandler);
-    drawHandler = undefined;
-  }
 }
 
 /** Takes the screen back. Terminating is immediate — asking an example to
@@ -158,7 +142,6 @@ function launch(row: number): void {
 function closeChild(): void {
   if (child !== undefined && isLive(child)) terminate(child);
   child = undefined;
-  if (drawHandler === undefined) drawHandler = addDrawHandler(draw);
 }
 
 /** The row under the pointer, or `-1` if it isn't over one. */
@@ -211,22 +194,25 @@ addUpdateTicker(() => {
     selected = row;
     launch(row);
   }
+
+  // No example running — the menu is what's on screen.
+  draw();
 });
 
 function draw(): void {
-  clearScreen(Color.Slate900);
+  screen.clear(Color.Slate900);
 
-  const middle = getWidth() / 2;
-  drawText(middle, 12, "Welcome to Examples!", Color.Amber300, {
+  const middle = screen.width / 2;
+  screen.drawText(middle, 12, "Welcome to Examples!", Color.Amber300, {
     align: "center",
     scale: 2,
   });
-  drawText(middle, 12 + lineHeight * 2 + 6, "Please select an example program.", Color.Slate400, {
+  screen.drawText(middle, 12 + lineHeight * 2 + 6, "Please select an example program.", Color.Slate400, {
     align: "center",
   });
 
   if (examples.length === 0) {
-    drawText(middle, LIST_Y + 40, `No examples found in ${EXAMPLES_ROOT}.`, Color.Rose400, {
+    screen.drawText(middle, LIST_Y + 40, `No examples found in ${EXAMPLES_ROOT}.`, Color.Rose400, {
       align: "center",
     });
     return;
@@ -234,22 +220,22 @@ function draw(): void {
 
   // Every row is drawn against the same clip, so a row scrolled half out of
   // the viewport is cut off cleanly instead of spilling over the heading.
-  pushClip(LIST_X, LIST_Y, LIST_WIDTH, LIST_HEIGHT);
+  screen.pushClip(LIST_X, LIST_Y, LIST_WIDTH, LIST_HEIGHT);
   for (const [i, example] of examples.entries()) {
     const top = LIST_Y + i * ROW_HEIGHT - scroll;
     if (top + ROW_HEIGHT < LIST_Y || top > LIST_Y + LIST_HEIGHT) continue;
 
     const chosen = i === selected;
     if (chosen) {
-      fillRoundedRectangle(LIST_X, top, LIST_WIDTH, ROW_HEIGHT - 6, 4, Color.Slate700);
+      screen.fillRoundedRectangle(LIST_X, top, LIST_WIDTH, ROW_HEIGHT - 6, 4, Color.Slate700);
     }
-    drawText(
+    screen.drawText(
       LIST_X + 10,
       top + 5,
       example.title,
       chosen ? Color.Amber300 : Color.Slate200,
     );
-    drawText(
+    screen.drawText(
       LIST_X + 10,
       top + 7 + lineHeight,
       example.description,
@@ -257,11 +243,11 @@ function draw(): void {
       { maxWidth: LIST_WIDTH - 20 },
     );
   }
-  popClip();
+  screen.popClip();
 
-  const footer = getHeight() - 26;
-  drawLine(LIST_X, footer, LIST_X + LIST_WIDTH, footer, Color.Slate700);
-  drawText(
+  const footer = screen.height - 26;
+  screen.drawLine(LIST_X, footer, LIST_X + LIST_WIDTH, footer, Color.Slate700);
+  screen.drawText(
     middle,
     footer + 7,
     "Up/Down or mouse to choose - Enter or click to run - Esc to come back",
