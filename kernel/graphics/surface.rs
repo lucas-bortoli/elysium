@@ -52,6 +52,35 @@ impl Surface {
         &self.pixmap
     }
 
+    /// Resizes the backing pixmap, keeping the old contents at the top-left
+    /// corner and leaving any newly exposed area transparent, so a resize
+    /// mid-frame doesn't flash. Empties the transform and clip stacks — a
+    /// clip is a region in the surface's own coordinates, and there is no
+    /// honest way to reinterpret one against different bounds. A resize to
+    /// the current dimensions changes nothing. `None` if the new dimensions
+    /// are zero or too large to allocate.
+    pub fn resize(&mut self, width: u32, height: u32) -> Option<()> {
+        if (width, height) == (self.pixmap.width(), self.pixmap.height()) {
+            return Some(());
+        }
+        let mut next = Pixmap::new(width, height)?;
+
+        let src_w = self.pixmap.width() as usize;
+        let dst_w = width as usize;
+        let copy_w = src_w.min(dst_w);
+        let copy_h = (self.pixmap.height().min(height)) as usize;
+        let src = self.pixmap.pixels();
+        let dst = next.pixels_mut();
+        for row in 0..copy_h {
+            dst[row * dst_w..row * dst_w + copy_w]
+                .copy_from_slice(&src[row * src_w..row * src_w + copy_w]);
+        }
+
+        self.pixmap = next;
+        self.state = DrawState::new(width, height);
+        Some(())
+    }
+
     /// Fills the whole surface with one palette colour, discarding whatever
     /// it held.
     pub fn clear(&mut self, color: Color) {
@@ -711,5 +740,42 @@ mod tests {
         // transform put at (5, 6).
         assert_eq!(pixel_at(&surface, 6, 7), Color::Rose500.hex());
         assert_eq!(pixel_at(&surface, 5, 6), Color::Teal300.hex());
+    }
+
+    #[test]
+    fn a_resize_keeps_the_old_contents_at_the_top_left() {
+        let mut surface = Surface::new(32, 32).expect("test surface");
+        surface.clear(Color::Slate900);
+        surface.fill_rectangle(0.0, 0.0, 8.0, 8.0, Color::Amber400);
+        surface.resize(64, 48).expect("resize");
+        assert_eq!(surface.width(), 64);
+        assert_eq!(surface.height(), 48);
+        // The old block is where it was.
+        assert_eq!(pixel_at(&surface, 4, 4), Color::Amber400.hex());
+        assert_eq!(pixel_at(&surface, 20, 20), Color::Slate900.hex());
+        // Newly exposed area is transparent, not carried over.
+        assert_eq!(surface.pixmap().pixels()[63].alpha(), 0);
+    }
+
+    #[test]
+    fn a_resize_empties_the_transform_and_clip_stacks() {
+        let mut surface = Surface::new(32, 32).expect("test surface");
+        surface.push_transform(Transform::from_translate(10.0, 10.0));
+        surface.push_clip(Some(&rect_path(0.0, 0.0, 4.0, 4.0)), FillRule::Winding);
+        surface.resize(40, 40).expect("resize");
+        surface.clear(Color::Slate900);
+        // If the clip or transform had survived, this rectangle would land
+        // shifted or be confined to a 4x4 corner.
+        surface.fill_rectangle(20.0, 20.0, 4.0, 4.0, Color::Amber400);
+        assert_eq!(pixel_at(&surface, 21, 21), Color::Amber400.hex());
+    }
+
+    #[test]
+    fn a_resize_to_the_current_size_is_a_no_op() {
+        let mut surface = Surface::new(32, 32).expect("test surface");
+        surface.clear(Color::Amber400);
+        let before: Vec<_> = surface.pixmap().pixels().to_vec();
+        surface.resize(32, 32).expect("resize");
+        assert_eq!(surface.pixmap().pixels(), before.as_slice());
     }
 }

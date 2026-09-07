@@ -13,7 +13,7 @@ use crate::esm_resolver::{
     CompilingLoader, EmbeddedOrFileResolver, bootstrap_jsx_runtime, set_virtual_import_meta,
 };
 use crate::filesystem;
-use crate::graphics::{self, ScreenSurface};
+use crate::graphics::{self, SurfaceTable};
 use crate::image::{self, ImageTable};
 use crate::input::{self, Input};
 use crate::process::{self, ProcessChannel, ProcessId};
@@ -62,11 +62,12 @@ const FRAME_BUDGET: Duration = Duration::from_millis(16);
 
 /// The devices the kernel owns and every VM shares a handle to.
 ///
-/// A process gets no private copy of any of these: `screen` is the one
-/// surface `ely:graphics`'s bindings draw onto (every process draws straight
-/// onto it, and the kernel presents it once per tick), `input` is the pointer
-/// and keyboard state fed from raw window events, and `scale` is the
-/// physical-pixels-per-logical-pixel setting `setScale` writes straight into.
+/// A process gets no private copy of any of these: `surfaces` is the one
+/// kernel-wide table `ely:graphics`'s bindings draw through — every process
+/// reaches the same entries by id, and the kernel presents the screen entry
+/// once per tick — `input` is the pointer and keyboard state fed from raw
+/// window events, and `scale` is the physical-pixels-per-logical-pixel
+/// setting `setScale` writes straight into.
 /// `userland_root` is the root of the whole userland tree — an absolute
 /// virtual path resolves against it and can never escape it, whatever the
 /// process's own entry path was, and every module's `import.meta` is
@@ -77,7 +78,7 @@ const FRAME_BUDGET: Duration = Duration::from_millis(16);
 /// that invariant.
 #[derive(Clone)]
 pub struct Devices {
-    pub screen: ScreenSurface,
+    pub surfaces: Rc<SurfaceTable>,
     pub input: Rc<Input>,
     pub scale: Rc<Cell<u32>>,
     /// The output device, absent when the machine has none or it couldn't be
@@ -93,7 +94,7 @@ impl Devices {
     /// without a userland tree, and failing here beats every path operation
     /// failing later for a reason that no longer names the cause.
     pub fn new(
-        screen: ScreenSurface,
+        surfaces: Rc<SurfaceTable>,
         input: Rc<Input>,
         scale: Rc<Cell<u32>>,
         sound: Option<Rc<Sound>>,
@@ -106,7 +107,7 @@ impl Devices {
             )
         });
         Self {
-            screen,
+            surfaces,
             input,
             scale,
             sound,
@@ -174,7 +175,7 @@ impl ElysiumRuntime {
         arguments_json: Option<String>,
     ) -> Result<Self> {
         let Devices {
-            screen,
+            surfaces,
             input,
             scale,
             sound,
@@ -220,7 +221,13 @@ impl ElysiumRuntime {
         context.with(|ctx| -> Result<()> {
             bind(&ctx, "print", print)?;
             bootstrap_jsx_runtime(&ctx)?;
-            graphics::bootstrap_graphics_bindings(&ctx, screen, scale, Rc::clone(&images))?;
+            graphics::bootstrap_graphics_bindings(
+                &ctx,
+                surfaces,
+                self_id,
+                scale,
+                Rc::clone(&images),
+            )?;
             input::bootstrap_input_bindings(&ctx, input)?;
             bootstrap_timers(&ctx, Rc::clone(&timers), Rc::clone(&microtasks))?;
             bootstrap_post_init_handlers(&ctx, Rc::clone(&post_init_handlers))?;

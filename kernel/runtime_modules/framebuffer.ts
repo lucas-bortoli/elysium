@@ -1,52 +1,95 @@
-// The Framebuffer device: a fixed-resolution GPU surface programs draw to.
-// Colors are always one of `Color`'s named entries (the kernel's fixed
-// palette), never raw RGBA channels a program could get wrong.
+// The drawing surface. A `Surface` is a retained image render operations
+// apply to immediately and stay; the screen is one, and a program can make
+// more with `createSurface`. Colors are always one of `Color`'s named
+// entries (the kernel's fixed palette), never raw RGBA channels a program
+// could get wrong.
 
 import type { Size2d, Vector2d } from "ely:math";
 import type { DrawTickerId } from "ely:framebuffer";
 import type { Image, ImageId } from "ely:image";
 
-declare function __framebuffer_clear_screen(color: Color): void;
-declare function __framebuffer_fill_rectangle(
+// The surface lifecycle. `__surface_use` reports whether the handle names a
+// live surface; the rest throw on a dead handle.
+declare function __surface_create(width: number, height: number): number;
+declare function __surface_use(handle: number): boolean;
+declare function __surface_destroy(handle: number): void;
+declare function __surface_dimensions(handle: number): [number, number];
+declare function __surface_resize(
+  handle: number,
+  width: number,
+  height: number,
+): void;
+
+// Drawing, each onto the surface the leading handle names.
+declare function __surface_clear(handle: number, color: Color): void;
+declare function __surface_fill_rectangle(
+  handle: number,
   x: number,
   y: number,
   w: number,
   h: number,
   color: Color,
 ): void;
-declare function __framebuffer_draw_image(
-  id: number,
+declare function __surface_set_pixel(
+  handle: number,
   x: number,
   y: number,
+  color: Color,
 ): void;
-declare function __framebuffer_draw_text(
+declare function __surface_draw_text(
+  handle: number,
   x: number,
   y: number,
   text: string,
-  font: number,
-  scale: number,
+  fontScale: [number, number],
   color: Color,
 ): void;
-declare function __framebuffer_measure_text(
+declare function __surface_measure_text(
   text: string,
   font: number,
 ): [number, number];
-declare function __framebuffer_nearest_color(
-  r: number,
-  g: number,
-  b: number,
-): Color;
-declare function __framebuffer_set_scale(scale: number): void;
-declare function __framebuffer_path_begin(): void;
-declare function __framebuffer_path_move_to(x: number, y: number): void;
-declare function __framebuffer_path_line_to(x: number, y: number): void;
-declare function __framebuffer_path_quad_to(
+declare function __surface_draw_image(
+  handle: number,
+  image: number,
+  x: number,
+  y: number,
+): void;
+declare function __surface_draw_image_transformed(
+  handle: number,
+  image: number,
+  source: [number, number, number, number],
+  transform: [number, number, number, number, number, number],
+): void;
+declare function __surface_draw_surface(
+  handle: number,
+  source: number,
+  x: number,
+  y: number,
+): void;
+declare function __surface_draw_surface_transformed(
+  handle: number,
+  source: number,
+  region: [number, number, number, number],
+  transform: [number, number, number, number, number, number],
+): void;
+declare function __surface_push_transform(
+  handle: number,
+  matrix: [number, number, number, number, number, number],
+): void;
+declare function __surface_pop_transform(handle: number): void;
+
+// The path pen and clip stack. The pen is one per program, not one per
+// surface; only fill/stroke/clip carry a surface handle.
+declare function __surface_path_begin(): void;
+declare function __surface_path_move_to(x: number, y: number): void;
+declare function __surface_path_line_to(x: number, y: number): void;
+declare function __surface_path_quad_to(
   cx: number,
   cy: number,
   x: number,
   y: number,
 ): void;
-declare function __framebuffer_path_cubic_to(
+declare function __surface_path_cubic_to(
   c1x: number,
   c1y: number,
   c2x: number,
@@ -54,69 +97,63 @@ declare function __framebuffer_path_cubic_to(
   x: number,
   y: number,
 ): void;
-declare function __framebuffer_path_close(): void;
-declare function __framebuffer_path_rect(
+declare function __surface_path_close(): void;
+declare function __surface_path_rect(
   x: number,
   y: number,
   w: number,
   h: number,
 ): void;
-declare function __framebuffer_path_oval(
+declare function __surface_path_oval(
   cx: number,
   cy: number,
   rx: number,
   ry: number,
 ): void;
-declare function __framebuffer_path_rounded_rect(
+declare function __surface_path_rounded_rect(
   x: number,
   y: number,
   w: number,
   h: number,
   radius: number,
 ): void;
-declare function __framebuffer_path_arc(
+declare function __surface_path_arc(
   cx: number,
   cy: number,
   r: number,
   start: number,
   end: number,
 ): void;
-declare function __framebuffer_fill_path(color: Color, rule: FillRule): void;
-declare function __framebuffer_stroke_path(
+declare function __surface_fill_path(
+  handle: number,
+  color: Color,
+  rule: FillRule,
+): void;
+declare function __surface_stroke_path(
+  handle: number,
   color: Color,
   thickness: number,
   cap: LineCap,
   join: LineJoin,
 ): void;
-declare function __framebuffer_push_transform(
-  sx: number,
-  ky: number,
-  kx: number,
-  sy: number,
-  tx: number,
-  ty: number,
-): void;
-declare function __framebuffer_pop_transform(): void;
-declare function __framebuffer_push_clip_rect(
+declare function __surface_push_clip_rect(
+  handle: number,
   x: number,
   y: number,
   w: number,
   h: number,
 ): void;
-declare function __framebuffer_push_clip(rule: FillRule): void;
-declare function __framebuffer_pop_clip(): void;
-declare function __framebuffer_draw_image_transformed(
-  id: number,
-  source: [number, number, number, number],
-  transform: [number, number, number, number, number, number],
-): void;
+declare function __surface_push_clip(handle: number, rule: FillRule): void;
+declare function __surface_pop_clip(handle: number): void;
+
+declare function __surface_nearest_color(
+  r: number,
+  g: number,
+  b: number,
+): Color;
+declare function __surface_set_scale(scale: number): void;
 declare function __image_width(id: number): number;
 declare function __image_height(id: number): number;
-declare function __framebuffer_set_pixel(
-  x: number,
-  y: number,
-  color: Color,
-): void;
 
 // The kernel's fixed, curated color palette. Every color a program can
 // draw with is one of these named entries — never a raw, unconstrained
@@ -417,14 +454,14 @@ export const Color = {
 
 // A color from the kernel's fixed palette, as one of `Color`'s named
 // entries (e.g. `Color.Slate900`). The underlying numeric id has no
-// meaning of its own outside matching kernel/framebuffer/colors.rs's
+// meaning of its own outside matching kernel/graphics/colors.rs's
 // `Color` enum.
 export type Color = (typeof Color)[keyof typeof Color];
 
 // The kernel's set of built-in bitmap fonts.
 // Generated from the font list in build/fonts.rs, so an entry's value is
 // exactly the font id the kernel expects; kept in sync by hand the same way
-// `Color` and `FRAMEBUFFER_WIDTH` are.
+// `Color` is.
 export const Font = {
   Cozette: 0,
 } as const;
@@ -441,88 +478,17 @@ export class DrawOutsideHandlerError extends Error {
   }
 }
 
-// The framebuffer's logical resolution — kept in sync by hand with
-// kernel/framebuffer.rs's `FRAMEBUFFER_WIDTH`/`FRAMEBUFFER_HEIGHT`, the same
-// way `Color` above is kept in sync with colors.rs's `Color` enum.
-const FRAMEBUFFER_WIDTH = 720;
-const FRAMEBUFFER_HEIGHT = 360;
-
-/** The framebuffer's logical width, in pixels. */
-export function getWidth(): number {
-  return FRAMEBUFFER_WIDTH;
-}
-
-/** The framebuffer's logical height, in pixels. */
-export function getHeight(): number {
-  return FRAMEBUFFER_HEIGHT;
-}
-
-/** The framebuffer's logical size, in pixels. */
-export function getSize2d(): Size2d {
-  return { width: FRAMEBUFFER_WIDTH, height: FRAMEBUFFER_HEIGHT };
-}
-
-let nextHandlerId = 1;
-const drawHandlers = new Map<DrawTickerId, () => void>();
-let insideDrawHandler = false;
-let frameScheduled = false;
-
-function frame() {
-  frameScheduled = false;
-  insideDrawHandler = true;
-  try {
-    for (const handler of [...drawHandlers.values()]) {
-      try {
-        handler();
-      } finally {
-        balanceStacks();
-      }
-    }
-  } finally {
-    insideDrawHandler = false;
-  }
-  if (drawHandlers.size > 0) scheduleFrame();
-}
-
-function scheduleFrame() {
-  if (!frameScheduled) {
-    frameScheduled = true;
-    requestAnimationFrame(frame);
+export class UnbalancedStackError extends Error {
+  constructor(what: string) {
+    super(`popped ${what} that was never pushed`);
+    this.name = "UnbalancedStackError";
   }
 }
 
-/** Registers `handler` to run once per frame; `clearScreen`/`fillRectangle`
- * only take effect when called from inside a running handler. Returns an id
- * for `removeDrawHandler`. */
-export function addDrawHandler(handler: () => void): DrawTickerId {
-  const id = nextHandlerId++;
-  drawHandlers.set(id, handler);
-  scheduleFrame();
-  return id;
-}
-
-/** Stops calling the draw handler registered under `id`. */
-export function removeDrawHandler(id: DrawTickerId): void {
-  drawHandlers.delete(id);
-}
-
-/** Clears the whole screen to `color`. */
-export function clearScreen(color: Color): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_clear_screen(color);
-}
-
-/** Fills an axis-aligned rectangle at `(x, y)`, `w` wide and `h` tall, with `color`. */
-export function fillRectangle(
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  color: Color,
-): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_fill_rectangle(x, y, w, h, color);
-}
+/** A number naming a surface, valid across every process. Send it over
+ * process IPC as an ordinary number; the receiver revives it with
+ * `useSurface`. */
+export type SurfaceHandle = number;
 
 /** Which edge of the text box `drawText`'s `x` names. */
 export type TextAlign = "left" | "center" | "right";
@@ -532,13 +498,11 @@ export interface TextOptions {
   /** Which of the kernel's built-in fonts to use. */
   font?: Font;
   /** How many pixels wide to draw each of the font's own pixels — a whole
-   * number of at least 1. A bigger size is the same bitmap with bigger
-   * pixels, so it stays as crisp as the font itself. */
+   * number of at least 1. */
   scale?: number;
   /** Which edge of the text `x` names. Defaults to its left. */
   align?: TextAlign;
-  /** Wraps the text to this width, breaking between words. A single word
-   * too wide to fit still gets a line of its own and overruns it. */
+  /** Wraps the text to this width, breaking between words. */
   maxWidth?: number;
   /** Multiplies the gap between lines. */
   lineSpacing?: number;
@@ -550,6 +514,74 @@ interface ResolvedTextOptions {
   align: TextAlign;
   maxWidth: number | undefined;
   lineSpacing: number;
+}
+
+/** How a path decides which of its regions count as inside, where its
+ * outline crosses over itself. */
+export type FillRule = "nonzero" | "evenodd";
+
+/** How a stroke finishes at the two loose ends of an open path. */
+export type LineCap = "butt" | "round" | "square";
+
+/** How a stroke turns a corner where two segments meet. */
+export type LineJoin = "miter" | "round" | "bevel";
+
+/** How `pushTransform` should move the coordinate space. Applied in the
+ * order written: a shape is scaled, then rotated, then shifted. */
+export interface Transform {
+  /** Shifts by this much, in the coordinates outside the transform. */
+  translate?: Vector2d;
+  /** Scales about the origin. A single number scales both axes alike. */
+  scale?: Vector2d | number;
+  /** Turns about the origin, in radians — clockwise on screen. */
+  rotate?: number;
+}
+
+/** Which part of an image to draw, and how to place it. */
+export interface DrawImageOptions {
+  /** The left edge of the part to draw. Defaults to 0. */
+  sx?: number;
+  /** The top edge of the part to draw. Defaults to 0. */
+  sy?: number;
+  /** The width of the part to draw. Defaults to the rest, right of `sx`. */
+  sw?: number;
+  /** The height of the part to draw. Defaults to the rest, below `sy`. */
+  sh?: number;
+  /** Draws it this many times its natural size. Whole numbers stay crisp. */
+  scale?: number | Vector2d;
+  /** Mirrors left to right, within the same destination box. */
+  flipX?: boolean;
+  /** Mirrors top to bottom, within the same destination box. */
+  flipY?: boolean;
+}
+
+/** Where an image or surface turns about, in the drawn copy's own pixels,
+ * measured from its top-left corner. */
+export interface DrawImageRotatedOptions extends DrawImageOptions {
+  /** Defaults to the left edge. */
+  originX?: number;
+  /** Defaults to the top edge. */
+  originY?: number;
+}
+
+const SCREEN_HANDLE: SurfaceHandle = 0;
+
+/** A 2x3 matrix laid out so that `(x, y)` maps to
+ * `(a x + c y + e, b x + d y + f)` — the same six numbers the kernel takes. */
+type Matrix = [number, number, number, number, number, number];
+
+/** `outer` applied after `inner`, so `inner` acts on a point first. */
+function concat(outer: Matrix, inner: Matrix): Matrix {
+  const [a, b, c, d, e, f] = outer;
+  const [g, h, i, j, k, l] = inner;
+  return [
+    a * g + c * h,
+    b * g + d * h,
+    a * i + c * j,
+    b * i + d * j,
+    a * k + c * l + e,
+    b * k + d * l + f,
+  ];
 }
 
 /** Accepts either a bare font, which is all `drawText` used to take, or the
@@ -575,12 +607,12 @@ function resolveTextOptions(
 }
 
 function lineWidth(line: string, options: ResolvedTextOptions): number {
-  return __framebuffer_measure_text(line, options.font)[0] * options.scale;
+  return __surface_measure_text(line, options.font)[0] * options.scale;
 }
 
 /** Greedily packs as many words as fit within `maxWidth` onto each line. A
  * word wider than `maxWidth` on its own still gets its own line and
- * overruns it — there is no hyphenation or mid-word breaking. */
+ * overruns it. */
 function wrapLine(line: string, options: ResolvedTextOptions): string[] {
   if (options.maxWidth === undefined) return [line];
   const wrapped: string[] = [];
@@ -603,564 +635,46 @@ function wrapLine(line: string, options: ResolvedTextOptions): string[] {
 function layoutText(text: string, options: ResolvedTextOptions) {
   const lines = text.split("\n").flatMap((line) => wrapLine(line, options));
   const widths = lines.map((line) => lineWidth(line, options));
-  const lineHeight =
-    __framebuffer_measure_text("", options.font)[1] * options.scale;
+  const lineHeight = __surface_measure_text("", options.font)[1] * options.scale;
   const step = lineHeight * options.lineSpacing;
   return {
     lines,
     widths,
     step,
     width: widths.reduce((widest, width) => Math.max(widest, width), 0),
-    // The last line takes its full height rather than a spaced step, so a
-    // single line measures exactly the font's line height whatever
-    // `lineSpacing` says.
     height: (lines.length - 1) * step + lineHeight,
   };
 }
 
-/** Draws `text` in `color` with its top-left corner at `(x, y)`, using one
- * of the kernel's built-in bitmap fonts.
- *
- * Passing options instead of a bare font aligns the text against `x` rather
- * than starting from it, wraps it to a width, or draws it at a whole-number
- * multiple of the font's size. Line breaks in `text` are honoured either
- * way. Like the other draw calls, only takes effect from inside a running
- * draw handler. */
-export function drawText(
-  x: number,
-  y: number,
-  text: string,
-  color: Color,
-  fontOrOptions: Font | TextOptions = Font.Cozette,
-): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  const options = resolveTextOptions(fontOrOptions);
-  const { lines, widths, step } = layoutText(text, options);
-  for (let i = 0; i < lines.length; i++) {
-    let left = x;
-    if (options.align === "center") left = x - widths[i]! / 2;
-    else if (options.align === "right") left = x - widths[i]!;
-    __framebuffer_draw_text(
-      left,
-      y + step * i,
-      lines[i]!,
-      options.font,
-      options.scale,
-      color,
-    );
-  }
-}
-
-/** The pixel box `text` would occupy if drawn with the same options — the
- * width of its widest line and the height of the whole block. A query, not
- * a draw call: can be used from anywhere to lay text out without assuming
- * the font's size. */
-export function measureText(
-  text: string,
-  fontOrOptions: Font | TextOptions = Font.Cozette,
-): Size2d {
-  const options = resolveTextOptions(fontOrOptions);
-  const { width, height } = layoutText(text, options);
-  return { width, height };
-}
-
-/** The palette entry closest to the RGB triplet `(r, g, b)` (each `0-255`). */
-export function nearestColor(r: number, g: number, b: number): Color {
-  return __framebuffer_nearest_color(r, g, b);
-}
-
-/** Sets how many physical pixels the window draws each logical pixel as —
- * an integer of at least 1. Takes effect on the next frame; unlike
- * `clearScreen`/`fillRectangle`, can be called from anywhere, not just
- * from inside a draw handler. */
-export function setScale(scale: number): void {
-  __framebuffer_set_scale(scale);
-}
-
-/** How a path decides which of its regions count as inside, where its
- * outline crosses over itself. `"nonzero"` counts a region inside when the
- * outline winds around it at all; `"evenodd"` alternates, so a shape drawn
- * inside another punches a hole in it. */
-export type FillRule = "nonzero" | "evenodd";
-
-/** How a stroke finishes at the two loose ends of an open path. */
-export type LineCap = "butt" | "round" | "square";
-
-/** How a stroke turns a corner where two segments meet. */
-export type LineJoin = "miter" | "round" | "bevel";
-
-export class UnbalancedStackError extends Error {
-  constructor(what: string) {
-    super(`popped ${what} that was never pushed`);
-    this.name = "UnbalancedStackError";
-  }
-}
-
-let transformDepth = 0;
-let clipDepth = 0;
-
-// Closes whatever the handler that just ran left open. A handler can return
-// — or throw — without popping everything it pushed, and one frame is drawn
-// by every handler of every running program in turn, so anything left open
-// would go on confining or moving drawing that isn't the leaking program's
-// at all.
-function balanceStacks(): void {
-  while (clipDepth > 0) {
-    clipDepth--;
-    __framebuffer_pop_clip();
-  }
-  while (transformDepth > 0) {
-    transformDepth--;
-    __framebuffer_pop_transform();
-  }
-}
-
-/** Starts a new path, discarding whatever was being described before it.
- *
- * There is one path under construction at a time. The shape calls that
- * describe a whole path of their own — `fillCircle`, `pushClip` and the
- * rest — each start a new one, so they replace a path in progress rather
- * than adding to it. */
-export function beginPath(): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_path_begin();
-}
-
-/** Starts a new contour of the current path at `(x, y)`, without drawing
- * anything on the way there. */
-export function moveTo(x: number, y: number): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_path_move_to(x, y);
-}
-
-/** Extends the current path with a straight segment to `(x, y)`. */
-export function lineTo(x: number, y: number): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_path_line_to(x, y);
-}
-
-/** Extends the current path with a curve to `(x, y)` that bends toward the
- * single control point `(cx, cy)` without passing through it. */
-export function quadraticTo(
-  cx: number,
-  cy: number,
-  x: number,
-  y: number,
-): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_path_quad_to(cx, cy, x, y);
-}
-
-/** Extends the current path with a curve to `(x, y)` that leaves along
- * `(c1x, c1y)` and arrives along `(c2x, c2y)` — the two-control-point curve
- * that can bend in an S. */
-export function cubicTo(
-  c1x: number,
-  c1y: number,
-  c2x: number,
-  c2y: number,
-  x: number,
-  y: number,
-): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_path_cubic_to(c1x, c1y, c2x, c2y, x, y);
-}
-
-/** Closes the current contour with a straight segment back to where it
- * started. A path is filled as though every contour were closed, so this
- * matters to `strokePath`, which would otherwise leave the loop open. */
-export function closePath(): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_path_close();
-}
-
-/** Fills the inside of the current path with `color`. Leaves the path in
- * place, so it can be stroked afterwards without describing it again. */
-export function fillPath(color: Color, rule: FillRule = "nonzero"): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_fill_path(color, rule);
-}
-
-/** Draws a line of `thickness` along the current path in `color`. The line
- * straddles the path, half its thickness to either side. Leaves the path in
- * place. */
-export function strokePath(
-  color: Color,
-  thickness: number = 1,
-  cap: LineCap = "butt",
-  join: LineJoin = "miter",
-): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_stroke_path(color, thickness, cap, join);
-}
-
-/** How `pushTransform` should move the coordinate space. Applied in the
- * order written: a shape is scaled, then rotated, then shifted. */
-export interface Transform {
-  /** Shifts by this much, in the coordinates outside the transform. */
-  translate?: Vector2d;
-  /** Scales about the origin. A single number scales both axes alike. */
-  scale?: Vector2d | number;
-  /** Turns about the origin, in radians — clockwise on screen, since `y`
-   * grows downward. */
-  rotate?: number;
-}
-
-/** Moves the coordinate space everything drawn afterwards is placed in,
- * until the matching `popTransform`. Transforms nest: pushing a second one
- * applies inside the first rather than replacing it. */
-export function pushTransform(transform: Transform): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+/** The 2x3 for shift * turn * scale a `Transform` describes. */
+function transformMatrix(transform: Transform): Matrix {
   const { translate, scale, rotate = 0 } = transform;
   const sx = typeof scale === "number" ? scale : (scale?.x ?? 1);
   const sy = typeof scale === "number" ? scale : (scale?.y ?? 1);
   const cos = Math.cos(rotate);
   const sin = Math.sin(rotate);
-  transformDepth++;
-  // The 2x3 matrix for shift * turn * scale, column by column.
-  __framebuffer_push_transform(
+  return [
     cos * sx,
     sin * sx,
     -sin * sy,
     cos * sy,
     translate?.x ?? 0,
     translate?.y ?? 0,
-  );
-}
-
-/** Restores the coordinate space in effect before the matching
- * `pushTransform`. */
-export function popTransform(): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  if (transformDepth === 0) throw new UnbalancedStackError("a transform");
-  transformDepth--;
-  __framebuffer_pop_transform();
-}
-
-/** Confines everything drawn afterwards to the rectangle at `(x, y)`, until
- * the matching `popClip`. Clips nest by narrowing: drawing can never escape
- * a region an enclosing clip already confined it to. Under a rotated or
- * sheared transform the region is the turned rectangle itself, not its
- * bounding box. */
-export function pushClip(x: number, y: number, w: number, h: number): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  clipDepth++;
-  __framebuffer_push_clip_rect(x, y, w, h);
-}
-
-/** Confines everything drawn afterwards to the inside of the current path,
- * until the matching `popClip` — the arbitrary-shape form of `pushClip`. */
-export function pushClipPath(rule: FillRule = "nonzero"): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  clipDepth++;
-  __framebuffer_push_clip(rule);
-}
-
-/** Restores the region in effect before the matching `pushClip`. */
-export function popClip(): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  if (clipDepth === 0) throw new UnbalancedStackError("a clip");
-  clipDepth--;
-  __framebuffer_pop_clip();
-}
-
-// The shapes below each describe a whole path of their own, so they all
-// start a new one and replace whatever was being built. They go through the
-// same fill and stroke the raw path calls do; nothing here is a special case
-// in the kernel.
-
-/** Draws the outline of an axis-aligned rectangle at `(x, y)`, `w` wide and
- * `h` tall. The outline straddles the rectangle's edge, half its thickness
- * to either side, so it doesn't cover exactly the same pixels `fillRectangle`
- * would. */
-export function strokeRectangle(
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  color: Color,
-  thickness: number = 1,
-): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_path_begin();
-  __framebuffer_path_rect(x, y, w, h);
-  __framebuffer_stroke_path(color, thickness, "butt", "miter");
-}
-
-/** Fills a rectangle at `(x, y)` whose corners are rounded off by `radius`,
- * clamped to half the shorter side. */
-export function fillRoundedRectangle(
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  radius: number,
-  color: Color,
-): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_path_begin();
-  __framebuffer_path_rounded_rect(x, y, w, h, radius);
-  __framebuffer_fill_path(color, "nonzero");
-}
-
-/** Draws the outline of a rectangle at `(x, y)` with corners rounded off by
- * `radius`. */
-export function strokeRoundedRectangle(
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  radius: number,
-  color: Color,
-  thickness: number = 1,
-): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_path_begin();
-  __framebuffer_path_rounded_rect(x, y, w, h, radius);
-  __framebuffer_stroke_path(color, thickness, "butt", "miter");
-}
-
-/** Draws a straight line from `(x1, y1)` to `(x2, y2)`.
- *
- * A line straddles the coordinates it runs along, so a thickness of 1 down a
- * whole coordinate covers half of each neighbouring pixel column. Run it down
- * the middle of a column — `x + 0.5` — for one crisp line. */
-export function drawLine(
-  x1: number,
-  y1: number,
-  x2: number,
-  y2: number,
-  color: Color,
-  thickness: number = 1,
-): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_path_begin();
-  __framebuffer_path_move_to(x1, y1);
-  __framebuffer_path_line_to(x2, y2);
-  __framebuffer_stroke_path(color, thickness, "butt", "miter");
-}
-
-/** Draws straight lines through `points` in order, leaving the two ends
- * loose. Fewer than two points draws nothing. */
-export function drawPolyline(
-  points: readonly Vector2d[],
-  color: Color,
-  thickness: number = 1,
-): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  if (points.length < 2) return;
-  tracePoints(points);
-  __framebuffer_stroke_path(color, thickness, "butt", "round");
-}
-
-/** Fills a circle of radius `r` centred on `(cx, cy)`. */
-export function fillCircle(
-  cx: number,
-  cy: number,
-  r: number,
-  color: Color,
-): void {
-  fillEllipse(cx, cy, r, r, color);
-}
-
-/** Draws the outline of a circle of radius `r` centred on `(cx, cy)`. The
- * outline straddles the radius, half its thickness to either side. */
-export function strokeCircle(
-  cx: number,
-  cy: number,
-  r: number,
-  color: Color,
-  thickness: number = 1,
-): void {
-  strokeEllipse(cx, cy, r, r, color, thickness);
-}
-
-/** Fills an axis-aligned ellipse centred on `(cx, cy)`, reaching `rx` to
- * either side and `ry` above and below. */
-export function fillEllipse(
-  cx: number,
-  cy: number,
-  rx: number,
-  ry: number,
-  color: Color,
-): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_path_begin();
-  __framebuffer_path_oval(cx, cy, rx, ry);
-  __framebuffer_fill_path(color, "nonzero");
-}
-
-/** Draws the outline of an axis-aligned ellipse centred on `(cx, cy)`. */
-export function strokeEllipse(
-  cx: number,
-  cy: number,
-  rx: number,
-  ry: number,
-  color: Color,
-  thickness: number = 1,
-): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_path_begin();
-  __framebuffer_path_oval(cx, cy, rx, ry);
-  __framebuffer_stroke_path(color, thickness, "butt", "miter");
-}
-
-/** Draws the piece of a circle's rim running from `startRad` to `endRad`,
- * in radians measured from `+x` and increasing clockwise on screen. The
- * sweep follows which way round the two angles are named, so naming them
- * backwards sweeps the other way — which is how a meter winds down. */
-export function drawArc(
-  cx: number,
-  cy: number,
-  r: number,
-  startRad: number,
-  endRad: number,
-  color: Color,
-  thickness: number = 1,
-): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_path_begin();
-  __framebuffer_path_arc(cx, cy, r, startRad, endRad);
-  __framebuffer_stroke_path(color, thickness, "butt", "round");
-}
-
-/** Fills the triangle with corners `a`, `b` and `c`. */
-export function fillTriangle(
-  a: Vector2d,
-  b: Vector2d,
-  c: Vector2d,
-  color: Color,
-): void {
-  fillPolygon([a, b, c], color);
-}
-
-/** Fills the shape enclosed by `points`, joined in order and closed back to
- * the first. Fewer than three points encloses nothing and draws nothing.
- *
- * The outline may cross over itself; `rule` decides what counts as inside
- * where it does. */
-export function fillPolygon(
-  points: readonly Vector2d[],
-  color: Color,
-  rule: FillRule = "nonzero",
-): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  if (points.length < 3) return;
-  tracePoints(points);
-  __framebuffer_path_close();
-  __framebuffer_fill_path(color, rule);
-}
-
-/** Draws the outline of the shape enclosed by `points`, closed back to the
- * first — unlike `drawPolyline`, which leaves its ends loose. */
-export function strokePolygon(
-  points: readonly Vector2d[],
-  color: Color,
-  thickness: number = 1,
-): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  if (points.length < 3) return;
-  tracePoints(points);
-  __framebuffer_path_close();
-  __framebuffer_stroke_path(color, thickness, "butt", "miter");
-}
-
-/** Starts a fresh path running through `points` in order, leaving it open
- * for the caller to close, fill or stroke. */
-function tracePoints(points: readonly Vector2d[]): void {
-  if (points.length === 0) return;
-  __framebuffer_path_begin();
-  __framebuffer_path_move_to(points[0]!.x, points[0]!.y);
-  for (let i = 1; i < points.length; i++) {
-    __framebuffer_path_line_to(points[i]!.x, points[i]!.y);
-  }
-}
-
-/** Sets the single pixel that `(x, y)` falls inside. Coordinates name the
- * corners of the pixel grid, so `(3, 4)` and `(3.5, 4.5)` both set the same
- * pixel — the fourth across and fifth down. */
-export function setPixel(x: number, y: number, color: Color): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  __framebuffer_set_pixel(x, y, color);
-}
-
-/** Sets every pixel in `points` to the same color. */
-export function drawPixels(points: readonly Vector2d[], color: Color): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  for (const point of points) {
-    __framebuffer_set_pixel(point.x, point.y, color);
-  }
-}
-
-/** A 2x3 matrix laid out so that a point `(x, y)` maps to
- * `(a x + c y + e, b x + d y + f)` — the same six numbers the kernel takes. */
-type Matrix = [number, number, number, number, number, number];
-
-/** `outer` applied after `inner`, so `inner` acts on a point first. */
-function concat(outer: Matrix, inner: Matrix): Matrix {
-  const [a, b, c, d, e, f] = outer;
-  const [g, h, i, j, k, l] = inner;
-  return [
-    a * g + c * h,
-    b * g + d * h,
-    a * i + c * j,
-    b * i + d * j,
-    a * k + c * l + e,
-    b * k + d * l + f,
   ];
 }
 
-/** Which part of an image to draw, and how to place it. */
-export interface DrawImageOptions {
-  /** The left edge of the part of the image to draw. Defaults to 0. */
-  sx?: number;
-  /** The top edge of the part of the image to draw. Defaults to 0. */
-  sy?: number;
-  /** The width of the part of the image to draw. Defaults to the rest of
-   * it, to the right of `sx`. */
-  sw?: number;
-  /** The height of the part of the image to draw. Defaults to the rest of
-   * it, below `sy`. */
-  sh?: number;
-  /** Draws the image this many times its natural size. A single number
-   * scales both axes alike. Whole numbers keep it pixel-crisp; anything
-   * else lands its pixels unevenly, since nothing is smoothed. */
-  scale?: number | Vector2d;
-  /** Mirrors the image left to right, within the same destination box. */
-  flipX?: boolean;
-  /** Mirrors the image top to bottom, within the same destination box. */
-  flipY?: boolean;
-}
-
-/** Where an image turns about, in the drawn image's own pixels, measured
- * from its top-left corner. */
-export interface DrawImageRotatedOptions extends DrawImageOptions {
-  /** Defaults to the left edge. */
-  originX?: number;
-  /** Defaults to the top edge. */
-  originY?: number;
-}
-
-function imageId(image: Image | ImageId): number {
-  return typeof image === "number" ? image : image.id;
-}
-
-/** The source rect asked for, filled in against the image's real size. */
-function sourceRect(
-  id: number,
+/** The source rect asked for, filled in against a full `w` x `h`. */
+function croppedRect(
+  w: number,
+  h: number,
   options: DrawImageOptions,
 ): [number, number, number, number] {
   const sx = options.sx ?? 0;
   const sy = options.sy ?? 0;
-  return [
-    sx,
-    sy,
-    options.sw ?? __image_width(id) - sx,
-    options.sh ?? __image_height(id) - sy,
-  ];
+  return [sx, sy, options.sw ?? w - sx, options.sh ?? h - sy];
 }
 
-/** Maps the source rect's own box onto the surface: mirrored, resized,
+/** Maps a source rect's own box onto the surface: mirrored, resized,
  * turned about its origin, and finally moved to `(x, y)`. */
 function placement(
   x: number,
@@ -1174,8 +688,6 @@ function placement(
   const scaleX = typeof scale === "number" ? scale : scale.x;
   const scaleY = typeof scale === "number" ? scale : scale.y;
 
-  // Mirroring folds the box back onto itself, so a flipped image covers the
-  // same destination as an unflipped one.
   let matrix: Matrix = [
     options.flipX ? -1 : 1,
     0,
@@ -1191,7 +703,6 @@ function placement(
     const oy = options.originY ?? 0;
     const cos = Math.cos(radians);
     const sin = Math.sin(radians);
-    // Turn about the origin: bring it to zero, turn, and put it back.
     matrix = concat(
       concat([1, 0, 0, 1, ox, oy], [cos, sin, -sin, cos, 0, 0]),
       concat([1, 0, 0, 1, -ox, -oy], matrix),
@@ -1201,34 +712,848 @@ function placement(
   return concat([1, 0, 0, 1, x, y], matrix);
 }
 
-/** Draws `image` with its top-left corner at `(x, y)`.
+function imageId(image: Image | ImageId): number {
+  return typeof image === "number" ? image : image.id;
+}
+
+/** Starts a fresh path running through `points`, leaving it open for the
+ * caller to close, fill or stroke. */
+function tracePoints(points: readonly Vector2d[]): void {
+  if (points.length === 0) return;
+  __surface_path_begin();
+  __surface_path_move_to(points[0]!.x, points[0]!.y);
+  for (let i = 1; i < points.length; i++) {
+    __surface_path_line_to(points[i]!.x, points[i]!.y);
+  }
+}
+
+/** A retained drawing surface. Every operation applies to its pixels right
+ * away and stays; the transform and clip stacks persist between calls.
  *
- * With no options it goes on at its natural size, whole. Options take part
- * of it instead, resize it, or mirror it — see `DrawImageOptions`. */
+ * Get one with `useSurface(handle)` — for the screen, the exported `screen`.
+ * `createSurface` returns a bare handle, the thing you send to another
+ * process. */
+export class Surface {
+  #handle: SurfaceHandle;
+
+  constructor(handle: SurfaceHandle) {
+    this.#handle = handle;
+  }
+
+  /** The number to send over process IPC. */
+  get handle(): SurfaceHandle {
+    return this.#handle;
+  }
+
+  /** Live — reflects a resize by any holder of the handle. */
+  get width(): number {
+    return __surface_dimensions(this.#handle)[0];
+  }
+
+  get height(): number {
+    return __surface_dimensions(this.#handle)[1];
+  }
+
+  get size(): Size2d {
+    const [width, height] = __surface_dimensions(this.#handle);
+    return { width, height };
+  }
+
+  /** Resizes the surface. Contents keep their top-left corner; newly
+   * exposed area is transparent. Empties the transform and clip stacks. */
+  resize(width: number, height: number): void {
+    __surface_resize(this.#handle, width, height);
+  }
+
+  /** Fills the whole surface with `color`, discarding whatever it held. */
+  clear(color: Color): void {
+    __surface_clear(this.#handle, color);
+  }
+
+  /** Fills an axis-aligned rectangle at `(x, y)`, `w` wide and `h` tall. */
+  fillRectangle(x: number, y: number, w: number, h: number, color: Color): void {
+    __surface_fill_rectangle(this.#handle, x, y, w, h, color);
+  }
+
+  /** Draws the outline of an axis-aligned rectangle. The outline straddles
+   * the edge, so it doesn't land on the same pixels `fillRectangle` would. */
+  strokeRectangle(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    color: Color,
+    thickness: number = 1,
+  ): void {
+    __surface_path_begin();
+    __surface_path_rect(x, y, w, h);
+    __surface_stroke_path(this.#handle, color, thickness, "butt", "miter");
+  }
+
+  /** Fills a rectangle whose corners are rounded off by `radius`, clamped
+   * to half the shorter side. */
+  fillRoundedRectangle(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    radius: number,
+    color: Color,
+  ): void {
+    __surface_path_begin();
+    __surface_path_rounded_rect(x, y, w, h, radius);
+    __surface_fill_path(this.#handle, color, "nonzero");
+  }
+
+  /** Draws the outline of a rounded rectangle. */
+  strokeRoundedRectangle(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    radius: number,
+    color: Color,
+    thickness: number = 1,
+  ): void {
+    __surface_path_begin();
+    __surface_path_rounded_rect(x, y, w, h, radius);
+    __surface_stroke_path(this.#handle, color, thickness, "butt", "miter");
+  }
+
+  /** Draws a straight line from `(x1, y1)` to `(x2, y2)`. Run it down the
+   * middle of a column — `x + 0.5` — for one crisp line. */
+  drawLine(
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    color: Color,
+    thickness: number = 1,
+  ): void {
+    __surface_path_begin();
+    __surface_path_move_to(x1, y1);
+    __surface_path_line_to(x2, y2);
+    __surface_stroke_path(this.#handle, color, thickness, "butt", "miter");
+  }
+
+  /** Draws straight lines through `points` in order, ends left loose. */
+  drawPolyline(
+    points: readonly Vector2d[],
+    color: Color,
+    thickness: number = 1,
+  ): void {
+    if (points.length < 2) return;
+    tracePoints(points);
+    __surface_stroke_path(this.#handle, color, thickness, "butt", "round");
+  }
+
+  /** Fills a circle of radius `r` centred on `(cx, cy)`. */
+  fillCircle(cx: number, cy: number, r: number, color: Color): void {
+    this.fillEllipse(cx, cy, r, r, color);
+  }
+
+  /** Draws the outline of a circle. */
+  strokeCircle(
+    cx: number,
+    cy: number,
+    r: number,
+    color: Color,
+    thickness: number = 1,
+  ): void {
+    this.strokeEllipse(cx, cy, r, r, color, thickness);
+  }
+
+  /** Fills an axis-aligned ellipse centred on `(cx, cy)`. */
+  fillEllipse(
+    cx: number,
+    cy: number,
+    rx: number,
+    ry: number,
+    color: Color,
+  ): void {
+    __surface_path_begin();
+    __surface_path_oval(cx, cy, rx, ry);
+    __surface_fill_path(this.#handle, color, "nonzero");
+  }
+
+  /** Draws the outline of an axis-aligned ellipse. */
+  strokeEllipse(
+    cx: number,
+    cy: number,
+    rx: number,
+    ry: number,
+    color: Color,
+    thickness: number = 1,
+  ): void {
+    __surface_path_begin();
+    __surface_path_oval(cx, cy, rx, ry);
+    __surface_stroke_path(this.#handle, color, thickness, "butt", "miter");
+  }
+
+  /** Draws the piece of a circle's rim from `startRad` to `endRad`. Naming
+   * the angles backwards sweeps the other way. */
+  drawArc(
+    cx: number,
+    cy: number,
+    r: number,
+    startRad: number,
+    endRad: number,
+    color: Color,
+    thickness: number = 1,
+  ): void {
+    __surface_path_begin();
+    __surface_path_arc(cx, cy, r, startRad, endRad);
+    __surface_stroke_path(this.#handle, color, thickness, "butt", "round");
+  }
+
+  /** Fills the triangle with corners `a`, `b` and `c`. */
+  fillTriangle(a: Vector2d, b: Vector2d, c: Vector2d, color: Color): void {
+    this.fillPolygon([a, b, c], color);
+  }
+
+  /** Fills the shape enclosed by `points`, closed back to the first. Fewer
+   * than three points draws nothing. */
+  fillPolygon(
+    points: readonly Vector2d[],
+    color: Color,
+    rule: FillRule = "nonzero",
+  ): void {
+    if (points.length < 3) return;
+    tracePoints(points);
+    __surface_path_close();
+    __surface_fill_path(this.#handle, color, rule);
+  }
+
+  /** Draws the outline of the shape enclosed by `points`, closed back to
+   * the first. */
+  strokePolygon(
+    points: readonly Vector2d[],
+    color: Color,
+    thickness: number = 1,
+  ): void {
+    if (points.length < 3) return;
+    tracePoints(points);
+    __surface_path_close();
+    __surface_stroke_path(this.#handle, color, thickness, "butt", "miter");
+  }
+
+  /** Sets the single pixel `(x, y)` falls inside. */
+  setPixel(x: number, y: number, color: Color): void {
+    __surface_set_pixel(this.#handle, x, y, color);
+  }
+
+  /** Sets every pixel in `points` to the same color. */
+  drawPixels(points: readonly Vector2d[], color: Color): void {
+    for (const point of points) {
+      __surface_set_pixel(this.#handle, point.x, point.y, color);
+    }
+  }
+
+  /** Starts a new path, discarding whatever was being described. There is
+   * one path under construction per program, shared across surfaces. */
+  beginPath(): void {
+    __surface_path_begin();
+  }
+
+  /** Starts a new contour at `(x, y)` without drawing on the way there. */
+  moveTo(x: number, y: number): void {
+    __surface_path_move_to(x, y);
+  }
+
+  /** Extends the current path with a straight segment to `(x, y)`. */
+  lineTo(x: number, y: number): void {
+    __surface_path_line_to(x, y);
+  }
+
+  /** Extends the current path with a curve to `(x, y)` bending toward
+   * `(cx, cy)` without passing through it. */
+  quadraticTo(cx: number, cy: number, x: number, y: number): void {
+    __surface_path_quad_to(cx, cy, x, y);
+  }
+
+  /** Extends the current path with a curve to `(x, y)` leaving along
+   * `(c1x, c1y)` and arriving along `(c2x, c2y)`. */
+  cubicTo(
+    c1x: number,
+    c1y: number,
+    c2x: number,
+    c2y: number,
+    x: number,
+    y: number,
+  ): void {
+    __surface_path_cubic_to(c1x, c1y, c2x, c2y, x, y);
+  }
+
+  /** Closes the current contour with a straight segment back to its start. */
+  closePath(): void {
+    __surface_path_close();
+  }
+
+  /** Fills the inside of the current path. Leaves the path in place. */
+  fillPath(color: Color, rule: FillRule = "nonzero"): void {
+    __surface_fill_path(this.#handle, color, rule);
+  }
+
+  /** Draws a line of `thickness` along the current path. Leaves it in
+   * place. */
+  strokePath(
+    color: Color,
+    thickness: number = 1,
+    cap: LineCap = "butt",
+    join: LineJoin = "miter",
+  ): void {
+    __surface_stroke_path(this.#handle, color, thickness, cap, join);
+  }
+
+  /** Moves the coordinate space everything drawn afterwards is placed in,
+   * until the matching `popTransform`. Transforms nest. */
+  pushTransform(transform: Transform): void {
+    __surface_push_transform(this.#handle, transformMatrix(transform));
+  }
+
+  /** Restores the coordinate space from before the matching
+   * `pushTransform`. */
+  popTransform(): void {
+    __surface_pop_transform(this.#handle);
+  }
+
+  /** Confines everything drawn afterwards to the rectangle at `(x, y)`,
+   * until the matching `popClip`. Clips nest by narrowing. */
+  pushClip(x: number, y: number, w: number, h: number): void {
+    __surface_push_clip_rect(this.#handle, x, y, w, h);
+  }
+
+  /** Confines everything drawn afterwards to the inside of the current
+   * path — the arbitrary-shape form of `pushClip`. */
+  pushClipPath(rule: FillRule = "nonzero"): void {
+    __surface_push_clip(this.#handle, rule);
+  }
+
+  /** Restores the region from before the matching `pushClip`. */
+  popClip(): void {
+    __surface_pop_clip(this.#handle);
+  }
+
+  /** Draws `text` in `color` with its top-left corner at `(x, y)`. Passing
+   * options instead of a bare font aligns, wraps, or scales it. */
+  drawText(
+    x: number,
+    y: number,
+    text: string,
+    color: Color,
+    fontOrOptions: Font | TextOptions = Font.Cozette,
+  ): void {
+    const options = resolveTextOptions(fontOrOptions);
+    const { lines, widths, step } = layoutText(text, options);
+    for (let i = 0; i < lines.length; i++) {
+      let left = x;
+      if (options.align === "center") left = x - widths[i]! / 2;
+      else if (options.align === "right") left = x - widths[i]!;
+      __surface_draw_text(
+        this.#handle,
+        left,
+        y + step * i,
+        lines[i]!,
+        [options.font, options.scale],
+        color,
+      );
+    }
+  }
+
+  /** The pixel box `text` would occupy — a query, not a draw call. */
+  measureText(
+    text: string,
+    fontOrOptions: Font | TextOptions = Font.Cozette,
+  ): Size2d {
+    const { width, height } = layoutText(text, resolveTextOptions(fontOrOptions));
+    return { width, height };
+  }
+
+  /** Draws `image` with its top-left corner at `(x, y)`. Options take part
+   * of it, resize it, or mirror it. */
+  drawImage(
+    image: Image | ImageId,
+    x: number,
+    y: number,
+    options?: DrawImageOptions,
+  ): void {
+    const id = imageId(image);
+    if (options === undefined) {
+      __surface_draw_image(this.#handle, id, x, y);
+      return;
+    }
+    const source = croppedRect(__image_width(id), __image_height(id), options);
+    __surface_draw_image_transformed(
+      this.#handle,
+      id,
+      source,
+      placement(x, y, source[2], source[3], 0, options),
+    );
+  }
+
+  /** Draws `image` at `(x, y)`, turned `radians` about `(originX, originY)`
+   * within it — the origin defaulting to its top-left corner. */
+  drawImageRotated(
+    image: Image | ImageId,
+    x: number,
+    y: number,
+    radians: number,
+    options: DrawImageRotatedOptions = {},
+  ): void {
+    const id = imageId(image);
+    const source = croppedRect(__image_width(id), __image_height(id), options);
+    __surface_draw_image_transformed(
+      this.#handle,
+      id,
+      source,
+      placement(x, y, source[2], source[3], radians, options),
+    );
+  }
+
+  /** Draws another surface onto this one, like an image, with its top-left
+   * corner at `(x, y)`. A surface can't be drawn onto itself. */
+  drawSurface(
+    source: SurfaceHandle | Surface,
+    x: number,
+    y: number,
+    options?: DrawImageOptions,
+  ): void {
+    const src = typeof source === "number" ? source : source.handle;
+    if (options === undefined) {
+      __surface_draw_surface(this.#handle, src, x, y);
+      return;
+    }
+    const [w, h] = __surface_dimensions(src);
+    const region = croppedRect(w, h, options);
+    __surface_draw_surface_transformed(
+      this.#handle,
+      src,
+      region,
+      placement(x, y, region[2], region[3], 0, options),
+    );
+  }
+
+  /** Draws another surface onto this one, turned `radians` about
+   * `(originX, originY)` within it. */
+  drawSurfaceRotated(
+    source: SurfaceHandle | Surface,
+    x: number,
+    y: number,
+    radians: number,
+    options: DrawImageRotatedOptions = {},
+  ): void {
+    const src = typeof source === "number" ? source : source.handle;
+    const [w, h] = __surface_dimensions(src);
+    const region = croppedRect(w, h, options);
+    __surface_draw_surface_transformed(
+      this.#handle,
+      src,
+      region,
+      placement(x, y, region[2], region[3], radians, options),
+    );
+  }
+}
+
+/** The screen — the surface the kernel presents at the end of every tick.
+ * Draw to it directly; nothing else needs to happen first. */
+export const screen: Surface = new Surface(SCREEN_HANDLE);
+
+/** Makes a new, fully transparent surface and returns its handle — the
+ * thing to send to another process. Revive it into something drawable with
+ * `useSurface`. */
+export function createSurface(width: number, height: number): SurfaceHandle {
+  return __surface_create(width, height);
+}
+
+/** Revives a handle — yours, or one another process sent you — into a
+ * `Surface` you can draw with. Throws if the handle names no live
+ * surface. */
+export function useSurface(handle: SurfaceHandle): Surface {
+  if (!__surface_use(handle)) {
+    throw new TypeError(`${handle} is not a live surface`);
+  }
+  return new Surface(handle);
+}
+
+/** Drops this process's hold on `handle`. The surface goes away once no
+ * live process holds it. */
+export function destroySurface(handle: SurfaceHandle): void {
+  __surface_destroy(handle);
+}
+
+// --- Draw handlers: the per-frame hook the legacy free functions sit
+// behind. Kept for now; a program can already draw to a surface from
+// anywhere via the `Surface` methods above.
+
+let nextHandlerId = 1;
+const drawHandlers = new Map<DrawTickerId, () => void>();
+let insideDrawHandler = false;
+let frameScheduled = false;
+
+let transformDepth = 0;
+let clipDepth = 0;
+
+function balanceStacks(): void {
+  while (clipDepth > 0) {
+    clipDepth--;
+    screen.popClip();
+  }
+  while (transformDepth > 0) {
+    transformDepth--;
+    screen.popTransform();
+  }
+}
+
+function frame() {
+  frameScheduled = false;
+  insideDrawHandler = true;
+  try {
+    for (const handler of [...drawHandlers.values()]) {
+      try {
+        handler();
+      } finally {
+        balanceStacks();
+      }
+    }
+  } finally {
+    insideDrawHandler = false;
+  }
+  if (drawHandlers.size > 0) scheduleFrame();
+}
+
+function scheduleFrame() {
+  if (!frameScheduled) {
+    frameScheduled = true;
+    requestAnimationFrame(frame);
+  }
+}
+
+/** Registers `handler` to run once per frame; the free draw functions only
+ * take effect when called from inside a running handler. Returns an id for
+ * `removeDrawHandler`. */
+export function addDrawHandler(handler: () => void): DrawTickerId {
+  const id = nextHandlerId++;
+  drawHandlers.set(id, handler);
+  scheduleFrame();
+  return id;
+}
+
+/** Stops calling the draw handler registered under `id`. */
+export function removeDrawHandler(id: DrawTickerId): void {
+  drawHandlers.delete(id);
+}
+
+function requireHandler(): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+}
+
+// --- The legacy flat API, every call drawing to the screen. Each forwards
+// to a `screen` method after the draw-handler gate.
+
+/** The screen's logical width, in pixels. */
+export function getWidth(): number {
+  return screen.width;
+}
+
+/** The screen's logical height, in pixels. */
+export function getHeight(): number {
+  return screen.height;
+}
+
+/** The screen's logical size, in pixels. */
+export function getSize2d(): Size2d {
+  return screen.size;
+}
+
+/** Clears the whole screen to `color`. */
+export function clearScreen(color: Color): void {
+  requireHandler();
+  screen.clear(color);
+}
+
+export function fillRectangle(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  color: Color,
+): void {
+  requireHandler();
+  screen.fillRectangle(x, y, w, h, color);
+}
+
+export function strokeRectangle(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  color: Color,
+  thickness: number = 1,
+): void {
+  requireHandler();
+  screen.strokeRectangle(x, y, w, h, color, thickness);
+}
+
+export function fillRoundedRectangle(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  radius: number,
+  color: Color,
+): void {
+  requireHandler();
+  screen.fillRoundedRectangle(x, y, w, h, radius, color);
+}
+
+export function strokeRoundedRectangle(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  radius: number,
+  color: Color,
+  thickness: number = 1,
+): void {
+  requireHandler();
+  screen.strokeRoundedRectangle(x, y, w, h, radius, color, thickness);
+}
+
+export function drawLine(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  color: Color,
+  thickness: number = 1,
+): void {
+  requireHandler();
+  screen.drawLine(x1, y1, x2, y2, color, thickness);
+}
+
+export function drawPolyline(
+  points: readonly Vector2d[],
+  color: Color,
+  thickness: number = 1,
+): void {
+  requireHandler();
+  screen.drawPolyline(points, color, thickness);
+}
+
+export function fillCircle(
+  cx: number,
+  cy: number,
+  r: number,
+  color: Color,
+): void {
+  requireHandler();
+  screen.fillCircle(cx, cy, r, color);
+}
+
+export function strokeCircle(
+  cx: number,
+  cy: number,
+  r: number,
+  color: Color,
+  thickness: number = 1,
+): void {
+  requireHandler();
+  screen.strokeCircle(cx, cy, r, color, thickness);
+}
+
+export function fillEllipse(
+  cx: number,
+  cy: number,
+  rx: number,
+  ry: number,
+  color: Color,
+): void {
+  requireHandler();
+  screen.fillEllipse(cx, cy, rx, ry, color);
+}
+
+export function strokeEllipse(
+  cx: number,
+  cy: number,
+  rx: number,
+  ry: number,
+  color: Color,
+  thickness: number = 1,
+): void {
+  requireHandler();
+  screen.strokeEllipse(cx, cy, rx, ry, color, thickness);
+}
+
+export function drawArc(
+  cx: number,
+  cy: number,
+  r: number,
+  startRad: number,
+  endRad: number,
+  color: Color,
+  thickness: number = 1,
+): void {
+  requireHandler();
+  screen.drawArc(cx, cy, r, startRad, endRad, color, thickness);
+}
+
+export function fillTriangle(
+  a: Vector2d,
+  b: Vector2d,
+  c: Vector2d,
+  color: Color,
+): void {
+  requireHandler();
+  screen.fillTriangle(a, b, c, color);
+}
+
+export function fillPolygon(
+  points: readonly Vector2d[],
+  color: Color,
+  rule: FillRule = "nonzero",
+): void {
+  requireHandler();
+  screen.fillPolygon(points, color, rule);
+}
+
+export function strokePolygon(
+  points: readonly Vector2d[],
+  color: Color,
+  thickness: number = 1,
+): void {
+  requireHandler();
+  screen.strokePolygon(points, color, thickness);
+}
+
+export function setPixel(x: number, y: number, color: Color): void {
+  requireHandler();
+  screen.setPixel(x, y, color);
+}
+
+export function drawPixels(points: readonly Vector2d[], color: Color): void {
+  requireHandler();
+  screen.drawPixels(points, color);
+}
+
+export function beginPath(): void {
+  requireHandler();
+  screen.beginPath();
+}
+
+export function moveTo(x: number, y: number): void {
+  requireHandler();
+  screen.moveTo(x, y);
+}
+
+export function lineTo(x: number, y: number): void {
+  requireHandler();
+  screen.lineTo(x, y);
+}
+
+export function quadraticTo(
+  cx: number,
+  cy: number,
+  x: number,
+  y: number,
+): void {
+  requireHandler();
+  screen.quadraticTo(cx, cy, x, y);
+}
+
+export function cubicTo(
+  c1x: number,
+  c1y: number,
+  c2x: number,
+  c2y: number,
+  x: number,
+  y: number,
+): void {
+  requireHandler();
+  screen.cubicTo(c1x, c1y, c2x, c2y, x, y);
+}
+
+export function closePath(): void {
+  requireHandler();
+  screen.closePath();
+}
+
+export function fillPath(color: Color, rule: FillRule = "nonzero"): void {
+  requireHandler();
+  screen.fillPath(color, rule);
+}
+
+export function strokePath(
+  color: Color,
+  thickness: number = 1,
+  cap: LineCap = "butt",
+  join: LineJoin = "miter",
+): void {
+  requireHandler();
+  screen.strokePath(color, thickness, cap, join);
+}
+
+export function pushTransform(transform: Transform): void {
+  requireHandler();
+  transformDepth++;
+  screen.pushTransform(transform);
+}
+
+export function popTransform(): void {
+  requireHandler();
+  if (transformDepth === 0) throw new UnbalancedStackError("a transform");
+  transformDepth--;
+  screen.popTransform();
+}
+
+export function pushClip(x: number, y: number, w: number, h: number): void {
+  requireHandler();
+  clipDepth++;
+  screen.pushClip(x, y, w, h);
+}
+
+export function pushClipPath(rule: FillRule = "nonzero"): void {
+  requireHandler();
+  clipDepth++;
+  screen.pushClipPath(rule);
+}
+
+export function popClip(): void {
+  requireHandler();
+  if (clipDepth === 0) throw new UnbalancedStackError("a clip");
+  clipDepth--;
+  screen.popClip();
+}
+
+export function drawText(
+  x: number,
+  y: number,
+  text: string,
+  color: Color,
+  fontOrOptions: Font | TextOptions = Font.Cozette,
+): void {
+  requireHandler();
+  screen.drawText(x, y, text, color, fontOrOptions);
+}
+
+/** The pixel box `text` would occupy if drawn with the same options. A
+ * query, not a draw call: can be used from anywhere. */
+export function measureText(
+  text: string,
+  fontOrOptions: Font | TextOptions = Font.Cozette,
+): Size2d {
+  return screen.measureText(text, fontOrOptions);
+}
+
 export function drawImage(
   image: Image | ImageId,
   x: number,
   y: number,
   options?: DrawImageOptions,
 ): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  const id = imageId(image);
-  if (options === undefined) {
-    __framebuffer_draw_image(id, x, y);
-    return;
-  }
-  const source = sourceRect(id, options);
-  __framebuffer_draw_image_transformed(
-    id,
-    source,
-    placement(x, y, source[2], source[3], 0, options),
-  );
+  requireHandler();
+  screen.drawImage(image, x, y, options);
 }
 
-/** Draws `image` at `(x, y)`, turned `radians` about the point `originX`,
- * `originY` within it — clockwise on screen, since `y` grows downward. The
- * origin defaults to the image's top-left corner, so turning about its
- * middle means naming its middle. */
 export function drawImageRotated(
   image: Image | ImageId,
   x: number,
@@ -1236,12 +1561,18 @@ export function drawImageRotated(
   radians: number,
   options: DrawImageRotatedOptions = {},
 ): void {
-  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
-  const id = imageId(image);
-  const source = sourceRect(id, options);
-  __framebuffer_draw_image_transformed(
-    id,
-    source,
-    placement(x, y, source[2], source[3], radians, options),
-  );
+  requireHandler();
+  screen.drawImageRotated(image, x, y, radians, options);
+}
+
+/** The palette entry closest to the RGB triplet `(r, g, b)` (each `0-255`). */
+export function nearestColor(r: number, g: number, b: number): Color {
+  return __surface_nearest_color(r, g, b);
+}
+
+/** Sets how many physical pixels the window draws each logical pixel as —
+ * an integer of at least 1. Takes effect on the next frame; can be called
+ * from anywhere. One window shared by every process, last writer wins. */
+export function setScale(scale: number): void {
+  __surface_set_scale(scale);
 }

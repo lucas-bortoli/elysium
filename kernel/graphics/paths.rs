@@ -19,7 +19,7 @@ use std::rc::Rc;
 use crate::bindings::bind;
 use rquickjs::{Ctx, Result};
 
-use super::{ScreenSurface, resolve_color};
+use super::{SurfaceId, SurfaceTable, draw_on, resolve_color};
 
 /// The path a program is currently describing. Shared between every path
 /// binding below, and cleared by `beginPath`.
@@ -181,29 +181,31 @@ fn resolve_line_join(ctx: &Ctx<'_>, join: &str) -> Result<tiny_skia::LineJoin> {
 /// together and draw onto the same screen surface.
 pub fn bootstrap_path_bindings(
     ctx: &Ctx<'_>,
-    screen: ScreenSurface,
+    surfaces: Rc<SurfaceTable>,
     path: PathScratch,
 ) -> Result<()> {
-    // Each of these appends to the path under construction and is a plain
-    // mutation with nothing to reject, so none of them take a `Ctx` to throw
-    // with. Coordinates that aren't finite are dropped by `finish` below.
+    // The path under construction is one per VM, not one per surface: a
+    // program describes a single path at a time, then fills, strokes or
+    // clips one surface with it. Only those three carry a surface handle;
+    // the segment-appending calls below just mutate the shared builder, and
+    // have nothing to reject, so none of them take a `Ctx` to throw with.
     {
         let path = Rc::clone(&path);
-        bind(ctx, "__framebuffer_path_begin", move || {
+        bind(ctx, "__surface_path_begin", move || {
             path.borrow_mut().clear()
         })?;
     }
 
     {
         let path = Rc::clone(&path);
-        bind(ctx, "__framebuffer_path_move_to", move |x: f32, y: f32| {
+        bind(ctx, "__surface_path_move_to", move |x: f32, y: f32| {
             path.borrow_mut().move_to(x, y)
         })?;
     }
 
     {
         let path = Rc::clone(&path);
-        bind(ctx, "__framebuffer_path_line_to", move |x: f32, y: f32| {
+        bind(ctx, "__surface_path_line_to", move |x: f32, y: f32| {
             path.borrow_mut().line_to(x, y)
         })?;
     }
@@ -212,7 +214,7 @@ pub fn bootstrap_path_bindings(
         let path = Rc::clone(&path);
         bind(
             ctx,
-            "__framebuffer_path_quad_to",
+            "__surface_path_quad_to",
             move |cx: f32, cy: f32, x: f32, y: f32| path.borrow_mut().quad_to(cx, cy, x, y),
         )?;
     }
@@ -221,7 +223,7 @@ pub fn bootstrap_path_bindings(
         let path = Rc::clone(&path);
         bind(
             ctx,
-            "__framebuffer_path_cubic_to",
+            "__surface_path_cubic_to",
             move |c1x: f32, c1y: f32, c2x: f32, c2y: f32, x: f32, y: f32| {
                 path.borrow_mut().cubic_to(c1x, c1y, c2x, c2y, x, y)
             },
@@ -230,7 +232,7 @@ pub fn bootstrap_path_bindings(
 
     {
         let path = Rc::clone(&path);
-        bind(ctx, "__framebuffer_path_close", move || {
+        bind(ctx, "__surface_path_close", move || {
             path.borrow_mut().close()
         })?;
     }
@@ -239,7 +241,7 @@ pub fn bootstrap_path_bindings(
         let path = Rc::clone(&path);
         bind(
             ctx,
-            "__framebuffer_path_rect",
+            "__surface_path_rect",
             move |x: f32, y: f32, w: f32, h: f32| {
                 if let Some(rect) = tiny_skia::Rect::from_xywh(x, y, w, h) {
                     path.borrow_mut().push_rect(rect);
@@ -252,7 +254,7 @@ pub fn bootstrap_path_bindings(
         let path = Rc::clone(&path);
         bind(
             ctx,
-            "__framebuffer_path_oval",
+            "__surface_path_oval",
             move |cx: f32, cy: f32, rx: f32, ry: f32| {
                 if let Some(oval) = tiny_skia::Rect::from_ltrb(cx - rx, cy - ry, cx + rx, cy + ry) {
                     path.borrow_mut().push_oval(oval);
@@ -265,7 +267,7 @@ pub fn bootstrap_path_bindings(
         let path = Rc::clone(&path);
         bind(
             ctx,
-            "__framebuffer_path_rounded_rect",
+            "__surface_path_rounded_rect",
             move |x: f32, y: f32, w: f32, h: f32, radius: f32| {
                 append_rounded_rect(&mut path.borrow_mut(), x, y, w, h, radius)
             },
@@ -276,7 +278,7 @@ pub fn bootstrap_path_bindings(
         let path = Rc::clone(&path);
         bind(
             ctx,
-            "__framebuffer_path_arc",
+            "__surface_path_arc",
             move |cx: f32, cy: f32, r: f32, start: f32, end: f32| {
                 append_arc(&mut path.borrow_mut(), cx, cy, r, start, end)
             },
@@ -285,11 +287,11 @@ pub fn bootstrap_path_bindings(
 
     {
         let path = Rc::clone(&path);
-        let screen = Rc::clone(&screen);
+        let surfaces = Rc::clone(&surfaces);
         bind(
             ctx,
-            "__framebuffer_fill_path",
-            move |ctx: Ctx<'_>, color: u16, rule: String| -> Result<()> {
+            "__surface_fill_path",
+            move |ctx: Ctx<'_>, id: SurfaceId, color: u16, rule: String| -> Result<()> {
                 let color = resolve_color(&ctx, color)?;
                 let rule = resolve_fill_rule(&ctx, &rule)?;
                 // Clone rather than take: a program that fills a path
@@ -297,19 +299,19 @@ pub fn bootstrap_path_bindings(
                 let Some(path) = path.borrow().clone().finish() else {
                     return Ok(()); // fewer than two points, or not finite
                 };
-                screen.borrow_mut().fill_path(&path, rule, color);
-                Ok(())
+                draw_on(&surfaces, &ctx, id, |s| s.fill_path(&path, rule, color))
             },
         )?;
     }
 
     {
         let path = Rc::clone(&path);
-        let screen = Rc::clone(&screen);
+        let surfaces = Rc::clone(&surfaces);
         bind(
             ctx,
-            "__framebuffer_stroke_path",
+            "__surface_stroke_path",
             move |ctx: Ctx<'_>,
+                  id: SurfaceId,
                   color: u16,
                   thickness: f32,
                   cap: String,
@@ -331,42 +333,48 @@ pub fn bootstrap_path_bindings(
                 let Some(path) = path.borrow().clone().finish() else {
                     return Ok(());
                 };
-                screen.borrow_mut().stroke_path(&path, &stroke, color);
-                Ok(())
+                draw_on(&surfaces, &ctx, id, |s| {
+                    s.stroke_path(&path, &stroke, color)
+                })
             },
         )?;
     }
 
     {
-        let screen = Rc::clone(&screen);
+        let surfaces = Rc::clone(&surfaces);
         bind(
             ctx,
-            "__framebuffer_push_clip_rect",
-            move |x: f32, y: f32, w: f32, h: f32| screen.borrow_mut().push_clip_rect(x, y, w, h),
+            "__surface_push_clip_rect",
+            move |ctx: Ctx<'_>, id: SurfaceId, x: f32, y: f32, w: f32, h: f32| -> Result<()> {
+                draw_on(&surfaces, &ctx, id, |s| s.push_clip_rect(x, y, w, h))
+            },
         )?;
     }
 
     {
         let path = Rc::clone(&path);
-        let screen = Rc::clone(&screen);
+        let surfaces = Rc::clone(&surfaces);
         bind(
             ctx,
-            "__framebuffer_push_clip",
-            move |ctx: Ctx<'_>, rule: String| -> Result<()> {
+            "__surface_push_clip",
+            move |ctx: Ctx<'_>, id: SurfaceId, rule: String| -> Result<()> {
                 let rule = resolve_fill_rule(&ctx, &rule)?;
                 // An unfinishable path confines drawing to nothing at
                 // all, which is what an empty clip region means; still
                 // push, so the matching pop stays balanced.
                 let path = path.borrow().clone().finish();
-                screen.borrow_mut().push_clip(path.as_ref(), rule);
-                Ok(())
+                draw_on(&surfaces, &ctx, id, |s| s.push_clip(path.as_ref(), rule))
             },
         )?;
     }
 
-    bind(ctx, "__framebuffer_pop_clip", move || {
-        screen.borrow_mut().pop_clip()
-    })?;
+    bind(
+        ctx,
+        "__surface_pop_clip",
+        move |ctx: Ctx<'_>, id: SurfaceId| -> Result<()> {
+            draw_on(&surfaces, &ctx, id, |s| s.pop_clip())
+        },
+    )?;
 
     Ok(())
 }
