@@ -43,9 +43,14 @@ const EMBEDDED_RUNTIME_MODULES: &[(&str, &str)] = &[
 const EMBEDDED_MODULE_SCHEME: &str = "ely:";
 
 /// Extensions a relative import may be written with or without — tried in
-/// order when `name` has no extension of its own, mirroring
-/// `CompilingLoader`/[`crate::transform::compile`]'s TS(X) support.
-const RELATIVE_MODULE_EXTENSIONS: &[&str] = &["ts", "tsx"];
+/// order when `name` has no extension of its own. `ts`/`tsx` are the source
+/// programs are written in; `js` is here so a vendored third-party library
+/// (see `userland/lib/`) can be dropped in as a pre-built bundle without
+/// being renamed. A `.js` file skips the JSX and type-stripping passes —
+/// it's already plain JavaScript — and is only checked for top-level
+/// `await` (see [`crate::transform::check_prebuilt_js`]). `ts` is tried
+/// first so a program's own module always wins over a same-named bundle.
+const RELATIVE_MODULE_EXTENSIONS: &[&str] = &["ts", "tsx", "js"];
 
 fn embedded_module_source(name: &str) -> Option<&'static str> {
     EMBEDDED_RUNTIME_MODULES
@@ -117,7 +122,7 @@ impl Resolver for EmbeddedOrFileResolver {
             Error::new_resolving_message(
                 base,
                 name,
-                "does not resolve to a TS(X) file inside the userland directory",
+                "does not resolve to a .ts, .tsx, or .js file inside the userland directory",
             )
         })
     }
@@ -186,8 +191,12 @@ impl Loader for CompilingLoader {
 
         let source = std::fs::read_to_string(path)
             .map_err(|err| Error::new_loading_message(path, err.to_string()))?;
-        let compiled =
-            transform::compile(&source).map_err(|err| Error::new_loading_message(path, err))?;
+        let compile = if path.ends_with(".js") {
+            transform::check_prebuilt_js
+        } else {
+            transform::compile
+        };
+        let compiled = compile(&source).map_err(|err| Error::new_loading_message(path, err))?;
         let module = Module::declare(ctx.clone(), path, compiled)?;
         set_virtual_import_meta(&module, path, &self.userland_root)?;
         Ok(module)
