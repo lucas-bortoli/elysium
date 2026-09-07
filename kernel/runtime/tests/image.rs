@@ -1,5 +1,5 @@
-//! The `ely:image` surface: `loadImage`/`drawImage` and the errors loading can
-//! raise.
+//! `ely:image` as `ely:graphics` sees it: `loadImage` then drawing the
+//! result onto a surface, and the errors loading can raise.
 
 use super::*;
 
@@ -7,25 +7,21 @@ use super::*;
 fn load_image_and_draw_image_round_trip_without_throwing() {
     let runtime = eval(
         "import { loadImage } from 'ely:image'; \
-         import { addDrawHandler, drawImage } from 'ely:graphics'; \
-         globalThis.drawn = false; \
+         import { screen } from 'ely:graphics'; \
          const image = loadImage('/test.png'); \
-         addDrawHandler(() => { drawImage(image, 10, 10); globalThis.drawn = true; });",
+         screen.drawImage(image, 10, 10); \
+         globalThis.drawn = true;",
     );
-    runtime.run_due_timers().unwrap();
     assert!(global::<bool>(&runtime, "drawn"));
 }
 
 #[test]
 fn draw_image_with_an_unknown_id_throws() {
     let runtime = eval(
-        "import { addDrawHandler, drawImage } from 'ely:graphics'; \
+        "import { screen } from 'ely:graphics'; \
          globalThis.threw = false; \
-         addDrawHandler(() => { \
-             try { drawImage(999999, 0, 0); } catch { globalThis.threw = true; } \
-         });",
+         try { screen.drawImage(999999, 0, 0); } catch { globalThis.threw = true; }",
     );
-    runtime.run_due_timers().unwrap();
     assert!(global::<bool>(&runtime, "threw"));
 }
 
@@ -68,38 +64,32 @@ fn load_image_with_a_relative_path_throws_relative_path_error() {
 fn drawing_part_of_an_image_resized_flipped_or_turned_succeeds() {
     let runtime = eval(
         "import { loadImage } from 'ely:image'; \
-         import { addDrawHandler, drawImage, drawImageRotated } from 'ely:graphics'; \
+         import { screen } from 'ely:graphics'; \
          globalThis.error = ''; \
          const image = loadImage('/test.png'); \
-         addDrawHandler(() => { \
-             try { \
-                 drawImage(image, 0, 0, { sx: 1, sy: 1, sw: 2, sh: 2 }); \
-                 drawImage(image, 0, 0, { scale: 3 }); \
-                 drawImage(image, 0, 0, { scale: { x: 2, y: 4 } }); \
-                 drawImage(image, 0, 0, { flipX: true, flipY: true }); \
-                 drawImage(image.id, 0, 0, { sx: 1, scale: 2, flipX: true }); \
-                 drawImageRotated(image, 20, 20, 0.7); \
-                 drawImageRotated(image, 20, 20, 0.7, \
-                                  { originX: 4, originY: 4, scale: 2 }); \
-                 globalThis.error = 'none'; \
-             } catch (err) { globalThis.error = String(err); } \
-         });",
+         try { \
+             screen.drawImage(image, 0, 0, { sx: 1, sy: 1, sw: 2, sh: 2 }); \
+             screen.drawImage(image, 0, 0, { scale: 3 }); \
+             screen.drawImage(image, 0, 0, { scale: { x: 2, y: 4 } }); \
+             screen.drawImage(image, 0, 0, { flipX: true, flipY: true }); \
+             screen.drawImage(image.id, 0, 0, { sx: 1, scale: 2, flipX: true }); \
+             screen.drawImageRotated(image, 20, 20, 0.7); \
+             screen.drawImageRotated(image, 20, 20, 0.7, \
+                              { originX: 4, originY: 4, scale: 2 }); \
+             globalThis.error = 'none'; \
+         } catch (err) { globalThis.error = String(err); }",
     );
-    runtime.run_due_timers().unwrap();
     assert_eq!(global::<String>(&runtime, "error"), "none");
 }
 
 #[test]
 fn drawing_a_transformed_image_with_an_unknown_id_throws() {
     let runtime = eval(
-        "import { addDrawHandler, drawImageRotated } from 'ely:graphics'; \
+        "import { screen } from 'ely:graphics'; \
          globalThis.threw = false; \
-         addDrawHandler(() => { \
-             try { drawImageRotated(999999, 0, 0, 1); } \
-             catch (err) { globalThis.threw = err instanceof TypeError; } \
-         });",
+         try { screen.drawImageRotated(999999, 0, 0, 1); } \
+         catch (err) { globalThis.threw = err instanceof TypeError; }",
     );
-    runtime.run_due_timers().unwrap();
     assert!(global::<bool>(&runtime, "threw"));
 }
 
@@ -107,17 +97,14 @@ fn drawing_a_transformed_image_with_an_unknown_id_throws() {
 fn asking_for_no_part_of_an_image_draws_nothing() {
     let runtime = eval(
         "import { loadImage } from 'ely:image'; \
-         import { addDrawHandler, drawImage } from 'ely:graphics'; \
+         import { screen } from 'ely:graphics'; \
          globalThis.error = ''; \
          const image = loadImage('/test.png'); \
-         addDrawHandler(() => { \
-             try { \
-                 drawImage(image, 0, 0, { sw: 0, sh: 0 }); \
-                 drawImage(image, 0, 0, { sw: -5 }); \
-                 globalThis.error = 'none'; \
-             } catch (err) { globalThis.error = String(err); } \
-         });",
+         try { \
+             screen.drawImage(image, 0, 0, { sw: 0, sh: 0 }); \
+             screen.drawImage(image, 0, 0, { sw: -5 }); \
+             globalThis.error = 'none'; \
+         } catch (err) { globalThis.error = String(err); }",
     );
-    runtime.run_due_timers().unwrap();
     assert_eq!(global::<String>(&runtime, "error"), "none");
 }
