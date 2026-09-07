@@ -9,6 +9,15 @@ by an editor or a separate type-checking pass; what runs inside Elysium is
 never type-checked at runtime, only stripped of the syntax that only a type
 checker would have cared about.
 
+A relative import resolves to a real file inside the userland tree, named
+with a `.ts`, `.tsx`, or `.js` extension (or no extension, in which case
+those are tried in that order). The `.js` case is for vendoring a
+third-party library that already ships as a pre-built bundle: it is already
+plain JavaScript, so it skips the JSX rewrite and type stripping entirely.
+The one check that still runs over it is the rejection of top-level
+`await`, which guards how the VM evaluates a module rather than the
+language it was written in.
+
 The pipeline from an `import` specifier to a module the VM can run looks
 like this — resolution finds the source text, wherever it lives, and then
 both transformations run in sequence over it:
@@ -16,13 +25,14 @@ both transformations run in sequence over it:
 ```mermaid
 flowchart TD
     spec["import specifier"] --> resolve{"resolve"}
-    resolve -->|"relative/on-disk path"| disk["read .ts / .tsx file"]
+    resolve -->|"relative path to a .ts / .tsx file"| disk["source text (TS, maybe JSX)"]
+    resolve -->|"relative path to a\npre-built .js bundle"| prebuilt["source text (plain JS)"]
     resolve -->|"bare name matching a\nbuilt-in runtime module"| embedded["built-in module source\n(compiled into the VM itself)"]
-    disk --> source["source text (TS, maybe JSX)"]
-    embedded --> source
-    source --> jsx["JSX rewrite\n(<Tag/> -> h(...) calls)"]
+    disk --> jsx["JSX rewrite\n(<Tag/> -> h(...) calls)"]
+    embedded --> jsx
     jsx --> strip["type stripping\n(TS syntax erased)"]
     strip --> ready["plain JavaScript,\nhanded to the VM as a module"]
+    prebuilt --> ready
 ```
 
 Type stripping's whole job is erasure, not transformation: every piece of
