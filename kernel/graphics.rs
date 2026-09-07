@@ -23,6 +23,7 @@ mod colors;
 mod display;
 mod palette;
 mod paths;
+mod shapes;
 mod state;
 mod surface;
 mod table;
@@ -32,8 +33,11 @@ pub use display::{DEFAULT_SCALE, Display};
 pub use surface::Surface;
 pub use table::{SCREEN_ID, SurfaceId, SurfaceTable};
 
+use rquickjs::Object;
+
 use crate::bindings::bind;
 use crate::process::ProcessId;
+use crate::text::{TextAlign, TextLayout};
 use table::SurfaceError;
 
 /// The screen surface's logical resolution at boot. Not a hard limit — the
@@ -235,35 +239,18 @@ pub fn bootstrap_graphics_bindings(
         bind(
             ctx,
             "__surface_draw_text",
-            // `font_scale` is `[font id, whole-number scale]` — bundled so
-            // this stays inside rquickjs's closure-arity ceiling.
             move |ctx: Ctx<'_>,
                   id: u32,
                   x: f32,
                   y: f32,
                   text: String,
-                  font_scale: Vec<u32>,
-                  color: u16|
+                  color: u16,
+                  options: Object<'_>|
                   -> Result<()> {
                 let color = resolve_color(&ctx, color)?;
-                let [font, scale] = <[u32; 2]>::try_from(font_scale.as_slice()).map_err(|_| {
-                    rquickjs::Exception::throw_type(&ctx, "text needs a font id and a scale")
-                })?;
-                let font = font as u16;
-                if crate::text::font_from_id(font).is_none() {
-                    return Err(rquickjs::Exception::throw_type(
-                        &ctx,
-                        &format!("{font} is not a valid font"),
-                    ));
-                }
-                if scale == 0 {
-                    return Err(rquickjs::Exception::throw_range(
-                        &ctx,
-                        "text scale must be at least 1",
-                    ));
-                }
+                let layout = read_text_layout(&ctx, &options)?;
                 draw_on(&surfaces, &ctx, id, |s| {
-                    s.draw_text(x, y, &text, font, scale, color)
+                    s.draw_text(x, y, &text, &layout, color)
                 })
             },
         )?;
@@ -272,12 +259,12 @@ pub fn bootstrap_graphics_bindings(
     bind(
         ctx,
         "__surface_measure_text",
-        move |ctx: Ctx<'_>, text: String, font: u16| -> Result<Vec<u32>> {
-            let font = crate::text::font_from_id(font).ok_or_else(|| {
-                rquickjs::Exception::throw_type(&ctx, &format!("{font} is not a valid font"))
-            })?;
-            let (width, height) = crate::text::measure(font, &text);
-            Ok(vec![width, height])
+        move |ctx: Ctx<'_>, text: String, options: Object<'_>| -> Result<Vec<u32>> {
+            let layout = read_text_layout(&ctx, &options)?;
+            let font = crate::text::font_from_id(layout.font)
+                .expect("read_text_layout already checked the font id");
+            let (_, width, height) = crate::text::lay_out(font, &layout, &text);
+            Ok(vec![width.ceil() as u32, height.ceil() as u32])
         },
     )?;
 
@@ -285,18 +272,23 @@ pub fn bootstrap_graphics_bindings(
 
     {
         let surfaces = Rc::clone(&surfaces);
-        // `matrix` is the six numbers of a 2x3, composed on the JS side from
-        // whatever mix of shift, scale and rotation a program asked for —
-        // passed as one array to stay inside the closure-arity ceiling.
+        // A program's `{ translate, scale, rotate }` reaches here as those
+        // three parts; the 2x3 for shift * turn * scale is composed below,
+        // not on the JS side.
         bind(
             ctx,
             "__surface_push_transform",
-            move |ctx: Ctx<'_>, id: u32, matrix: Vec<f32>| -> Result<()> {
-                let [sx, ky, kx, sy, tx, ty] =
-                    <[f32; 6]>::try_from(matrix.as_slice()).map_err(|_| {
-                        rquickjs::Exception::throw_type(&ctx, "a transform needs six numbers")
-                    })?;
-                let transform = tiny_skia::Transform::from_row(sx, ky, kx, sy, tx, ty);
+            move |ctx: Ctx<'_>,
+                  id: u32,
+                  translate: Vec<f32>,
+                  scale: Vec<f32>,
+                  rotate: f32|
+                  -> Result<()> {
+                let [tx, ty] = pair(&ctx, &translate, "a translation needs two numbers")?;
+                let [sx, sy] = pair(&ctx, &scale, "a scale needs two numbers")?;
+                let transform = tiny_skia::Transform::from_translate(tx, ty)
+                    .pre_concat(tiny_skia::Transform::from_rotate(rotate.to_degrees()))
+                    .pre_concat(tiny_skia::Transform::from_scale(sx, sy));
                 draw_on(&surfaces, &ctx, id, |s| s.push_transform(transform))
             },
         )?;
@@ -309,6 +301,121 @@ pub fn bootstrap_graphics_bindings(
             "__surface_pop_transform",
             move |ctx: Ctx<'_>, id: u32| -> Result<()> {
                 draw_on(&surfaces, &ctx, id, |s| s.pop_transform())
+            },
+        )?;
+    }
+
+    // --- The shape vocabulary, lowered onto path fill/stroke in the
+    // kernel. Geometry with more than three scalars arrives as one array,
+    // to stay inside rquickjs's closure-arity ceiling. ---
+
+    bind_shape(
+        ctx,
+        &surfaces,
+        "__surface_stroke_rectangle",
+        4,
+        |s, r, color, t| s.stroke_rectangle(r[0], r[1], r[2], r[3], color, t),
+    )?;
+    bind_shape(
+        ctx,
+        &surfaces,
+        "__surface_stroke_rounded_rectangle",
+        5,
+        |s, r, color, t| s.stroke_rounded_rectangle(r[0], r[1], r[2], r[3], r[4], color, t),
+    )?;
+    bind_shape(
+        ctx,
+        &surfaces,
+        "__surface_draw_line",
+        4,
+        |s, r, color, t| s.draw_line(r[0], r[1], r[2], r[3], color, t),
+    )?;
+    bind_shape(
+        ctx,
+        &surfaces,
+        "__surface_stroke_ellipse",
+        4,
+        |s, r, color, t| s.stroke_ellipse(r[0], r[1], r[2], r[3], color, t),
+    )?;
+    bind_shape(ctx, &surfaces, "__surface_draw_arc", 5, |s, r, color, t| {
+        s.draw_arc(r[0], r[1], r[2], r[3], r[4], color, t)
+    })?;
+    bind_shape(
+        ctx,
+        &surfaces,
+        "__surface_draw_polyline",
+        4,
+        |s, pts, color, t| s.draw_polyline(pts, color, t),
+    )?;
+    bind_shape(
+        ctx,
+        &surfaces,
+        "__surface_stroke_polygon",
+        6,
+        |s, pts, color, t| s.stroke_polygon(pts, color, t),
+    )?;
+
+    {
+        let surfaces = Rc::clone(&surfaces);
+        bind(
+            ctx,
+            "__surface_fill_rounded_rectangle",
+            move |ctx: Ctx<'_>, id: u32, rect: Vec<f32>, radius: f32, color: u16| -> Result<()> {
+                let color = resolve_color(&ctx, color)?;
+                let [x, y, w, h] = quad(&ctx, &rect)?;
+                draw_on(&surfaces, &ctx, id, |s| {
+                    s.fill_rounded_rectangle(x, y, w, h, radius, color)
+                })
+            },
+        )?;
+    }
+
+    {
+        let surfaces = Rc::clone(&surfaces);
+        bind(
+            ctx,
+            "__surface_fill_ellipse",
+            move |ctx: Ctx<'_>,
+                  id: u32,
+                  cx: f32,
+                  cy: f32,
+                  rx: f32,
+                  ry: f32,
+                  color: u16|
+                  -> Result<()> {
+                let color = resolve_color(&ctx, color)?;
+                draw_on(&surfaces, &ctx, id, |s| {
+                    s.fill_ellipse(cx, cy, rx, ry, color)
+                })
+            },
+        )?;
+    }
+
+    {
+        let surfaces = Rc::clone(&surfaces);
+        bind(
+            ctx,
+            "__surface_fill_polygon",
+            move |ctx: Ctx<'_>,
+                  id: u32,
+                  points: Vec<f32>,
+                  color: u16,
+                  rule: String|
+                  -> Result<()> {
+                let color = resolve_color(&ctx, color)?;
+                let rule = match rule.as_str() {
+                    "evenodd" => tiny_skia::FillRule::EvenOdd,
+                    "nonzero" => tiny_skia::FillRule::Winding,
+                    other => {
+                        return Err(rquickjs::Exception::throw_type(
+                            &ctx,
+                            &format!("{other:?} is not a valid fill rule"),
+                        ));
+                    }
+                };
+                draw_on(&surfaces, &ctx, id, |s| {
+                    s.fill_polygon(&points, color, rule)
+                })
             },
         )?;
     }
@@ -410,6 +517,77 @@ pub fn bootstrap_graphics_bindings(
     )?;
 
     Ok(())
+}
+
+/// Binds a shape whose geometry arrives as one `[f32]` array (`geom`),
+/// followed by a colour and a stroke thickness. `min` is how many numbers
+/// the shape needs; a short array is dropped rather than panicking, since
+/// these globals are reachable from a program directly.
+fn bind_shape<'js, F>(
+    ctx: &Ctx<'js>,
+    surfaces: &Rc<SurfaceTable>,
+    name: &str,
+    min: usize,
+    f: F,
+) -> Result<()>
+where
+    F: Fn(&mut Surface, &[f32], Color, f32) + 'js,
+{
+    let surfaces = Rc::clone(surfaces);
+    bind(
+        ctx,
+        name,
+        move |ctx: Ctx<'_>, id: u32, geom: Vec<f32>, color: u16, thickness: f32| -> Result<()> {
+            let color = resolve_color(&ctx, color)?;
+            draw_on(&surfaces, &ctx, id, |s| {
+                if geom.len() >= min {
+                    f(s, &geom, color, thickness);
+                }
+            })
+        },
+    )
+}
+
+/// Reads the two numbers of a `[x, y]` array, throwing `message` otherwise.
+fn pair(ctx: &Ctx<'_>, values: &[f32], message: &str) -> Result<[f32; 2]> {
+    <[f32; 2]>::try_from(values).map_err(|_| rquickjs::Exception::throw_type(ctx, message))
+}
+
+/// Reads the four numbers of a `[x, y, w, h]` array.
+fn quad(ctx: &Ctx<'_>, values: &[f32]) -> Result<[f32; 4]> {
+    <[f32; 4]>::try_from(values)
+        .map_err(|_| rquickjs::Exception::throw_type(ctx, "a rectangle needs four numbers"))
+}
+
+/// Builds a [`TextLayout`] from `ely:graphics`'s options object, filling in
+/// defaults and checking the font id and scale.
+fn read_text_layout(ctx: &Ctx<'_>, options: &Object<'_>) -> Result<TextLayout> {
+    let font = options.get::<_, Option<u16>>("font")?.unwrap_or(0);
+    if crate::text::font_from_id(font).is_none() {
+        return Err(rquickjs::Exception::throw_type(
+            ctx,
+            &format!("{font} is not a valid font"),
+        ));
+    }
+    let scale = options.get::<_, Option<u32>>("scale")?.unwrap_or(1);
+    if scale == 0 {
+        return Err(rquickjs::Exception::throw_range(
+            ctx,
+            "text scale must be at least 1",
+        ));
+    }
+    let align = match options.get::<_, Option<String>>("align")?.as_deref() {
+        Some("center") => TextAlign::Center,
+        Some("right") => TextAlign::Right,
+        _ => TextAlign::Left,
+    };
+    Ok(TextLayout {
+        font,
+        scale,
+        align,
+        max_width: options.get::<_, Option<f32>>("maxWidth")?,
+        line_spacing: options.get::<_, Option<f32>>("lineSpacing")?.unwrap_or(1.0),
+    })
 }
 
 /// Decodes the `[x, y, w, h]` source rect and 2x3 placement matrix a blit

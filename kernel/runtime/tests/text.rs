@@ -1,4 +1,4 @@
-//! `ely:framebuffer`'s text surface: measuring a string against a built-in
+//! `ely:graphics`'s text surface: measuring a string against a built-in
 //! font, and drawing one.
 
 use super::*;
@@ -6,7 +6,7 @@ use super::*;
 #[test]
 fn measure_text_reports_one_line_as_the_fonts_own_line_height() {
     let runtime = eval(
-        "import { measureText } from 'ely:framebuffer'; \
+        "import { measureText } from 'ely:graphics'; \
          const plain = measureText('Hi'); \
          globalThis.width = plain.width; \
          globalThis.height = plain.height; \
@@ -25,7 +25,7 @@ fn measure_text_reports_one_line_as_the_fonts_own_line_height() {
 #[test]
 fn measure_text_counts_every_line_a_string_wraps_or_breaks_into() {
     let runtime = eval(
-        "import { measureText } from 'ely:framebuffer'; \
+        "import { measureText } from 'ely:graphics'; \
          const one = measureText('a').height; \
          globalThis.one = one; \
          globalThis.broken = measureText('a\\nb\\nc').height; \
@@ -46,7 +46,7 @@ fn measure_text_counts_every_line_a_string_wraps_or_breaks_into() {
 #[test]
 fn drawing_text_with_options_inside_a_handler_succeeds() {
     let runtime = eval(
-        "import { addDrawHandler, drawText, Color, Font } from 'ely:framebuffer'; \
+        "import { addDrawHandler, drawText, Color, Font } from 'ely:graphics'; \
          globalThis.error = ''; \
          addDrawHandler(() => { \
              try { \
@@ -68,7 +68,7 @@ fn drawing_text_with_options_inside_a_handler_succeeds() {
 #[test]
 fn a_text_scale_that_is_not_a_whole_number_of_at_least_one_throws() {
     let runtime = eval(
-        "import { measureText } from 'ely:framebuffer'; \
+        "import { measureText } from 'ely:graphics'; \
          globalThis.threw = []; \
          for (const scale of [0, -1, 1.5]) { \
              try { measureText('hi', { scale }); globalThis.threw.push(false); } \

@@ -565,7 +565,7 @@ mod tests {
             (
                 "parent.ts",
                 "import { spawn, postMessage } from 'ely:process'; \
-                 import { createSurface } from 'ely:framebuffer'; \
+                 import { createSurface } from 'ely:graphics'; \
                  const handle = createSurface(48, 32); \
                  const child = spawn('/child.ts', undefined); \
                  postMessage(child, { kind: 'canvas', data: handle }); \
@@ -574,7 +574,7 @@ mod tests {
             (
                 "child.ts",
                 "import { addMessageHandler } from 'ely:process'; \
-                 import { useSurface, Color } from 'ely:framebuffer'; \
+                 import { useSurface, Color } from 'ely:graphics'; \
                  globalThis.drew = ''; \
                  addMessageHandler((env) => { \
                      try { \
