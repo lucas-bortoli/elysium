@@ -5,7 +5,7 @@
 // could get wrong.
 
 import type { Size2d, Vector2d } from "ely:math";
-import type { DrawTickerId } from "ely:framebuffer";
+import type { DrawTickerId } from "ely:graphics";
 import type { Image, ImageId } from "ely:image";
 
 // The surface lifecycle. `__surface_use` reports whether the handle names a
@@ -41,12 +41,12 @@ declare function __surface_draw_text(
   x: number,
   y: number,
   text: string,
-  fontScale: [number, number],
   color: Color,
+  options: NormalizedTextOptions,
 ): void;
 declare function __surface_measure_text(
   text: string,
-  font: number,
+  options: NormalizedTextOptions,
 ): [number, number];
 declare function __surface_draw_image(
   handle: number,
@@ -72,11 +72,80 @@ declare function __surface_draw_surface_transformed(
   region: [number, number, number, number],
   transform: [number, number, number, number, number, number],
 ): void;
+// `{ translate, scale, rotate }` reach the kernel as those three parts; the
+// 2x3 for shift * turn * scale is composed there.
 declare function __surface_push_transform(
   handle: number,
-  matrix: [number, number, number, number, number, number],
+  translate: [number, number],
+  scale: [number, number],
+  rotate: number,
 ): void;
 declare function __surface_pop_transform(handle: number): void;
+
+// The shape vocabulary. Geometry with more than three numbers is passed as
+// one array; the kernel lowers each shape onto a path fill or stroke.
+declare function __surface_stroke_rectangle(
+  handle: number,
+  rect: [number, number, number, number],
+  color: Color,
+  thickness: number,
+): void;
+declare function __surface_fill_rounded_rectangle(
+  handle: number,
+  rect: [number, number, number, number],
+  radius: number,
+  color: Color,
+): void;
+declare function __surface_stroke_rounded_rectangle(
+  handle: number,
+  rectRadius: [number, number, number, number, number],
+  color: Color,
+  thickness: number,
+): void;
+declare function __surface_draw_line(
+  handle: number,
+  ends: [number, number, number, number],
+  color: Color,
+  thickness: number,
+): void;
+declare function __surface_draw_polyline(
+  handle: number,
+  points: number[],
+  color: Color,
+  thickness: number,
+): void;
+declare function __surface_fill_ellipse(
+  handle: number,
+  cx: number,
+  cy: number,
+  rx: number,
+  ry: number,
+  color: Color,
+): void;
+declare function __surface_stroke_ellipse(
+  handle: number,
+  oval: [number, number, number, number],
+  color: Color,
+  thickness: number,
+): void;
+declare function __surface_draw_arc(
+  handle: number,
+  arc: [number, number, number, number, number],
+  color: Color,
+  thickness: number,
+): void;
+declare function __surface_fill_polygon(
+  handle: number,
+  points: number[],
+  color: Color,
+  rule: FillRule,
+): void;
+declare function __surface_stroke_polygon(
+  handle: number,
+  points: number[],
+  color: Color,
+  thickness: number,
+): void;
 
 // The path pen and clip stack. The pen is one per program, not one per
 // surface; only fill/stroke/clip carry a surface handle.
@@ -98,32 +167,6 @@ declare function __surface_path_cubic_to(
   y: number,
 ): void;
 declare function __surface_path_close(): void;
-declare function __surface_path_rect(
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-): void;
-declare function __surface_path_oval(
-  cx: number,
-  cy: number,
-  rx: number,
-  ry: number,
-): void;
-declare function __surface_path_rounded_rect(
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  radius: number,
-): void;
-declare function __surface_path_arc(
-  cx: number,
-  cy: number,
-  r: number,
-  start: number,
-  end: number,
-): void;
 declare function __surface_fill_path(
   handle: number,
   color: Color,
@@ -159,7 +202,7 @@ declare function __image_height(id: number): number;
 // draw with is one of these named entries — never a raw, unconstrained
 // RGBA value.
 //
-// <generated from kernel/framebuffer/palette.rs>
+// <generated from kernel/graphics/palette.rs>
 export const Color = {
   Red50: 0,
   Red100: 1,
@@ -508,11 +551,12 @@ export interface TextOptions {
   lineSpacing?: number;
 }
 
-interface ResolvedTextOptions {
+/** `TextOptions` with defaults filled in, the shape the kernel reads. */
+interface NormalizedTextOptions {
   font: Font;
   scale: number;
   align: TextAlign;
-  maxWidth: number | undefined;
+  maxWidth?: number;
   lineSpacing: number;
 }
 
@@ -585,10 +629,10 @@ function concat(outer: Matrix, inner: Matrix): Matrix {
 }
 
 /** Accepts either a bare font, which is all `drawText` used to take, or the
- * full options object. */
-function resolveTextOptions(
+ * full options object, and fills in the defaults the kernel expects. */
+function normalizeTextOptions(
   fontOrOptions: Font | TextOptions | undefined,
-): ResolvedTextOptions {
+): NormalizedTextOptions {
   const options =
     typeof fontOrOptions === "number"
       ? { font: fontOrOptions }
@@ -606,61 +650,13 @@ function resolveTextOptions(
   };
 }
 
-function lineWidth(line: string, options: ResolvedTextOptions): number {
-  return __surface_measure_text(line, options.font)[0] * options.scale;
-}
-
-/** Greedily packs as many words as fit within `maxWidth` onto each line. A
- * word wider than `maxWidth` on its own still gets its own line and
- * overruns it. */
-function wrapLine(line: string, options: ResolvedTextOptions): string[] {
-  if (options.maxWidth === undefined) return [line];
-  const wrapped: string[] = [];
-  let current = "";
-  for (const word of line.split(" ")) {
-    const candidate = current === "" ? word : `${current} ${word}`;
-    if (current !== "" && lineWidth(candidate, options) > options.maxWidth) {
-      wrapped.push(current);
-      current = word;
-    } else {
-      current = candidate;
-    }
+/** Flattens points into the `[x0, y0, x1, y1, ...]` a shape binding takes. */
+function flatten(points: readonly Vector2d[]): number[] {
+  const flat: number[] = [];
+  for (const p of points) {
+    flat.push(p.x, p.y);
   }
-  wrapped.push(current);
-  return wrapped;
-}
-
-/** Where every line of `text` sits and how much room the whole block takes,
- * shared by `drawText` and `measureText` so the two can't disagree. */
-function layoutText(text: string, options: ResolvedTextOptions) {
-  const lines = text.split("\n").flatMap((line) => wrapLine(line, options));
-  const widths = lines.map((line) => lineWidth(line, options));
-  const lineHeight = __surface_measure_text("", options.font)[1] * options.scale;
-  const step = lineHeight * options.lineSpacing;
-  return {
-    lines,
-    widths,
-    step,
-    width: widths.reduce((widest, width) => Math.max(widest, width), 0),
-    height: (lines.length - 1) * step + lineHeight,
-  };
-}
-
-/** The 2x3 for shift * turn * scale a `Transform` describes. */
-function transformMatrix(transform: Transform): Matrix {
-  const { translate, scale, rotate = 0 } = transform;
-  const sx = typeof scale === "number" ? scale : (scale?.x ?? 1);
-  const sy = typeof scale === "number" ? scale : (scale?.y ?? 1);
-  const cos = Math.cos(rotate);
-  const sin = Math.sin(rotate);
-  return [
-    cos * sx,
-    sin * sx,
-    -sin * sy,
-    cos * sy,
-    translate?.x ?? 0,
-    translate?.y ?? 0,
-  ];
+  return flat;
 }
 
 /** The source rect asked for, filled in against a full `w` x `h`. */
@@ -714,17 +710,6 @@ function placement(
 
 function imageId(image: Image | ImageId): number {
   return typeof image === "number" ? image : image.id;
-}
-
-/** Starts a fresh path running through `points`, leaving it open for the
- * caller to close, fill or stroke. */
-function tracePoints(points: readonly Vector2d[]): void {
-  if (points.length === 0) return;
-  __surface_path_begin();
-  __surface_path_move_to(points[0]!.x, points[0]!.y);
-  for (let i = 1; i < points.length; i++) {
-    __surface_path_line_to(points[i]!.x, points[i]!.y);
-  }
 }
 
 /** A retained drawing surface. Every operation applies to its pixels right
@@ -785,9 +770,7 @@ export class Surface {
     color: Color,
     thickness: number = 1,
   ): void {
-    __surface_path_begin();
-    __surface_path_rect(x, y, w, h);
-    __surface_stroke_path(this.#handle, color, thickness, "butt", "miter");
+    __surface_stroke_rectangle(this.#handle, [x, y, w, h], color, thickness);
   }
 
   /** Fills a rectangle whose corners are rounded off by `radius`, clamped
@@ -800,9 +783,7 @@ export class Surface {
     radius: number,
     color: Color,
   ): void {
-    __surface_path_begin();
-    __surface_path_rounded_rect(x, y, w, h, radius);
-    __surface_fill_path(this.#handle, color, "nonzero");
+    __surface_fill_rounded_rectangle(this.#handle, [x, y, w, h], radius, color);
   }
 
   /** Draws the outline of a rounded rectangle. */
@@ -815,9 +796,12 @@ export class Surface {
     color: Color,
     thickness: number = 1,
   ): void {
-    __surface_path_begin();
-    __surface_path_rounded_rect(x, y, w, h, radius);
-    __surface_stroke_path(this.#handle, color, thickness, "butt", "miter");
+    __surface_stroke_rounded_rectangle(
+      this.#handle,
+      [x, y, w, h, radius],
+      color,
+      thickness,
+    );
   }
 
   /** Draws a straight line from `(x1, y1)` to `(x2, y2)`. Run it down the
@@ -830,10 +814,7 @@ export class Surface {
     color: Color,
     thickness: number = 1,
   ): void {
-    __surface_path_begin();
-    __surface_path_move_to(x1, y1);
-    __surface_path_line_to(x2, y2);
-    __surface_stroke_path(this.#handle, color, thickness, "butt", "miter");
+    __surface_draw_line(this.#handle, [x1, y1, x2, y2], color, thickness);
   }
 
   /** Draws straight lines through `points` in order, ends left loose. */
@@ -843,8 +824,7 @@ export class Surface {
     thickness: number = 1,
   ): void {
     if (points.length < 2) return;
-    tracePoints(points);
-    __surface_stroke_path(this.#handle, color, thickness, "butt", "round");
+    __surface_draw_polyline(this.#handle, flatten(points), color, thickness);
   }
 
   /** Fills a circle of radius `r` centred on `(cx, cy)`. */
@@ -871,9 +851,7 @@ export class Surface {
     ry: number,
     color: Color,
   ): void {
-    __surface_path_begin();
-    __surface_path_oval(cx, cy, rx, ry);
-    __surface_fill_path(this.#handle, color, "nonzero");
+    __surface_fill_ellipse(this.#handle, cx, cy, rx, ry, color);
   }
 
   /** Draws the outline of an axis-aligned ellipse. */
@@ -885,9 +863,7 @@ export class Surface {
     color: Color,
     thickness: number = 1,
   ): void {
-    __surface_path_begin();
-    __surface_path_oval(cx, cy, rx, ry);
-    __surface_stroke_path(this.#handle, color, thickness, "butt", "miter");
+    __surface_stroke_ellipse(this.#handle, [cx, cy, rx, ry], color, thickness);
   }
 
   /** Draws the piece of a circle's rim from `startRad` to `endRad`. Naming
@@ -901,9 +877,12 @@ export class Surface {
     color: Color,
     thickness: number = 1,
   ): void {
-    __surface_path_begin();
-    __surface_path_arc(cx, cy, r, startRad, endRad);
-    __surface_stroke_path(this.#handle, color, thickness, "butt", "round");
+    __surface_draw_arc(
+      this.#handle,
+      [cx, cy, r, startRad, endRad],
+      color,
+      thickness,
+    );
   }
 
   /** Fills the triangle with corners `a`, `b` and `c`. */
@@ -919,9 +898,7 @@ export class Surface {
     rule: FillRule = "nonzero",
   ): void {
     if (points.length < 3) return;
-    tracePoints(points);
-    __surface_path_close();
-    __surface_fill_path(this.#handle, color, rule);
+    __surface_fill_polygon(this.#handle, flatten(points), color, rule);
   }
 
   /** Draws the outline of the shape enclosed by `points`, closed back to
@@ -932,9 +909,7 @@ export class Surface {
     thickness: number = 1,
   ): void {
     if (points.length < 3) return;
-    tracePoints(points);
-    __surface_path_close();
-    __surface_stroke_path(this.#handle, color, thickness, "butt", "miter");
+    __surface_stroke_polygon(this.#handle, flatten(points), color, thickness);
   }
 
   /** Sets the single pixel `(x, y)` falls inside. */
@@ -1008,7 +983,15 @@ export class Surface {
   /** Moves the coordinate space everything drawn afterwards is placed in,
    * until the matching `popTransform`. Transforms nest. */
   pushTransform(transform: Transform): void {
-    __surface_push_transform(this.#handle, transformMatrix(transform));
+    const { translate, scale, rotate = 0 } = transform;
+    const sx = typeof scale === "number" ? scale : (scale?.x ?? 1);
+    const sy = typeof scale === "number" ? scale : (scale?.y ?? 1);
+    __surface_push_transform(
+      this.#handle,
+      [translate?.x ?? 0, translate?.y ?? 0],
+      [sx, sy],
+      rotate,
+    );
   }
 
   /** Restores the coordinate space from before the matching
@@ -1043,21 +1026,14 @@ export class Surface {
     color: Color,
     fontOrOptions: Font | TextOptions = Font.Cozette,
   ): void {
-    const options = resolveTextOptions(fontOrOptions);
-    const { lines, widths, step } = layoutText(text, options);
-    for (let i = 0; i < lines.length; i++) {
-      let left = x;
-      if (options.align === "center") left = x - widths[i]! / 2;
-      else if (options.align === "right") left = x - widths[i]!;
-      __surface_draw_text(
-        this.#handle,
-        left,
-        y + step * i,
-        lines[i]!,
-        [options.font, options.scale],
-        color,
-      );
-    }
+    __surface_draw_text(
+      this.#handle,
+      x,
+      y,
+      text,
+      color,
+      normalizeTextOptions(fontOrOptions),
+    );
   }
 
   /** The pixel box `text` would occupy — a query, not a draw call. */
@@ -1065,7 +1041,10 @@ export class Surface {
     text: string,
     fontOrOptions: Font | TextOptions = Font.Cozette,
   ): Size2d {
-    const { width, height } = layoutText(text, resolveTextOptions(fontOrOptions));
+    const [width, height] = __surface_measure_text(
+      text,
+      normalizeTextOptions(fontOrOptions),
+    );
     return { width, height };
   }
 

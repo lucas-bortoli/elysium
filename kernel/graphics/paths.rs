@@ -239,54 +239,6 @@ pub fn bootstrap_path_bindings(
 
     {
         let path = Rc::clone(&path);
-        bind(
-            ctx,
-            "__surface_path_rect",
-            move |x: f32, y: f32, w: f32, h: f32| {
-                if let Some(rect) = tiny_skia::Rect::from_xywh(x, y, w, h) {
-                    path.borrow_mut().push_rect(rect);
-                }
-            },
-        )?;
-    }
-
-    {
-        let path = Rc::clone(&path);
-        bind(
-            ctx,
-            "__surface_path_oval",
-            move |cx: f32, cy: f32, rx: f32, ry: f32| {
-                if let Some(oval) = tiny_skia::Rect::from_ltrb(cx - rx, cy - ry, cx + rx, cy + ry) {
-                    path.borrow_mut().push_oval(oval);
-                }
-            },
-        )?;
-    }
-
-    {
-        let path = Rc::clone(&path);
-        bind(
-            ctx,
-            "__surface_path_rounded_rect",
-            move |x: f32, y: f32, w: f32, h: f32, radius: f32| {
-                append_rounded_rect(&mut path.borrow_mut(), x, y, w, h, radius)
-            },
-        )?;
-    }
-
-    {
-        let path = Rc::clone(&path);
-        bind(
-            ctx,
-            "__surface_path_arc",
-            move |cx: f32, cy: f32, r: f32, start: f32, end: f32| {
-                append_arc(&mut path.borrow_mut(), cx, cy, r, start, end)
-            },
-        )?;
-    }
-
-    {
-        let path = Rc::clone(&path);
         let surfaces = Rc::clone(&surfaces);
         bind(
             ctx,

@@ -267,7 +267,7 @@ impl ElysiumRuntime {
     /// path, used as the base for resolving any relative imports it has).
     /// Runs purely for its side effects — a program registers whatever
     /// per-frame work it wants (`ely:lifecycle`'s `addUpdateTicker`,
-    /// `ely:framebuffer`'s `addDrawHandler`) during evaluation, plus
+    /// `ely:graphics`'s `addDrawHandler`) during evaluation, plus
     /// whatever it wants deferred to after evaluation via
     /// `addPostInitHandler` (see [`Self::run_post_init_handlers`]).
     /// `transform::compile` already rejects top-level `await` outright, but

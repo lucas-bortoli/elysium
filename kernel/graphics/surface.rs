@@ -142,11 +142,39 @@ impl Surface {
         }
     }
 
+    /// Lays `text` out under `layout` and draws every line, with the block
+    /// anchored at `(x, y)` — the top-left, centre or right edge of each
+    /// line depending on `layout.align`. Line breaks and wrapping happen
+    /// here so `drawText` and `measureText` agree.
+    pub fn draw_text(
+        &mut self,
+        x: f32,
+        y: f32,
+        text: &str,
+        layout: &text::TextLayout,
+        color: Color,
+    ) {
+        let Some(font) = text::font_from_id(layout.font) else {
+            return;
+        };
+        let (lines, _, _) = text::lay_out(font, layout, text);
+        for line in lines {
+            self.draw_text_line(
+                x + line.dx,
+                y + line.dy,
+                &line.text,
+                layout.font,
+                layout.scale,
+                color,
+            );
+        }
+    }
+
     /// Draws one already-laid-out line of `text` with its top-left corner at
     /// `(x, y)`. Every lit pixel is one fully opaque palette colour written
     /// straight in; the text moves with the transform, but the glyphs
     /// themselves are never turned or resized.
-    pub fn draw_text(
+    pub fn draw_text_line(
         &mut self,
         x: f32,
         y: f32,
@@ -580,7 +608,7 @@ mod tests {
     fn text_is_confined_by_a_clip_and_moved_by_a_transform() {
         let mut unclipped = surface();
         unclipped.clear(Color::Slate900);
-        unclipped.draw_text(30.0, 2.0, "Hi", 0, 1, Color::Amber400);
+        unclipped.draw_text_line(30.0, 2.0, "Hi", 0, 1, Color::Amber400);
         assert!(
             lit_pixels(&unclipped, Color::Amber400) > 0,
             "the text should have drawn something"
@@ -592,7 +620,7 @@ mod tests {
         surface.clear(Color::Slate900);
         surface.push_clip(Some(&rect_path(0.0, 0.0, 30.0, 64.0)), FillRule::Winding);
         surface.push_transform(Transform::from_translate(30.0, 0.0));
-        surface.draw_text(30.0, 2.0, "Hi", 0, 1, Color::Amber400);
+        surface.draw_text_line(30.0, 2.0, "Hi", 0, 1, Color::Amber400);
         assert_eq!(lit_pixels(&surface, Color::Amber400), 0);
     }
 
@@ -601,7 +629,7 @@ mod tests {
         let lit_at = |scale: u32| {
             let mut surface = Surface::new(256, 128).expect("test surface");
             surface.clear(Color::Slate900);
-            surface.draw_text(2.0, 2.0, "Hi", 0, scale, Color::Amber400);
+            surface.draw_text_line(2.0, 2.0, "Hi", 0, scale, Color::Amber400);
             lit_pixels(&surface, Color::Amber400)
         };
         let single = lit_at(1);
