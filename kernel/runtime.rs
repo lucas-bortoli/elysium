@@ -266,8 +266,8 @@ impl ElysiumRuntime {
     /// Compiles and evaluates `source` as an ES module named `name` (its
     /// path, used as the base for resolving any relative imports it has).
     /// Runs purely for its side effects — a program registers whatever
-    /// per-frame work it wants (`ely:lifecycle`'s `addUpdateTicker`,
-    /// `ely:graphics`'s `addDrawHandler`) during evaluation, plus
+    /// per-frame work it wants (`ely:lifecycle`'s `addUpdateTicker`, which
+    /// is where drawing to a surface belongs) during evaluation, plus
     /// whatever it wants deferred to after evaluation via
     /// `addPostInitHandler` (see [`Self::run_post_init_handlers`]).
     /// `transform::compile` already rejects top-level `await` outright, but
