@@ -1,5 +1,5 @@
 // Ambient declarations for the Elysium host API: globals (print, timers,
-// the JSX factory), the ambient `JSX` namespace, and the `ely:framebuffer`/
+// the JSX factory), the ambient `JSX` namespace, and the `ely:graphics`/
 // `ely:lifecycle`/`ely:math`/`ely:input`/`ely:image`/`ely:filesystem`/
 // `ely:container`/`ely:process`/`ely:sound` namespaces.
 
@@ -1176,7 +1176,7 @@ declare module "ely:image" {
   export type ImageId = number;
 
   /** A loaded, palette-quantized picture, ready to be drawn with
-   * `ely:framebuffer`'s `drawImage`. */
+   * a surface's `drawImage`. */
   export interface Image {
     readonly id: ImageId;
     readonly width: number;

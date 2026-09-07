@@ -18,7 +18,7 @@ takes it back again.
 
 Isolation between processes isn't a one-shot thing: the kernel calls back
 into a running program repeatedly over its lifetime — a due timer, an update
-ticker ([1]), a draw handler ([2]), a delivered message. Any one of those
+ticker ([1]), a delivered message, a drawing call. Any one of those
 calls has to be boundable, because if a program's script code enters an
 infinite loop or a runaway computation, that can't be allowed to hang the
 call — and by extension the process's turn, the frame, and the rest of
@@ -55,7 +55,7 @@ per-frame call goes through the same entry point with a much tighter budget.
 
 Because module evaluation is one bounded, synchronous guarded call, a
 program's top-level code can't `await` anything whose resolution depends on
-a later guarded call — a timer, a ticker, a draw handler, a message — since
+a later guarded call — a timer, a ticker, a message — since
 none of those run until evaluation has returned. Elysium rejects such
 top-level awaits at compile time rather than let them hang. A program that
 needs timer-dependent work as part of starting up registers a post-init
@@ -93,7 +93,7 @@ one is, rather than being dropped.
 
 Next it runs the timers that process has due — its `setTimeout`s and
 `setInterval`s, and the `requestAnimationFrame` callbacks that update
-tickers and draw handlers ride on.
+tickers ride on.
 
 Finally it decides whether to reap the process. A process is reaped when it
 has explicitly ended itself by calling `exit()`, or when it has genuinely
@@ -183,13 +183,23 @@ both a fork chain and total worst-case memory (128 processes × 16 MB).
 
 ## The shared screen and input
 
-There is one framebuffer and one input device, shared by every process.
-Draw commands from all processes go into a single buffer in the order their
-draw handlers ran that frame, painter's algorithm, with the last
-`clearScreen` winning; there is no compositor and no per-process layer.
+There is one screen and one input device, shared by every process. The
+screen is a surface ([2]); a process draws onto it whenever it holds it,
+and the drawing lands then and there, so what one process draws over
+another's depends only on which drew later that frame. The kernel presents
+the screen once per tick, after every process has taken its turn, and
+nothing clears it between frames unless a program asks. There is no
+compositor and no per-process layer.
+
+Surfaces are how processes share drawing beyond that. A surface handle is a
+plain number, so it travels in a message like any other value ([3]): one
+process can create a surface, hand the handle to another (in a message, like any other value), and both
+then draw onto the same pixels — the basis for a window manager written as its
+own process. A surface stays alive while any live process holds it.
+
 Every process sees the same pointer and keyboard state — input is
 broadcast, with no notion of focus. `setScale` writes the one shared
-window's scale, last writer wins.
+window's scale, last writer wins; so does resizing the screen surface.
 
 ## Frame pacing
 
@@ -214,6 +224,6 @@ forecloses it.
 # References
 
 [1] [Per-frame ticking](Lifecycle.md)
-[2] [The Framebuffer](Framebuffer.md)
+[2] [Graphics](Graphics.md)
 [3] Rich Harris, [Top-level `await` is a footgun](https://gist.github.com/Rich-Harris/0b6f317657f5167663b493c722647221) (2016; later edited to note TC39's revised design addressed the original concern for JS engines, which have a mitigation Elysium doesn't)
 [4] [The examples browser](Examples.md)

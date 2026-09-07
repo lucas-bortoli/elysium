@@ -1,7 +1,7 @@
 # Timers: scheduling future work
 
 A program isn't limited to running once at startup and registering an
-update ticker or draw handler for its ongoing per-frame work ([1]). It can
+update ticker for its ongoing per-frame work ([1]). It can
 schedule its own future work with the same timer functions a browser or
 Node program would recognize:
 `setTimeout`, `setInterval`, `setImmediate`, and `requestAnimationFrame`,
@@ -25,8 +25,7 @@ requestAnimationFrame(function frame(timestamp) {
 ```
 
 These all rely on Elysium checking a program's pending timers once per
-frame, the same cadence update tickers and draw handlers are already
-called on, rather than running an independent clock of their own. That
+frame, the same cadence update tickers are already called on, rather than running an independent clock of their own. That
 means a timer's callback never runs any sooner than its delay allows, but
 also never any more precisely than "the frame at or after that delay
 elapsed" — a `setTimeout(fn, 500)` scheduled between frames doesn't fire
@@ -36,8 +35,8 @@ imperceptible; it only matters if a program is relying on sub-frame timing
 precision, which nothing in Elysium currently provides.
 
 A timer callback that throws, or that runs long enough to hit its
-per-frame budget, is treated exactly like an update ticker or draw handler
-callback that does the same — Elysium's guarded-call machinery doesn't
+per-frame budget, is treated exactly like an update ticker callback that
+does the same — Elysium's guarded-call machinery doesn't
 distinguish between them ([2]).
 
 # References
