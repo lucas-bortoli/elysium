@@ -9,7 +9,7 @@
 //! [`ProcessChannel`] the manager drains between turns.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use crate::bindings::bind;
@@ -70,6 +70,12 @@ pub struct SpawnRequest {
 pub struct ProcessChannel {
     spawn_id_counter: Rc<Cell<ProcessId>>,
     live_ids: Rc<RefCell<BTreeSet<ProcessId>>>,
+    /// The userland-virtual path each live process (the kernel excepted)
+    /// was spawned from — what `spawn_from_path`/`__process_spawn` were
+    /// given, not the real filesystem path `resolve_program` resolves it
+    /// to. Populated alongside `live_ids` in [`Self::allocate_id`], so it's
+    /// visible from the moment an id can be used as a message target.
+    entry_paths: Rc<RefCell<BTreeMap<ProcessId, String>>>,
     pending_spawns: Rc<RefCell<Vec<SpawnRequest>>>,
     pending_sends: Rc<RefCell<Vec<Envelope>>>,
     pending_control: Rc<RefCell<Vec<Control>>>,
@@ -87,11 +93,13 @@ impl ProcessChannel {
 
     /// Hands out the next id and records it as live immediately, so the
     /// caller of `spawn` can use it as a message target before the process
-    /// itself has been installed.
-    pub fn allocate_id(&self) -> ProcessId {
+    /// itself has been installed. `path` is the userland-virtual entry path
+    /// it's being spawned from, recorded for `Self::path_of`.
+    pub fn allocate_id(&self, path: String) -> ProcessId {
         let id = self.spawn_id_counter.get().max(1);
         self.spawn_id_counter.set(id + 1);
         self.live_ids.borrow_mut().insert(id);
+        self.entry_paths.borrow_mut().insert(id, path);
         id
     }
 
@@ -101,10 +109,22 @@ impl ProcessChannel {
 
     pub fn forget(&self, id: ProcessId) {
         self.live_ids.borrow_mut().remove(&id);
+        self.entry_paths.borrow_mut().remove(&id);
     }
 
     pub fn is_live(&self, id: ProcessId) -> bool {
         self.live_ids.borrow().contains(&id)
+    }
+
+    /// Every currently live process id, kernel (`0`) included, ascending.
+    pub fn live_ids(&self) -> Vec<ProcessId> {
+        self.live_ids.borrow().iter().copied().collect()
+    }
+
+    /// The userland-virtual path `id` was spawned from, or `None` if it
+    /// isn't live (the kernel included, which has no entry path).
+    pub fn path_of(&self, id: ProcessId) -> Option<String> {
+        self.entry_paths.borrow().get(&id).cloned()
     }
 
     pub fn take_spawns(&self) -> Vec<SpawnRequest> {
@@ -156,7 +176,7 @@ pub fn bootstrap_process_bindings<'js>(
             ctx,
             "__process_spawn",
             move |path: String, args_json: Opt<String>| -> ProcessId {
-                let id = channel.allocate_id();
+                let id = channel.allocate_id(path.clone());
                 channel.pending_spawns.borrow_mut().push(SpawnRequest {
                     id,
                     path,
@@ -216,6 +236,24 @@ pub fn bootstrap_process_bindings<'js>(
         let channel = channel.clone();
         bind(ctx, "__process_is_live", move |id: ProcessId| {
             channel.is_live(id)
+        })?;
+    }
+
+    {
+        let channel = channel.clone();
+        bind(ctx, "__process_get_processes", move || -> Vec<ProcessId> {
+            channel
+                .live_ids()
+                .into_iter()
+                .filter(|&id| id != 0)
+                .collect()
+        })?;
+    }
+
+    {
+        let channel = channel.clone();
+        bind(ctx, "__process_get_path", move |id: ProcessId| {
+            channel.path_of(id)
         })?;
     }
 

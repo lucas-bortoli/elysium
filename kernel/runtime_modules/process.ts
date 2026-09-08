@@ -11,6 +11,8 @@ declare function __process_post_message(
 declare function __process_request_exit(target: number): void;
 declare function __process_terminate(target: number): void;
 declare function __process_is_live(id: number): boolean;
+declare function __process_get_processes(): number[];
+declare function __process_get_path(id: number): string | undefined;
 declare function __process_exit(): void;
 declare function __process_set_message_handler(
   handler?: (envelope: Envelope) => void,
@@ -72,6 +74,23 @@ export function isLive(target: ProcessHandle): boolean {
   return __process_is_live(target);
 }
 
+/** Every process currently in the kernel's table, this one included — the
+ * kernel (`0`) is not. No ordering is promised. A snapshot: a process
+ * spawned or reaped right after this call won't retroactively change it. */
+export function getProcesses(): ProcessHandle[] {
+  return __process_get_processes();
+}
+
+/** The userland-virtual entry path `target` was started from (what its
+ * spawner passed to `spawn`, or `"/init.ts"` for the init process) — the
+ * same shape of path `spawn` itself takes, not a real filesystem path.
+ * Absent if `target` isn't live. */
+export function getProcessEntrypointFile(
+  target: ProcessHandle,
+): Option<string> {
+  return __process_get_path(target);
+}
+
 /** This process's own id. */
 export function currentProcessId(): ProcessHandle {
   return __process_self_id();
@@ -90,7 +109,9 @@ export function currentArguments(): Option<unknown> {
  * schedule on the next frame. */
 export function spawn(path: string, args: Option<unknown>): ProcessHandle {
   const json = encode(args);
-  return json === undefined ? __process_spawn(path) : __process_spawn(path, json);
+  return json === undefined
+    ? __process_spawn(path)
+    : __process_spawn(path, json);
 }
 
 /** Queues `message` for `target`, delivered at `target`'s next turn.
