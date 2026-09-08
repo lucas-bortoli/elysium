@@ -17,6 +17,48 @@ fn process_surface_reports_defaults_for_a_detached_runtime() {
 }
 
 #[test]
+fn get_processes_lists_every_live_id_but_not_the_kernel() {
+    let runtime = eval(
+        "import { getProcesses } from 'ely:process'; \
+         globalThis.ids = getProcesses();",
+    );
+    let ids: Vec<f64> = runtime
+        .context
+        .with(|ctx| ctx.globals().get("ids"))
+        .unwrap();
+    assert!(!ids.contains(&0.0), "the kernel should not be listed");
+}
+
+#[test]
+fn process_path_reports_the_spawner_own_entry_path_for_a_live_id() {
+    let runtime = eval(
+        "import { currentProcessId, getProcessEntrypointFile } from 'ely:process'; \
+         globalThis.path = getProcessEntrypointFile(currentProcessId());",
+    );
+    // A detached test runtime has no real spawn path recorded for its own
+    // id — it isn't reachable through `spawn`/`spawn_from_path` — so this
+    // pins the absent case rather than a live one.
+    let path: Option<String> = runtime
+        .context
+        .with(|ctx| ctx.globals().get("path"))
+        .unwrap();
+    assert_eq!(path, None);
+}
+
+#[test]
+fn process_path_is_absent_for_an_id_that_was_never_live() {
+    let runtime = eval(
+        "import { getProcessEntrypointFile } from 'ely:process'; \
+         globalThis.path = getProcessEntrypointFile(999999);",
+    );
+    let path: Option<String> = runtime
+        .context
+        .with(|ctx| ctx.globals().get("path"))
+        .unwrap();
+    assert_eq!(path, None);
+}
+
+#[test]
 fn on_message_registration_is_visible_to_the_host() {
     let runtime =
         eval("import { addMessageHandler } from 'ely:process'; addMessageHandler(() => {});");

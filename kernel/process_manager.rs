@@ -38,7 +38,9 @@ struct ProcessEntry {
     runtime: ElysiumRuntime,
     mailbox: VecDeque<Envelope>,
     state: ProcessState,
-    label: String,
+    /// The userland-virtual path this process was spawned from — kept for
+    /// trace logging and for `ely:process`'s `getProcessEntrypointFile`.
+    entry_path: String,
     /// `Some(virtual path)` until the process has taken its first turn and
     /// evaluated its entry module; `None` afterward. Startup — resolving
     /// the path, `eval_module`, post-init handlers — is deferred to that
@@ -81,7 +83,7 @@ impl ProcessManager {
         virtual_path: &str,
         arguments_json: Option<String>,
     ) -> Result<ProcessId, GuardedError> {
-        let id = self.channel.allocate_id();
+        let id = self.channel.allocate_id(virtual_path.to_string());
         match self.allocate_process(id, virtual_path, arguments_json) {
             Ok(()) => Ok(id),
             Err(err) => {
@@ -269,7 +271,7 @@ impl ProcessManager {
             mailbox: VecDeque::new(),
             state: ProcessState::Running,
             pending_path: Some(virtual_path.to_string()),
-            label: virtual_path.to_string(),
+            entry_path: virtual_path.to_string(),
             warned_no_handler: false,
         });
         trace_process(id, &format!("allocated for {virtual_path}"));
@@ -310,15 +312,15 @@ impl ProcessManager {
     /// plain uncaught exception all land here — the kernel keeps running.
     fn fault(&mut self, i: usize, phase: &str, err: GuardedError) {
         let id = self.entries[i].id;
-        let label = self.entries[i].label.clone();
+        let entry_path = self.entries[i].entry_path.clone();
         match err {
             GuardedError::Timeout => {
-                trace_process(id, &format!("dropped: timed out in {phase} ({label})"));
+                trace_process(id, &format!("dropped: timed out in {phase} ({entry_path})"));
             }
             GuardedError::Exception(message) => {
                 trace_process(
                     id,
-                    &format!("dropped: uncaught exception in {phase} ({label}): {message}"),
+                    &format!("dropped: uncaught exception in {phase} ({entry_path}): {message}"),
                 );
             }
         }
@@ -516,6 +518,37 @@ mod tests {
         mgr.tick(Instant::now());
         let hello: String = mgr.eval_in(child, "args.hello");
         assert_eq!(hello, "world");
+    }
+
+    #[test]
+    fn a_process_can_look_up_another_processs_entry_path() {
+        let root = userland_with(&[
+            (
+                "parent.ts",
+                "import { spawn, getProcessEntrypointFile } from 'ely:process'; \
+                 globalThis.child = spawn('/child.ts', undefined); \
+                 globalThis.pathOf = getProcessEntrypointFile; \
+                 setInterval(() => {}, 1000);",
+            ),
+            (
+                "child.ts",
+                "import { getProcessEntrypointFile } from 'ely:process'; \
+                 globalThis.pathOf = getProcessEntrypointFile; \
+                 setInterval(() => {}, 1000);",
+            ),
+        ]);
+        let mut mgr = manager(root);
+        let parent = mgr.spawn_from_path("/parent.ts", None).unwrap();
+        mgr.tick(Instant::now());
+        let child: u32 = mgr.eval_in(parent, "child");
+        mgr.tick(Instant::now());
+
+        // Either side can see the other's entry path, and it's the
+        // userland-virtual path they were spawned from, not a real one.
+        let child_path: String = mgr.eval_in(parent, &format!("pathOf({child})"));
+        assert_eq!(child_path, "/child.ts");
+        let parent_path: String = mgr.eval_in(child, &format!("pathOf({parent})"));
+        assert_eq!(parent_path, "/parent.ts");
     }
 
     #[test]

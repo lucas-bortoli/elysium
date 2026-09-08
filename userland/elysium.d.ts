@@ -1244,6 +1244,20 @@ declare module "ely:process" {
    * indefinitely. */
   export function isLive(target: ProcessHandle): boolean;
 
+  /** Every process currently in the kernel's table, this one included — the
+   * kernel (`0`) is not. No ordering is promised. A snapshot: a process
+   * spawned or reaped right after this call won't retroactively change
+   * it. */
+  export function getProcesses(): ProcessHandle[];
+
+  /** The userland-virtual entry path `target` was started from (what its
+   * spawner passed to `spawn`, or `"/init.ts"` for the init process) — the
+   * same shape of path `spawn` itself takes, not a real filesystem path.
+   * Absent if `target` isn't live. */
+  export function getProcessEntrypointFile(
+    target: ProcessHandle,
+  ): Option<string>;
+
   /** This process's own id. */
   export function currentProcessId(): ProcessHandle;
 
