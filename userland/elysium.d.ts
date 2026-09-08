@@ -373,7 +373,6 @@ declare module "ely:graphics" {
   /** One of `Font`'s named entries (e.g. `Font.Cozette`). */
   export type Font = (typeof Font)[keyof typeof Font];
 
-
   /** A number naming a surface, valid across every process. Send it over
    * process IPC as an ordinary number; the receiver revives it with
    * `useSurface`. */
@@ -459,23 +458,105 @@ declare module "ely:graphics" {
     /** Fills the whole surface with `color`, discarding whatever it held. */
     clear(color: Color): void;
 
-    fillRectangle(x: number, y: number, w: number, h: number, color: Color): void;
-    strokeRectangle(x: number, y: number, w: number, h: number, color: Color, thickness?: number): void;
-    fillRoundedRectangle(x: number, y: number, w: number, h: number, radius: number, color: Color): void;
-    strokeRoundedRectangle(x: number, y: number, w: number, h: number, radius: number, color: Color, thickness?: number): void;
-    drawLine(x1: number, y1: number, x2: number, y2: number, color: Color, thickness?: number): void;
-    drawPolyline(points: readonly import("ely:math").Vector2d[], color: Color, thickness?: number): void;
+    fillRectangle(
+      x: number,
+      y: number,
+      w: number,
+      h: number,
+      color: Color,
+    ): void;
+    strokeRectangle(
+      x: number,
+      y: number,
+      w: number,
+      h: number,
+      color: Color,
+      thickness?: number,
+    ): void;
+    fillRoundedRectangle(
+      x: number,
+      y: number,
+      w: number,
+      h: number,
+      radius: number,
+      color: Color,
+    ): void;
+    strokeRoundedRectangle(
+      x: number,
+      y: number,
+      w: number,
+      h: number,
+      radius: number,
+      color: Color,
+      thickness?: number,
+    ): void;
+    drawLine(
+      x1: number,
+      y1: number,
+      x2: number,
+      y2: number,
+      color: Color,
+      thickness?: number,
+    ): void;
+    drawPolyline(
+      points: readonly import("ely:math").Vector2d[],
+      color: Color,
+      thickness?: number,
+    ): void;
     fillCircle(cx: number, cy: number, r: number, color: Color): void;
-    strokeCircle(cx: number, cy: number, r: number, color: Color, thickness?: number): void;
-    fillEllipse(cx: number, cy: number, rx: number, ry: number, color: Color): void;
-    strokeEllipse(cx: number, cy: number, rx: number, ry: number, color: Color, thickness?: number): void;
-    drawArc(cx: number, cy: number, r: number, startRad: number, endRad: number, color: Color, thickness?: number): void;
-    fillTriangle(a: import("ely:math").Vector2d, b: import("ely:math").Vector2d, c: import("ely:math").Vector2d, color: Color): void;
-    fillPolygon(points: readonly import("ely:math").Vector2d[], color: Color, rule?: FillRule): void;
-    strokePolygon(points: readonly import("ely:math").Vector2d[], color: Color, thickness?: number): void;
+    strokeCircle(
+      cx: number,
+      cy: number,
+      r: number,
+      color: Color,
+      thickness?: number,
+    ): void;
+    fillEllipse(
+      cx: number,
+      cy: number,
+      rx: number,
+      ry: number,
+      color: Color,
+    ): void;
+    strokeEllipse(
+      cx: number,
+      cy: number,
+      rx: number,
+      ry: number,
+      color: Color,
+      thickness?: number,
+    ): void;
+    drawArc(
+      cx: number,
+      cy: number,
+      r: number,
+      startRad: number,
+      endRad: number,
+      color: Color,
+      thickness?: number,
+    ): void;
+    fillTriangle(
+      a: import("ely:math").Vector2d,
+      b: import("ely:math").Vector2d,
+      c: import("ely:math").Vector2d,
+      color: Color,
+    ): void;
+    fillPolygon(
+      points: readonly import("ely:math").Vector2d[],
+      color: Color,
+      rule?: FillRule,
+    ): void;
+    strokePolygon(
+      points: readonly import("ely:math").Vector2d[],
+      color: Color,
+      thickness?: number,
+    ): void;
 
     setPixel(x: number, y: number, color: Color): void;
-    drawPixels(points: readonly import("ely:math").Vector2d[], color: Color): void;
+    drawPixels(
+      points: readonly import("ely:math").Vector2d[],
+      color: Color,
+    ): void;
 
     /** Starts a new path, discarding whatever was being described. One path
      * under construction per program, shared across surfaces. */
@@ -483,12 +564,24 @@ declare module "ely:graphics" {
     moveTo(x: number, y: number): void;
     lineTo(x: number, y: number): void;
     quadraticTo(cx: number, cy: number, x: number, y: number): void;
-    cubicTo(c1x: number, c1y: number, c2x: number, c2y: number, x: number, y: number): void;
+    cubicTo(
+      c1x: number,
+      c1y: number,
+      c2x: number,
+      c2y: number,
+      x: number,
+      y: number,
+    ): void;
     closePath(): void;
     /** Fills the inside of the current path. Leaves the path in place. */
     fillPath(color: Color, rule?: FillRule): void;
     /** Draws a line of `thickness` along the current path. Leaves it in place. */
-    strokePath(color: Color, thickness?: number, cap?: LineCap, join?: LineJoin): void;
+    strokePath(
+      color: Color,
+      thickness?: number,
+      cap?: LineCap,
+      join?: LineJoin,
+    ): void;
 
     /** Moves the coordinate space everything drawn afterwards is placed in,
      * until the matching `popTransform`. Transforms nest. */
@@ -502,19 +595,50 @@ declare module "ely:graphics" {
     popClip(): void;
 
     /** Draws `text` in `color` with its top-left corner at `(x, y)`. */
-    drawText(x: number, y: number, text: string, color: Color, fontOrOptions?: Font | TextOptions): void;
+    drawText(
+      x: number,
+      y: number,
+      text: string,
+      color: Color,
+      fontOrOptions?: Font | TextOptions,
+    ): void;
     /** The pixel box `text` would occupy — a query, not a draw call. */
-    measureText(text: string, fontOrOptions?: Font | TextOptions): import("ely:math").Size2d;
+    measureText(
+      text: string,
+      fontOrOptions?: Font | TextOptions,
+    ): import("ely:math").Size2d;
 
     /** Draws `image` with its top-left corner at `(x, y)`. */
-    drawImage(image: import("ely:image").Image | import("ely:image").ImageId, x: number, y: number, options?: DrawImageOptions): void;
+    drawImage(
+      image: import("ely:image").Image | import("ely:image").ImageId,
+      x: number,
+      y: number,
+      options?: DrawImageOptions,
+    ): void;
     /** Draws `image` turned `radians` about `(originX, originY)` within it. */
-    drawImageRotated(image: import("ely:image").Image | import("ely:image").ImageId, x: number, y: number, radians: number, options?: DrawImageRotatedOptions): void;
+    drawImageRotated(
+      image: import("ely:image").Image | import("ely:image").ImageId,
+      x: number,
+      y: number,
+      radians: number,
+      options?: DrawImageRotatedOptions,
+    ): void;
 
     /** Draws another surface onto this one, like an image. A surface can't
      * be drawn onto itself. */
-    drawSurface(source: SurfaceHandle | Surface, x: number, y: number, options?: DrawImageOptions): void;
-    drawSurfaceRotated(source: SurfaceHandle | Surface, x: number, y: number, radians: number, options?: DrawImageRotatedOptions): void;
+    drawSurface(
+      source: SurfaceHandle | Surface,
+      x: number,
+      y: number,
+      options?: DrawImageOptions,
+    ): void;
+    drawSurfaceRotated(
+      source: SurfaceHandle | Surface,
+      x: number,
+      y: number,
+      radians: number,
+      options?: DrawImageRotatedOptions,
+    ): void;
   }
 
   /** The screen — the surface the kernel presents at the end of every tick.
