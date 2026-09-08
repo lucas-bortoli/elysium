@@ -3,3 +3,5 @@
 # column-aligned `^^^^` marker comments are the point of the file.
 # Reformatting these would silently break the tests they back.
 kernel/transform/fixtures/
+userland/lib/zod.js
+userland/lib/zod.d.ts

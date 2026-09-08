@@ -16,6 +16,7 @@
     // included (`./child.ts`), since nothing is rewritten before the host
     // resolves it.
     "allowImportingTsExtensions": true,
+    "allowJs": true,
 
     // JSX is rewritten into calls to the `h`/`Fragment` factory (see
     // elysium.d.ts for the ambient `JSX` namespace this pairs with, and for
