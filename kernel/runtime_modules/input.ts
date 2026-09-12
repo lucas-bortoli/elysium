@@ -1,7 +1,7 @@
 // The Input device: the pointing device's and keyboard's current state. The
 // pointer has a single button — isPointerDown/isPointerUp — plus scroll.
 // Position and delta are in the framebuffer's logical coordinate space (see
-// ely:graphics), not the window's physical pixels. The keyboard reports
+// ely:framebuffer), not the window's physical pixels. The keyboard reports
 // each key by its physical position (see Key), independent of layout.
 
 import type { Vector2d } from "ely:math";

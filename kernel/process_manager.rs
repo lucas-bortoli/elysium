@@ -299,13 +299,10 @@ impl ProcessManager {
     }
 
     /// Removes entry `i`, dropping its runtime (whose `Drop` runs the
-    /// deterministic VM teardown), releasing its id, and dropping every hold
-    /// it had on a shared surface — so a surface only its now-dead creator
-    /// held is reclaimed, while one another live process was sent survives.
+    /// deterministic VM teardown) and releasing its id.
     fn remove_at(&mut self, i: usize) {
         let entry = self.entries.remove(i);
         self.channel.forget(entry.id);
-        self.devices.surfaces.release_all(entry.id);
     }
 
     /// Logs a process fault and drops it. Timeout and exhausted-heap and
@@ -370,13 +367,13 @@ impl ProcessManager {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::path::PathBuf;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
-    use crate::graphics::{DEFAULT_SCALE, SCREEN_HEIGHT, SCREEN_WIDTH, SurfaceTable};
+    use crate::framebuffer::DEFAULT_SCALE;
     use crate::input::Input;
 
     /// A private userland root seeded with `programs`, each entry a
@@ -400,8 +397,13 @@ mod tests {
         let input = Rc::new(Input::new(Rc::clone(&scale)));
         // Scheduling has nothing to do with sound, and a kernel with no
         // output device has to schedule exactly the same way.
-        let surfaces = Rc::new(SurfaceTable::with_screen(SCREEN_WIDTH, SCREEN_HEIGHT));
-        ProcessManager::new(Devices::new(surfaces, input, scale, None, root))
+        ProcessManager::new(Devices::new(
+            Rc::new(RefCell::new(Vec::new())),
+            input,
+            scale,
+            None,
+            root,
+        ))
     }
 
     #[test]
@@ -586,48 +588,6 @@ mod tests {
         let data: f64 = mgr.eval_in(parent, "reply.data");
         assert_eq!(kind, "pong");
         assert_eq!(data, 42.0);
-    }
-
-    #[test]
-    fn a_surface_handle_crosses_a_process_boundary_as_a_plain_number() {
-        // The parent makes a surface and sends its handle — an ordinary
-        // number in the message JSON. The child revives it and draws to
-        // it, which only works if both processes reach the same table
-        // entry by that id.
-        let root = userland_with(&[
-            (
-                "parent.ts",
-                "import { spawn, postMessage } from 'ely:process'; \
-                 import { createSurface } from 'ely:graphics'; \
-                 const handle = createSurface(48, 32); \
-                 const child = spawn('/child.ts', undefined); \
-                 postMessage(child, { kind: 'canvas', data: handle }); \
-                 setInterval(() => {}, 1000);",
-            ),
-            (
-                "child.ts",
-                "import { addMessageHandler } from 'ely:process'; \
-                 import { useSurface, Color } from 'ely:graphics'; \
-                 globalThis.drew = ''; \
-                 addMessageHandler((env) => { \
-                     try { \
-                         const s = useSurface(env.data); \
-                         globalThis.size = [s.width, s.height]; \
-                         s.clear(Color.Slate900); \
-                         s.fillRectangle(0, 0, 8, 8, Color.Amber400); \
-                         globalThis.drew = 'ok'; \
-                     } catch (err) { globalThis.drew = String(err); } \
-                 }); \
-                 setInterval(() => {}, 1000);",
-            ),
-        ]);
-        let mut mgr = manager(root);
-        mgr.spawn_from_path("/parent.ts", None).unwrap();
-        mgr.tick(Instant::now()); // parent: create surface, queue spawn + send
-        mgr.tick(Instant::now()); // child: installed, receives handle, draws
-        let child = *mgr.ids().last().unwrap();
-        assert_eq!(mgr.eval_in::<String>(child, "drew"), "ok");
-        assert_eq!(mgr.eval_in::<Vec<u32>>(child, "size"), vec![48, 32]);
     }
 
     #[test]

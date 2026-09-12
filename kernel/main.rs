@@ -1,7 +1,7 @@
 mod bindings;
 mod esm_resolver;
 mod filesystem;
-mod graphics;
+mod framebuffer;
 mod image;
 mod input;
 mod process;
@@ -17,7 +17,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::Instant;
 
-use graphics::{Display, SCREEN_ID, SurfaceTable};
+use framebuffer::Framebuffer;
 use input::Input;
 use process_manager::{GRACE, ProcessManager};
 use runtime::Devices;
@@ -46,18 +46,12 @@ fn main() {
 
     let sound = sound::start().map(Rc::new);
 
-    // The one kernel-wide surface table, seeded with the screen (id 0).
-    // Every VM's `ely:graphics` bindings draw through it by id; the frame
-    // loop below presents the screen entry once per tick.
-    let surfaces = Rc::new(SurfaceTable::with_screen(
-        graphics::SCREEN_WIDTH,
-        graphics::SCREEN_HEIGHT,
-    ));
-    let scale = Rc::new(Cell::new(graphics::DEFAULT_SCALE));
+    let draw_commands = Rc::new(RefCell::new(Vec::new()));
+    let scale = Rc::new(Cell::new(framebuffer::DEFAULT_SCALE));
     let input = Rc::new(Input::new(Rc::clone(&scale)));
 
     let devices = Devices::new(
-        Rc::clone(&surfaces),
+        Rc::clone(&draw_commands),
         Rc::clone(&input),
         Rc::clone(&scale),
         sound,
@@ -78,17 +72,17 @@ fn main() {
     let manager = Rc::new(RefCell::new(manager));
     let close_deadline: Rc<Cell<Option<Instant>>> = Rc::new(Cell::new(None));
 
-    let mut display: Option<Display> = None;
+    let mut framebuffer: Option<Framebuffer> = None;
 
     // The window is created before any process runs (init evaluates on
-    // frame 1), so it opens at DEFAULT_SCALE and the screen surface's
-    // initial size. A process that calls `setScale` or resizes the screen
-    // during startup resizes the window live on that first frame via
-    // `Display::present` rather than changing the initial size.
+    // frame 1), so it opens at DEFAULT_SCALE. A process that calls
+    // `setScale` during startup resizes the window live on that first
+    // frame via `Framebuffer::apply_scale` rather than changing the
+    // initial size.
     ElysiumWindow::new(
         "Elysium",
-        graphics::SCREEN_WIDTH * scale.get(),
-        graphics::SCREEN_HEIGHT * scale.get(),
+        framebuffer::FRAMEBUFFER_WIDTH * scale.get(),
+        framebuffer::FRAMEBUFFER_HEIGHT * scale.get(),
     )
     .run(
         {
@@ -97,7 +91,7 @@ fn main() {
         },
         {
             let manager = Rc::clone(&manager);
-            let surfaces = Rc::clone(&surfaces);
+            let draw_commands = Rc::clone(&draw_commands);
             let scale = Rc::clone(&scale);
             let input = Rc::clone(&input);
             let mut fps_frames: u32 = 0;
@@ -109,26 +103,18 @@ fn main() {
             let mut tick_time = std::time::Duration::ZERO;
             let mut render_time = std::time::Duration::ZERO;
             move |window, _dt| {
-                let display = display.get_or_insert_with(|| {
-                    let (w, h) = surfaces
-                        .dimensions(SCREEN_ID)
-                        .expect("the screen surface is always present");
-                    Display::new(window.clone(), Rc::clone(&scale), (w, h))
-                });
+                let framebuffer = framebuffer
+                    .get_or_insert_with(|| Framebuffer::new(window.clone(), Rc::clone(&scale)));
 
                 let tick_start = Instant::now();
                 manager.borrow_mut().tick(tick_start);
                 tick_time += tick_start.elapsed();
 
-                // The screen surface already holds this tick's drawing —
-                // every process drew straight onto it. All that's left is
-                // to get it in front of the viewer.
                 let render_start = Instant::now();
-                surfaces
-                    .with(SCREEN_ID, |screen| display.present(screen))
-                    .expect("the screen surface is always present");
+                framebuffer.render(&draw_commands.borrow());
                 render_time += render_start.elapsed();
 
+                draw_commands.borrow_mut().clear();
                 input.end_frame();
 
                 // Report the average frame rate over the last second, split

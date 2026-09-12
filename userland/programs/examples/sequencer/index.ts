@@ -18,7 +18,22 @@
 //
 // Escape belongs to the menu, which is still running behind this.
 
-import { Color, screen } from "ely:graphics";
+import {
+  Color,
+  addDrawHandler,
+  beginPath,
+  clearScreen,
+  cubicTo,
+  drawLine,
+  drawPolyline,
+  drawText,
+  fillCircle,
+  fillRectangle,
+  fillRoundedRectangle,
+  moveTo,
+  strokePath,
+  strokeRectangle,
+} from "ely:framebuffer";
 import type { Vector2d } from "ely:math";
 import { Key, getPointerPosition, wasKeyPressed, wasPointerPressed } from "ely:input";
 import { addUpdateTicker } from "ely:lifecycle";
@@ -388,11 +403,11 @@ function squiggle(x: number, y: number, width: number, color: Color): void {
   for (let i = 0; i <= 10; i++) {
     points.push({ x: x + (width * i) / 10, y: y - Math.sin((i / 10) * Math.PI * 2) * 2.5 });
   }
-  screen.drawPolyline(points, color, 1);
+  drawPolyline(points, color, 1);
 }
 
-addUpdateTicker(() => {
-  screen.clear(Color.Slate950);
+addDrawHandler(() => {
+  clearScreen(Color.Slate950);
 
   // Paused, the playhead holds where it was heard to stop — not where
   // scheduling had got to, which is a lookahead further on.
@@ -400,8 +415,8 @@ addUpdateTicker(() => {
   const sounding = ((Math.floor(position) % STEPS) + STEPS) % STEPS;
   const through = position - Math.floor(position);
 
-  screen.drawText(GUTTER, 8, "Sequencer", Color.Amber300, { scale: 2 });
-  screen.drawText(
+  drawText(GUTTER, 8, "Sequencer", Color.Amber300, { scale: 2 });
+  drawText(
     GRID_RIGHT,
     10,
     `${playing ? "playing" : "paused"}   ${beatsPerMinute} BPM   level ${melodyLevel.toFixed(1)}`,
@@ -412,22 +427,22 @@ addUpdateTicker(() => {
   // Bar shading, so the metre reads without counting.
   for (let step = 0; step < STEPS; step += STEPS_PER_BEAT * 2) {
     const width = CELL_W * STEPS_PER_BEAT;
-    screen.fillRectangle(stepX(step), RULER_Y, width, GRID_BOTTOM - RULER_Y, Color.Slate900);
+    fillRectangle(stepX(step), RULER_Y, width, GRID_BOTTOM - RULER_Y, Color.Slate900);
   }
 
   // The column the ear is in, and the exact place inside it. Both come from
   // the clock the notes were scheduled against, so neither can drift from
   // what you are hearing.
   if (playing) {
-    screen.fillRectangle(stepX(sounding), RULER_Y, CELL_W, GRID_BOTTOM - RULER_Y, Color.Slate800);
+    fillRectangle(stepX(sounding), RULER_Y, CELL_W, GRID_BOTTOM - RULER_Y, Color.Slate800);
     const wrapped = (((position % STEPS) + STEPS) % STEPS);
     const head = GRID_X + wrapped * CELL_W;
-    screen.drawLine(head, RULER_Y, head, GRID_BOTTOM, Color.Amber300, 1);
-    screen.fillCircle(head, RULER_Y - 4, 3, Color.Amber300);
+    drawLine(head, RULER_Y, head, GRID_BOTTOM, Color.Amber300, 1);
+    fillCircle(head, RULER_Y - 4, 3, Color.Amber300);
   }
 
   for (let step = 0; step < STEPS; step++) {
-    screen.drawText(
+    drawText(
       stepX(step) + CELL_W / 2,
       RULER_Y - 12,
       step % STEPS_PER_BEAT === 0 ? `${step / STEPS_PER_BEAT + 1}` : "·",
@@ -450,17 +465,17 @@ addUpdateTicker(() => {
     const y1 = rowY(fromRow) + MELODY_H / 2;
     const x2 = stepX(step) + 4;
     const y2 = rowY(row) + MELODY_H / 2;
-    screen.beginPath();
-    screen.moveTo(x1, y1);
-    screen.cubicTo(x1 + CELL_W * 0.5, y1, x2 - CELL_W * 0.5, y2, x2, y2);
-    screen.strokePath(Color.Fuchsia400, 2, "round", "round");
+    beginPath();
+    moveTo(x1, y1);
+    cubicTo(x1 + CELL_W * 0.5, y1, x2 - CELL_W * 0.5, y2, x2, y2);
+    strokePath(Color.Fuchsia400, 2, "round", "round");
   }
 
   for (let row = 0; row < ROWS; row++) {
     const melodic = row < PITCHES.length;
     const y = rowY(row);
     const h = rowH(row);
-    screen.drawText(
+    drawText(
       GRID_X - 6,
       y + h / 2 - 4,
       melodic ? PITCHES[row]! : DRUMS[row - PITCHES.length]!.label,
@@ -480,10 +495,10 @@ addUpdateTicker(() => {
         // from the audio clock, so the flash is exactly on the beat.
         const lit = playing && step === sounding;
         const base = melodic ? ROW_COLORS[row]! : Color.Slate300;
-        screen.fillRoundedRectangle(x + 2, y + 2, CELL_W - 4, h - 4, 3, base);
+        fillRoundedRectangle(x + 2, y + 2, CELL_W - 4, h - 4, 3, base);
         if (lit) {
           const bloom = Math.max(0, 1 - through * 2);
-          screen.fillRoundedRectangle(
+          fillRoundedRectangle(
             x + 2,
             y + 2,
             CELL_W - 4,
@@ -493,10 +508,10 @@ addUpdateTicker(() => {
           );
         }
       } else {
-        screen.strokeRectangle(x + 2, y + 2, CELL_W - 4, h - 4, Color.Slate800, 1);
+        strokeRectangle(x + 2, y + 2, CELL_W - 4, h - 4, Color.Slate800, 1);
       }
 
-      if (cursor) screen.strokeRectangle(x, y, CELL_W, h, Color.Teal300, 1);
+      if (cursor) strokeRectangle(x, y, CELL_W, h, Color.Teal300, 1);
     }
   }
 
@@ -504,26 +519,26 @@ addUpdateTicker(() => {
   for (let step = 0; step < STEPS; step++) {
     const x = stepX(step);
     const y = MELODY_Y + PITCHES.length * MELODY_H + 2;
-    if (slides[step]) screen.drawText(x + 8, y, "S", Color.Fuchsia400);
+    if (slides[step]) drawText(x + 8, y, "S", Color.Fuchsia400);
     if (effects[step] === "vibrato") squiggle(x + 18, y + 4, 14, Color.Teal300);
     if (effects[step] === "tremolo") {
-      screen.fillCircle(x + 22, y + 4, 2 + Math.sin(currentTime() * 8) * 1.2, Color.Teal300);
+      fillCircle(x + 22, y + 4, 2 + Math.sin(currentTime() * 8) * 1.2, Color.Teal300);
     }
   }
 
-  screen.drawText(
+  drawText(
     GUTTER,
     GRID_BOTTOM + 14,
     "click or Enter  note      S  slide      V  vibrato/tremolo      space  play",
     Color.Slate500,
   );
-  screen.drawText(
+  drawText(
     GUTTER,
     GRID_BOTTOM + 28,
     "arrows  cursor      - =  tempo      [ ]  level      R  rewind      backspace  clear",
     Color.Slate500,
   );
-  screen.drawText(
+  drawText(
     GUTTER,
     GRID_BOTTOM + 46,
     "the notes and the playhead read the same clock, so neither can drift from the other",

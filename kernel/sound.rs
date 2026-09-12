@@ -2,7 +2,7 @@
 //! sounding voices into the one stream the output device plays.
 //!
 //! `Sound` never leaks `cpal`'s device or stream types outside this module,
-//! the same way `Display` never leaks `winit` types — see
+//! the same way `Framebuffer` never leaks `winit` types — see
 //! `kernel/window.rs`, which establishes that pattern for the window's OS
 //! resource. Here the OS resource is the default output stream instead of a
 //! window, and unlike the window, nothing else in the kernel needs to reach
@@ -11,7 +11,7 @@
 //!
 //! Mixing is [`Mixer::render`], which takes a buffer and a sample rate and
 //! nothing else, so a mix can be verified against a plain `Vec<f32>` with no
-//! real sound device involved — the same separation `graphics::Surface`
+//! real sound device involved — the same separation `framebuffer::rasterize`
 //! uses to test rasterization without a window.
 //!
 //! This is the one place in the kernel that crosses an OS thread boundary.

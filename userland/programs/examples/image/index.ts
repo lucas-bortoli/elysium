@@ -6,8 +6,16 @@
 //
 // This example never reads Escape — that key belongs to the menu.
 
-import { Color, screen } from "ely:graphics";
-import { addUpdateTicker } from "ely:lifecycle";
+import {
+  Color,
+  addDrawHandler,
+  clearScreen,
+  drawImage,
+  drawText,
+  getHeight,
+  getWidth,
+  measureText,
+} from "ely:framebuffer";
 import { loadImage } from "ely:image";
 
 const photo = loadImage(`${import.meta.directoryName}/photo.png`);
@@ -22,17 +30,17 @@ const IMAGE_Y = 90;
 const CROP = { sx: photo.width / 2, sy: 0, sw: photo.width / 2, sh: photo.height };
 
 const CREDIT = "photo by Elizabeth Ferreira";
-const CREDIT_HEIGHT = screen.measureText(CREDIT).height;
+const CREDIT_HEIGHT = measureText(CREDIT).height;
 
-addUpdateTicker(() => {
-  screen.clear(Color.Slate900);
-  screen.drawText(screen.width / 2, 6, "Image", Color.Amber300, {
+addDrawHandler(() => {
+  clearScreen(Color.Slate900);
+  drawText(getWidth() / 2, 6, "Image", Color.Amber300, {
     align: "center",
     scale: 2,
   });
 
-  screen.drawImage(photo, LEFT_X, IMAGE_Y, { scale: SCALE });
-  screen.drawText(
+  drawImage(photo, LEFT_X, IMAGE_Y, { scale: SCALE });
+  drawText(
     LEFT_X + (photo.width * SCALE) / 2,
     IMAGE_Y + photo.height * SCALE + 8,
     "drawImage, scaled",
@@ -40,8 +48,8 @@ addUpdateTicker(() => {
     { align: "center" },
   );
 
-  screen.drawImage(photo, RIGHT_X, IMAGE_Y, { ...CROP, scale: SCALE, flipX: true });
-  screen.drawText(
+  drawImage(photo, RIGHT_X, IMAGE_Y, { ...CROP, scale: SCALE, flipX: true });
+  drawText(
     RIGHT_X + (CROP.sw * SCALE) / 2,
     IMAGE_Y + CROP.sh * SCALE + 8,
     "a cropped source rect, flipped",
@@ -49,7 +57,7 @@ addUpdateTicker(() => {
     { align: "center" },
   );
 
-  screen.drawText(screen.width - 6, screen.height - CREDIT_HEIGHT - 6, CREDIT, Color.Slate700, {
+  drawText(getWidth() - 6, getHeight() - CREDIT_HEIGHT - 6, CREDIT, Color.Slate700, {
     align: "right",
   });
 });

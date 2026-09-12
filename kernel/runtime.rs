@@ -13,7 +13,7 @@ use crate::esm_resolver::{
     CompilingLoader, EmbeddedOrFileResolver, bootstrap_jsx_runtime, set_virtual_import_meta,
 };
 use crate::filesystem;
-use crate::graphics::{self, SurfaceTable};
+use crate::framebuffer::{self, DrawCommand};
 use crate::image::{self, ImageTable};
 use crate::input::{self, Input};
 use crate::process::{self, ProcessChannel, ProcessId};
@@ -62,23 +62,21 @@ const FRAME_BUDGET: Duration = Duration::from_millis(16);
 
 /// The devices the kernel owns and every VM shares a handle to.
 ///
-/// A process gets no private copy of any of these: `surfaces` is the one
-/// kernel-wide table `ely:graphics`'s bindings draw through — every process
-/// reaches the same entries by id, and the kernel presents the screen entry
-/// once per tick — `input` is the pointer and keyboard state fed from raw
-/// window events, and `scale` is the physical-pixels-per-logical-pixel
-/// setting `setScale` writes straight into.
-/// `userland_root` is the root of the whole userland tree — an absolute
-/// virtual path resolves against it and can never escape it, whatever the
-/// process's own entry path was, and every module's `import.meta` is
-/// expressed relative to it.
+/// A process gets no private copy of any of these: `draw_commands` is the one
+/// buffer `ely:framebuffer`'s bindings append to and the kernel drains once a
+/// guarded `draw()` returns, `input` is the pointer and keyboard state fed
+/// from raw window events, and `scale` is the physical-pixels-per-logical-pixel
+/// setting `setScale` writes straight into. `userland_root` is the root of the
+/// whole userland tree — an absolute virtual path resolves against it and can
+/// never escape it, whatever the process's own entry path was, and every
+/// module's `import.meta` is expressed relative to it.
 ///
 /// Canonicalized once, when this is built, so every sandbox walk downstream
 /// starts from a real, symlink-free root and no caller has to re-establish
 /// that invariant.
 #[derive(Clone)]
 pub struct Devices {
-    pub surfaces: Rc<SurfaceTable>,
+    pub draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
     pub input: Rc<Input>,
     pub scale: Rc<Cell<u32>>,
     /// The output device, absent when the machine has none or it couldn't be
@@ -94,7 +92,7 @@ impl Devices {
     /// without a userland tree, and failing here beats every path operation
     /// failing later for a reason that no longer names the cause.
     pub fn new(
-        surfaces: Rc<SurfaceTable>,
+        draw_commands: Rc<RefCell<Vec<DrawCommand>>>,
         input: Rc<Input>,
         scale: Rc<Cell<u32>>,
         sound: Option<Rc<Sound>>,
@@ -107,7 +105,7 @@ impl Devices {
             )
         });
         Self {
-            surfaces,
+            draw_commands,
             input,
             scale,
             sound,
@@ -175,7 +173,7 @@ impl ElysiumRuntime {
         arguments_json: Option<String>,
     ) -> Result<Self> {
         let Devices {
-            surfaces,
+            draw_commands,
             input,
             scale,
             sound,
@@ -221,10 +219,9 @@ impl ElysiumRuntime {
         context.with(|ctx| -> Result<()> {
             bind(&ctx, "print", print)?;
             bootstrap_jsx_runtime(&ctx)?;
-            graphics::bootstrap_graphics_bindings(
+            framebuffer::bootstrap_framebuffer_bindings(
                 &ctx,
-                surfaces,
-                self_id,
+                draw_commands,
                 scale,
                 Rc::clone(&images),
             )?;
@@ -266,8 +263,8 @@ impl ElysiumRuntime {
     /// Compiles and evaluates `source` as an ES module named `name` (its
     /// path, used as the base for resolving any relative imports it has).
     /// Runs purely for its side effects — a program registers whatever
-    /// per-frame work it wants (`ely:lifecycle`'s `addUpdateTicker`, which
-    /// is where drawing to a surface belongs) during evaluation, plus
+    /// per-frame work it wants (`ely:lifecycle`'s `addUpdateTicker`,
+    /// `ely:framebuffer`'s `addDrawHandler`) during evaluation, plus
     /// whatever it wants deferred to after evaluation via
     /// `addPostInitHandler` (see [`Self::run_post_init_handlers`]).
     /// `transform::compile` already rejects top-level `await` outright, but

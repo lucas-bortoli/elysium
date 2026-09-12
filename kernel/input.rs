@@ -15,13 +15,13 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use keys::Key;
 
 pub struct Input {
-    /// Shared with the display's own `scale` cell (see
-    /// `graphics::Display`) — the same physical-pixels-per-
+    /// Shared with the Framebuffer device's own `scale` cell (see
+    /// `framebuffer::Framebuffer`) — the same physical-pixels-per-
     /// logical-pixel ratio a program can change via `setScale`, read here
     /// so `handle_window_event` converts physical pointer coordinates
     /// against whatever scale is actually in effect, not a stale one.
     scale: Rc<Cell<u32>>,
-    /// The pointer's position in the screen's logical 720x360 space —
+    /// The pointer's position in the framebuffer's logical 720x360 space —
     /// winit reports physical window pixels, divided by `scale` and
     /// floored to a logical pixel on the way in so a program never has to
     /// think about the window's actual physical size, or deal with a
@@ -224,11 +224,11 @@ mod tests {
     use super::*;
 
     /// An `Input` backed by its own scale cell, fixed at
-    /// `graphics::DEFAULT_SCALE` — none of these tests exercise a live
+    /// `framebuffer::DEFAULT_SCALE` — none of these tests exercise a live
     /// `setScale` change, so a dedicated cell per test (rather than one
     /// shared across the whole module) keeps each test isolated.
     fn test_input() -> Input {
-        Input::new(Rc::new(Cell::new(crate::graphics::DEFAULT_SCALE)))
+        Input::new(Rc::new(Cell::new(crate::framebuffer::DEFAULT_SCALE)))
     }
 
     fn cursor_moved(x: f64, y: f64) -> WindowEvent {
