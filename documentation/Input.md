@@ -4,14 +4,14 @@ Elysium exposes the pointing device and the keyboard to programs through
 `ely:input`. The pointer has one button — there's no secondary or middle
 button to check — plus a scroll wheel.
 
-Reading input isn't gated behind a registered callback: a program can call
-any of `ely:input`'s functions from wherever it likes — an update ticker
-([1]), a timer, a message handler — and always gets the pointer's current
-state.
+Unlike the Framebuffer's draw handler, reading input isn't gated behind a
+registered callback: a program can call any of `ely:input`'s functions from
+wherever it likes — a draw handler, an update ticker ([1]), a timer — and
+always gets the pointer's current state.
 
 `getPointerPosition()` (and its `getPointerX`/`getPointerY` halves) report
-the pointer's position in the same logical coordinate space a surface is
-drawn in ([2], [3]), not the window's physical pixels — a program never has to
+the pointer's position in the same logical coordinate space the Framebuffer
+draws in ([2], [3]), not the window's physical pixels — a program never has to
 think about the window's actual size or scale to line up what it draws with
 where the pointer is.
 
@@ -28,15 +28,14 @@ same per-frame accounting: movement and scroll accumulated since the
 previous frame, then reset.
 
 ```ts
-import { Color, screen } from "ely:graphics";
-import { addUpdateTicker } from "ely:lifecycle";
+import { Color, addDrawHandler, clearScreen, fillRectangle } from "ely:framebuffer";
 import { getPointerPosition, isPointerDown } from "ely:input";
 
-addUpdateTicker(() => {
-  screen.clear(Color.Slate900);
+addDrawHandler(() => {
+  clearScreen(Color.Slate900);
   const { x, y } = getPointerPosition();
   const color = isPointerDown() ? Color.Amber400 : Color.Slate600;
-  screen.fillRectangle(x - 25, y - 25, 50, 50, color);
+  fillRectangle(x - 25, y - 25, 50, 50, color);
 });
 ```
 
@@ -71,6 +70,6 @@ addUpdateTicker(() => {
 
 [1] [Per-frame ticking](Lifecycle.md)
 
-[2] [Graphics](Graphics.md)
+[2] [The Framebuffer](Framebuffer.md)
 
 [3] [Coordinates](Coordinates.md)

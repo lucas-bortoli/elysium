@@ -480,6 +480,6 @@ literally is rejected before the program runs. Check it with `isNote` first.
 
 # References
 
-- [1] [Drawing to the screen](Graphics.md)
+- [1] [Drawing to the screen](Framebuffer.md)
 - [2] [Program lifecycle](Lifecycle.md)
 - [3] [Running several programs at once](Multitasking.md)

@@ -3,15 +3,12 @@
 Everything Elysium draws, and every position it reports back, lives in one
 coordinate space. Programs never work in the window's real pixels.
 
-Every surface has its own size in logical pixels; the screen starts 720
-wide and 360 tall. `(0, 0)` is a surface's top-left corner; `x` grows to
-the right and `y` grows *downward*, so on the screen at its starting size
-`(0, 359)` is the bottom-left. A program shouldn't hard-code a size —
-`screen.width`, `screen.height` and `screen.size` report the screen's, a
-surface can be resized, and the screen's own size changes when a program
-resizes it.
+The drawing surface is 720 logical pixels wide and 360 tall. `(0, 0)` is its
+top-left corner; `x` grows to the right and `y` grows *downward*, so `(0, 359)`
+is the bottom-left. A program shouldn't hard-code that size — `getWidth()`,
+`getHeight()` and `getSize2d()` report it, and it may change.
 
-The screen is what a program draws on, but not quite what it shows. Elysium
+That surface is what a program draws on, but not what the screen shows. Elysium
 presents it enlarged by a whole-number factor, every logical pixel becoming a
 square block of real ones, so a picture stays sharp and blocky instead of being
 smoothed. `setScale` changes that factor. Nothing a program draws or measures
@@ -82,11 +79,6 @@ in effect, never widen it. Because a clip region is itself given in the
 coordinate space current when it's pushed, a clip pushed inside a transform
 moves with it.
 
-Both stacks belong to the surface, not to a frame: they stay as a program
-left them until it pops or resizes. A program that redraws a surface each
-frame balances its pushes and pops within that pass so nothing carries
-over.
-
 Text is the one thing that doesn't follow a transform completely. Where a line
 of text is placed does move with the current transform, and text is clipped
 like everything else, but the glyphs themselves are never rotated or scaled:
@@ -95,7 +87,7 @@ rotating camera moves around the screen without tipping over.
 
 # References
 
-[1] [Graphics](Graphics.md)
+[1] [The Framebuffer](Framebuffer.md)
 
 [2] [Loading images](Image.md)
 
