@@ -33,7 +33,7 @@ import {
   pushTransform,
   strokeCircle,
   strokeRoundedRectangle,
-} from "ely:framebuffer";
+} from "ely:graphics";
 import { addUpdateTicker } from "ely:lifecycle";
 import { exit } from "ely:process";
 import { loadImage } from "ely:image";

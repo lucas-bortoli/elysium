@@ -26,8 +26,8 @@ import {
   popClip,
   pushClip,
   removeDrawHandler,
-} from "ely:framebuffer";
-import type { DrawTickerId } from "ely:framebuffer";
+} from "ely:graphics";
+import type { DrawTickerId } from "ely:graphics";
 import {
   Key,
   getPointerDelta,

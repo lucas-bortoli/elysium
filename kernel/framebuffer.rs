@@ -8,7 +8,7 @@
 //! Framebuffer to get them.
 //!
 //! Draw calls from JS never reach here directly either. [`bootstrap_framebuffer_bindings`]
-//! binds `ely:framebuffer`'s hidden globals to push [`DrawCommand`]s onto a
+//! binds `ely:graphics`'s hidden globals to push [`DrawCommand`]s onto a
 //! plain `Vec` shared with the kernel's frame loop; only once a guarded
 //! `draw()` call returns does that Vec get handed to [`Framebuffer::render`],
 //! which is the only place in the kernel that rasterizes and presents a frame.
@@ -131,7 +131,7 @@ pub enum DrawCommand {
     PopClip,
 }
 
-/// Binds the hidden globals `ely:framebuffer`'s embedded module wraps, path
+/// Binds the hidden globals `ely:graphics`'s embedded module wraps, path
 /// bindings included. A program never names one of these: it calls the
 /// module's exported `clearScreen`/`fillRectangle`/`drawText`/... , which
 /// calls the matching global, which appends a [`DrawCommand`] to the buffer
@@ -338,7 +338,7 @@ pub fn bootstrap_framebuffer_bindings(
     Ok(())
 }
 
-/// Resolves a numeric color id (as sent by one of `ely:framebuffer`'s generated
+/// Resolves a numeric color id (as sent by one of `ely:graphics`'s generated
 /// `RED_500`-style constants) to a [`Color`], throwing a `TypeError` if it's
 /// out of range — only reachable if a program bypasses the generated
 /// constants and passes an arbitrary number instead.
@@ -349,7 +349,7 @@ fn resolve_color(ctx: &Ctx<'_>, id: u16) -> Result<Color> {
 
 /// The logical resolution programs draw in — independent of the window's
 /// physical pixel size. Mirrored by hand in
-/// `kernel/runtime_modules/framebuffer.ts`'s `getWidth`/`getHeight`; unlike
+/// `kernel/runtime_modules/graphics.ts`'s `getWidth`/`getHeight`; unlike
 /// the color palette, which is generated from one table, nothing checks
 /// these two agree, so change them together.
 pub const FRAMEBUFFER_WIDTH: u32 = 720;
@@ -357,7 +357,7 @@ pub const FRAMEBUFFER_HEIGHT: u32 = 360;
 
 /// The physical-pixels-per-logical-pixel ratio a `Framebuffer` starts at
 /// before any `setScale` call. The live ratio is held in a runtime
-/// `Cell<u32>` shared with `ely:framebuffer`'s `setScale` binding, so a
+/// `Cell<u32>` shared with `ely:graphics`'s `setScale` binding, so a
 /// program can change it while Elysium is running.
 pub const DEFAULT_SCALE: u32 = 2;
 
@@ -373,7 +373,7 @@ pub struct Framebuffer {
     // buffer, instead of allocating a fresh row each frame. Reallocated
     // whenever `applied_scale` changes.
     row_scratch: Vec<u32>,
-    // Shared with `ely:framebuffer`'s `setScale` binding — the scale a
+    // Shared with `ely:graphics`'s `setScale` binding — the scale a
     // program most recently requested, checked once per `render` call.
     scale: Rc<Cell<u32>>,
     // The scale `pixmap`/`row_scratch`/`surface`/`window` are currently
@@ -398,7 +398,7 @@ impl Framebuffer {
     /// `FRAMEBUFFER_WIDTH * scale.get()` x `FRAMEBUFFER_HEIGHT * scale.get()`
     /// — not queried from `window`, since Elysium doesn't follow the OS's
     /// DPI scale factor (see `present`'s doc comment). `scale` is shared
-    /// with `ely:framebuffer`'s `setScale` binding; `render` notices when
+    /// with `ely:graphics`'s `setScale` binding; `render` notices when
     /// it changes and reconfigures accordingly.
     pub fn new(window: Arc<Window>, scale: Rc<Cell<u32>>) -> Framebuffer {
         let applied_scale = scale.get();

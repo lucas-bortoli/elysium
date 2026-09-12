@@ -1,5 +1,5 @@
 // Loading pictures off disk. Every pixel a program loads gets snapped to
-// the kernel's fixed color palette (see `ely:framebuffer`'s `Color`) the
+// the kernel's fixed color palette (see `ely:graphics`'s `Color`) the
 // same way `fillRectangle`/`clearScreen` are already constrained to it —
 // transparency is preserved, only color is quantized.
 
@@ -14,7 +14,7 @@ declare function __image_unload(id: number): void;
 export type ImageId = number;
 
 /** A loaded, palette-quantized picture, ready to be drawn with
- * `ely:framebuffer`'s `drawImage`. */
+ * `ely:graphics`'s `drawImage`. */
 export interface Image {
   readonly id: ImageId;
   readonly width: number;

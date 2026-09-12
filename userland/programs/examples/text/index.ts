@@ -13,7 +13,7 @@ import {
   getWidth,
   measureText,
   strokeRectangle,
-} from "ely:framebuffer";
+} from "ely:graphics";
 
 const PROSE =
   "Text is placed by its box rather than its baseline, so a program never has to know where a font's baseline sits to line something up against it.";

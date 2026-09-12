@@ -33,7 +33,7 @@ import {
   moveTo,
   strokePath,
   strokeRectangle,
-} from "ely:framebuffer";
+} from "ely:graphics";
 import type { Vector2d } from "ely:math";
 import { Key, getPointerPosition, wasKeyPressed, wasPointerPressed } from "ely:input";
 import { addUpdateTicker } from "ely:lifecycle";

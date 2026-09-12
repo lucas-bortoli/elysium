@@ -15,7 +15,7 @@ import {
   getHeight,
   getWidth,
   measureText,
-} from "ely:framebuffer";
+} from "ely:graphics";
 import { loadImage } from "ely:image";
 
 const photo = loadImage(`${import.meta.directoryName}/photo.png`);

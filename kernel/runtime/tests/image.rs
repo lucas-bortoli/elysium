@@ -7,7 +7,7 @@ use super::*;
 fn load_image_and_draw_image_round_trip_without_throwing() {
     let runtime = eval(
         "import { loadImage } from 'ely:image'; \
-         import { addDrawHandler, drawImage } from 'ely:framebuffer'; \
+         import { addDrawHandler, drawImage } from 'ely:graphics'; \
          globalThis.drawn = false; \
          const image = loadImage('/test.png'); \
          addDrawHandler(() => { drawImage(image, 10, 10); globalThis.drawn = true; });",
@@ -19,7 +19,7 @@ fn load_image_and_draw_image_round_trip_without_throwing() {
 #[test]
 fn draw_image_with_an_unknown_id_throws() {
     let runtime = eval(
-        "import { addDrawHandler, drawImage } from 'ely:framebuffer'; \
+        "import { addDrawHandler, drawImage } from 'ely:graphics'; \
          globalThis.threw = false; \
          addDrawHandler(() => { \
              try { drawImage(999999, 0, 0); } catch { globalThis.threw = true; } \
@@ -68,7 +68,7 @@ fn load_image_with_a_relative_path_throws_relative_path_error() {
 fn drawing_part_of_an_image_resized_flipped_or_turned_succeeds() {
     let runtime = eval(
         "import { loadImage } from 'ely:image'; \
-         import { addDrawHandler, drawImage, drawImageRotated } from 'ely:framebuffer'; \
+         import { addDrawHandler, drawImage, drawImageRotated } from 'ely:graphics'; \
          globalThis.error = ''; \
          const image = loadImage('/test.png'); \
          addDrawHandler(() => { \
@@ -92,7 +92,7 @@ fn drawing_part_of_an_image_resized_flipped_or_turned_succeeds() {
 #[test]
 fn drawing_a_transformed_image_with_an_unknown_id_throws() {
     let runtime = eval(
-        "import { addDrawHandler, drawImageRotated } from 'ely:framebuffer'; \
+        "import { addDrawHandler, drawImageRotated } from 'ely:graphics'; \
          globalThis.threw = false; \
          addDrawHandler(() => { \
              try { drawImageRotated(999999, 0, 0, 1); } \
@@ -107,7 +107,7 @@ fn drawing_a_transformed_image_with_an_unknown_id_throws() {
 fn asking_for_no_part_of_an_image_draws_nothing() {
     let runtime = eval(
         "import { loadImage } from 'ely:image'; \
-         import { addDrawHandler, drawImage } from 'ely:framebuffer'; \
+         import { addDrawHandler, drawImage } from 'ely:graphics'; \
          globalThis.error = ''; \
          const image = loadImage('/test.png'); \
          addDrawHandler(() => { \

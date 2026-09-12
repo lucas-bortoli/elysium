@@ -27,7 +27,7 @@ import {
   getHeight,
   getWidth,
   strokeRectangle,
-} from "ely:framebuffer";
+} from "ely:graphics";
 import type { Vector2d } from "ely:math";
 import { Key, isKeyDown, wasKeyPressed } from "ely:input";
 import { addUpdateTicker } from "ely:lifecycle";

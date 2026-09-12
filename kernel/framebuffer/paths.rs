@@ -175,7 +175,7 @@ fn resolve_line_join(ctx: &Ctx<'_>, join: &str) -> Result<tiny_skia::LineJoin> {
     }
 }
 
-/// Binds the hidden globals `ely:framebuffer`'s path calls wrap. Split out
+/// Binds the hidden globals `ely:graphics`'s path calls wrap. Split out
 /// from `super::bootstrap_framebuffer_bindings` only because the path half of
 /// the device is large enough to read on its own; the two are bootstrapped
 /// together and share the same draw command list.

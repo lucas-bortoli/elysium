@@ -5,7 +5,7 @@ imports explicitly. The Framebuffer is a drawing surface a program can put pictu
 
 Elysium ships with one fixed, curated palette, and every color a program
 can draw with is one of `Color`'s named entries, exported from
-`ely:framebuffer`. Constraining every program to the same palette keeps
+`ely:graphics`. Constraining every program to the same palette keeps
 what gets drawn visually consistent across, the way a shared system theme
 would, instead of every program inventing its own arbitrary colors.
 
@@ -25,7 +25,7 @@ import {
   clearScreen,
   fillRectangle,
   getWidth,
-} from "ely:framebuffer";
+} from "ely:graphics";
 import { addUpdateTicker } from "ely:lifecycle";
 
 let x = 0;
@@ -130,7 +130,7 @@ a region it never asked for.
 Elysium draws text with bitmap fonts that belong to the system, not to the
 program. Just as every color is a named palette entry, every font is one of
 a small fixed set the kernel carries — `Font`, exported from
-`ely:framebuffer`, with `Font.Cozette` as the default a program gets
+`ely:graphics`, with `Font.Cozette` as the default a program gets
 when it names none. A program can't load or embed a font of its own; more
 built-in fonts may be added over time, and a program selects one the same
 way it selects a color.

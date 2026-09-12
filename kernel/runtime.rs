@@ -63,7 +63,7 @@ const FRAME_BUDGET: Duration = Duration::from_millis(16);
 /// The devices the kernel owns and every VM shares a handle to.
 ///
 /// A process gets no private copy of any of these: `draw_commands` is the one
-/// buffer `ely:framebuffer`'s bindings append to and the kernel drains once a
+/// buffer `ely:graphics`'s bindings append to and the kernel drains once a
 /// guarded `draw()` returns, `input` is the pointer and keyboard state fed
 /// from raw window events, and `scale` is the physical-pixels-per-logical-pixel
 /// setting `setScale` writes straight into. `userland_root` is the root of the
@@ -264,7 +264,7 @@ impl ElysiumRuntime {
     /// path, used as the base for resolving any relative imports it has).
     /// Runs purely for its side effects — a program registers whatever
     /// per-frame work it wants (`ely:lifecycle`'s `addUpdateTicker`,
-    /// `ely:framebuffer`'s `addDrawHandler`) during evaluation, plus
+    /// `ely:graphics`'s `addDrawHandler`) during evaluation, plus
     /// whatever it wants deferred to after evaluation via
     /// `addPostInitHandler` (see [`Self::run_post_init_handlers`]).
     /// `transform::compile` already rejects top-level `await` outright, but
