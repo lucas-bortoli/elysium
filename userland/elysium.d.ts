@@ -1,5 +1,5 @@
 // Ambient declarations for the Elysium host API: globals (print, timers,
-// the JSX factory), the ambient `JSX` namespace, and the `ely:graphics`/
+// the JSX factory), the ambient `JSX` namespace, and the `ely:framebuffer`/
 // `ely:lifecycle`/`ely:math`/`ely:input`/`ely:image`/`ely:filesystem`/
 // `ely:container`/`ely:process`/`ely:sound` namespaces.
 
@@ -64,11 +64,11 @@ declare function cancelAnimationFrame(id?: number): void;
  * finishes, before the next timer or frame. */
 declare function queueMicrotask(callback: () => void): void;
 
-declare module "ely:graphics" {
+declare module "ely:framebuffer" {
   /** The kernel's fixed, curated color palette. Every color a program can
    * draw with is one of these named entries — never a raw, unconstrained
    * RGBA value. */
-  // <generated from kernel/graphics/palette.rs>
+  // <generated from kernel/framebuffer/palette.rs>
   export const Color: {
     readonly Red50: 0;
     readonly Red100: 1;
@@ -373,10 +373,99 @@ declare module "ely:graphics" {
   /** One of `Font`'s named entries (e.g. `Font.Cozette`). */
   export type Font = (typeof Font)[keyof typeof Font];
 
-  /** A number naming a surface, valid across every process. Send it over
-   * process IPC as an ordinary number; the receiver revives it with
-   * `useSurface`. */
-  export type SurfaceHandle = number;
+  /** Thrown by any drawing call made from outside a currently running draw
+   * handler (see `addDrawHandler`). */
+  export class DrawOutsideHandlerError extends Error {
+    constructor();
+  }
+
+  /** Thrown by `popTransform`/`popClip` when nothing is left to pop. */
+  export class UnbalancedStackError extends Error {
+    constructor(what: string);
+  }
+
+  export type DrawTickerId = number;
+
+  /** The framebuffer's logical width, in pixels. */
+  export function getWidth(): number;
+
+  /** The framebuffer's logical height, in pixels. */
+  export function getHeight(): number;
+
+  /** The framebuffer's logical size, in pixels. */
+  export function getSize2d(): import("ely:math").Size2d;
+
+  /** Registers `handler` to run once per frame; `clearScreen`/`fillRectangle`
+   * only take effect when called from inside a running handler. Returns an
+   * id for `removeDrawHandler`. */
+  export function addDrawHandler(handler: () => void): DrawTickerId;
+
+  /** Stops calling the draw handler registered under `id`. */
+  export function removeDrawHandler(id: DrawTickerId): void;
+
+  /** Clears the whole screen to `color`. */
+  export function clearScreen(color: Color): void;
+
+  /** Fills an axis-aligned rectangle at `(x, y)`, `w` wide and `h` tall, with `color`. */
+  export function fillRectangle(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    color: Color,
+  ): void;
+
+  /** Which part of an image to draw, and how to place it. */
+  export interface DrawImageOptions {
+    /** The left edge of the part of the image to draw. Defaults to 0. */
+    sx?: number;
+    /** The top edge of the part of the image to draw. Defaults to 0. */
+    sy?: number;
+    /** The width of the part to draw. Defaults to the rest of the image,
+     * to the right of `sx`. */
+    sw?: number;
+    /** The height of the part to draw. Defaults to the rest of the image,
+     * below `sy`. */
+    sh?: number;
+    /** Draws the image this many times its natural size. A single number
+     * scales both axes alike. Whole numbers keep it pixel-crisp; anything
+     * else lands its pixels unevenly, since nothing is smoothed. */
+    scale?: number | import("ely:math").Vector2d;
+    /** Mirrors the image left to right, within the same destination box. */
+    flipX?: boolean;
+    /** Mirrors the image top to bottom, within the same destination box. */
+    flipY?: boolean;
+  }
+
+  /** Where an image turns about, in the drawn image's own pixels, measured
+   * from its top-left corner. */
+  export interface DrawImageRotatedOptions extends DrawImageOptions {
+    /** Defaults to the left edge. */
+    originX?: number;
+    /** Defaults to the top edge. */
+    originY?: number;
+  }
+
+  /** Draws `image` with its top-left corner at `(x, y)`. With no options it
+   * goes on at its natural size, whole; options take part of it instead,
+   * resize it, or mirror it. */
+  export function drawImage(
+    image: import("ely:image").Image | import("ely:image").ImageId,
+    x: number,
+    y: number,
+    options?: DrawImageOptions,
+  ): void;
+
+  /** Draws `image` at `(x, y)`, turned `radians` about the point
+   * `originX`, `originY` within it — clockwise on screen, since `y` grows
+   * downward. The origin defaults to the image's top-left corner. */
+  export function drawImageRotated(
+    image: import("ely:image").Image | import("ely:image").ImageId,
+    x: number,
+    y: number,
+    radians: number,
+    options?: DrawImageRotatedOptions,
+  ): void;
 
   /** Which edge of the text box `drawText`'s `x` names. */
   export type TextAlign = "left" | "center" | "right";
@@ -385,286 +474,289 @@ declare module "ely:graphics" {
   export interface TextOptions {
     /** Which of the kernel's built-in fonts to use. */
     font?: Font;
-    /** How many pixels wide to draw each of the font's own pixels — a
-     * whole number of at least 1. */
+    /** How many pixels wide to draw each of the font's own pixels — a whole
+     * number of at least 1. A bigger size is the same bitmap with bigger
+     * pixels, so it stays as crisp as the font itself. */
     scale?: number;
     /** Which edge of the text `x` names. Defaults to its left. */
     align?: TextAlign;
-    /** Wraps the text to this width, breaking between words. */
+    /** Wraps the text to this width, breaking between words. A single word
+     * too wide to fit still gets a line of its own and overruns it. */
     maxWidth?: number;
     /** Multiplies the gap between lines. */
     lineSpacing?: number;
   }
 
-  /** How a path decides which of its regions count as inside where its
-   * outline crosses over itself. */
-  export type FillRule = "nonzero" | "evenodd";
-  /** How a stroke finishes at the two loose ends of an open path. */
-  export type LineCap = "butt" | "round" | "square";
-  /** How a stroke turns a corner where two segments meet. */
-  export type LineJoin = "miter" | "round" | "bevel";
-
-  /** How `pushTransform` moves the coordinate space. Applied in the order
-   * written: a shape is scaled, then rotated, then shifted. */
-  export interface Transform {
-    translate?: import("ely:math").Vector2d;
-    scale?: import("ely:math").Vector2d | number;
-    /** Radians — clockwise on screen, since `y` grows downward. */
-    rotate?: number;
-  }
-
-  /** Which part of an image or surface to draw, and how to place it. */
-  export interface DrawImageOptions {
-    sx?: number;
-    sy?: number;
-    sw?: number;
-    sh?: number;
-    scale?: number | import("ely:math").Vector2d;
-    flipX?: boolean;
-    flipY?: boolean;
-  }
-
-  /** Where an image or surface turns about, in the drawn copy's own pixels,
-   * measured from its top-left corner. */
-  export interface DrawImageRotatedOptions extends DrawImageOptions {
-    originX?: number;
-    originY?: number;
-  }
-
-  /** A retained drawing surface. Every operation applies to its pixels
-   * right away and stays; the transform and clip stacks persist between
-   * calls and are the surface's own — a program sharing a surface with
-   * another process balances what it pushes.
+  /** Draws `text` in `color` with its top-left corner at `(x, y)`, using
+   * one of the kernel's built-in bitmap fonts.
    *
-   * Get one with {@link useSurface}; for the screen, the exported
-   * {@link screen}. {@link createSurface} returns a bare handle, the
-   * thing to send to another process. */
-  export class Surface {
-    /** Only `useSurface` constructs one, so a handle is always validated. */
-    private constructor(handle: SurfaceHandle);
+   * Passing options instead of a bare font aligns the text against `x`
+   * rather than starting from it, wraps it to a width, or draws it at a
+   * whole-number multiple of the font's size. Line breaks in `text` are
+   * honoured either way. Only takes effect from inside a running draw
+   * handler. */
+  export function drawText(
+    x: number,
+    y: number,
+    text: string,
+    color: Color,
+    fontOrOptions?: Font | TextOptions,
+  ): void;
 
-    /** The number to send over process IPC. */
-    readonly handle: SurfaceHandle;
+  /** The pixel box `text` would occupy if drawn with the same options —
+   * the width of its widest line and the height of the whole block. A
+   * query, not a draw call: usable from anywhere to lay text out without
+   * assuming the font's size. */
+  export function measureText(
+    text: string,
+    fontOrOptions?: Font | TextOptions,
+  ): import("ely:math").Size2d;
 
-    /** Live — reflects a resize by any holder of the handle. */
-    get width(): number;
-    get height(): number;
-    get size(): import("ely:math").Size2d;
-
-    /** Resizes the surface. Contents keep their top-left corner; newly
-     * exposed area is transparent. Empties the transform and clip stacks. */
-    resize(width: number, height: number): void;
-
-    /** Fills the whole surface with `color`, discarding whatever it held. */
-    clear(color: Color): void;
-
-    fillRectangle(
-      x: number,
-      y: number,
-      w: number,
-      h: number,
-      color: Color,
-    ): void;
-    strokeRectangle(
-      x: number,
-      y: number,
-      w: number,
-      h: number,
-      color: Color,
-      thickness?: number,
-    ): void;
-    fillRoundedRectangle(
-      x: number,
-      y: number,
-      w: number,
-      h: number,
-      radius: number,
-      color: Color,
-    ): void;
-    strokeRoundedRectangle(
-      x: number,
-      y: number,
-      w: number,
-      h: number,
-      radius: number,
-      color: Color,
-      thickness?: number,
-    ): void;
-    drawLine(
-      x1: number,
-      y1: number,
-      x2: number,
-      y2: number,
-      color: Color,
-      thickness?: number,
-    ): void;
-    drawPolyline(
-      points: readonly import("ely:math").Vector2d[],
-      color: Color,
-      thickness?: number,
-    ): void;
-    fillCircle(cx: number, cy: number, r: number, color: Color): void;
-    strokeCircle(
-      cx: number,
-      cy: number,
-      r: number,
-      color: Color,
-      thickness?: number,
-    ): void;
-    fillEllipse(
-      cx: number,
-      cy: number,
-      rx: number,
-      ry: number,
-      color: Color,
-    ): void;
-    strokeEllipse(
-      cx: number,
-      cy: number,
-      rx: number,
-      ry: number,
-      color: Color,
-      thickness?: number,
-    ): void;
-    drawArc(
-      cx: number,
-      cy: number,
-      r: number,
-      startRad: number,
-      endRad: number,
-      color: Color,
-      thickness?: number,
-    ): void;
-    fillTriangle(
-      a: import("ely:math").Vector2d,
-      b: import("ely:math").Vector2d,
-      c: import("ely:math").Vector2d,
-      color: Color,
-    ): void;
-    fillPolygon(
-      points: readonly import("ely:math").Vector2d[],
-      color: Color,
-      rule?: FillRule,
-    ): void;
-    strokePolygon(
-      points: readonly import("ely:math").Vector2d[],
-      color: Color,
-      thickness?: number,
-    ): void;
-
-    setPixel(x: number, y: number, color: Color): void;
-    drawPixels(
-      points: readonly import("ely:math").Vector2d[],
-      color: Color,
-    ): void;
-
-    /** Starts a new path, discarding whatever was being described. One path
-     * under construction per program, shared across surfaces. */
-    beginPath(): void;
-    moveTo(x: number, y: number): void;
-    lineTo(x: number, y: number): void;
-    quadraticTo(cx: number, cy: number, x: number, y: number): void;
-    cubicTo(
-      c1x: number,
-      c1y: number,
-      c2x: number,
-      c2y: number,
-      x: number,
-      y: number,
-    ): void;
-    closePath(): void;
-    /** Fills the inside of the current path. Leaves the path in place. */
-    fillPath(color: Color, rule?: FillRule): void;
-    /** Draws a line of `thickness` along the current path. Leaves it in place. */
-    strokePath(
-      color: Color,
-      thickness?: number,
-      cap?: LineCap,
-      join?: LineJoin,
-    ): void;
-
-    /** Moves the coordinate space everything drawn afterwards is placed in,
-     * until the matching `popTransform`. Transforms nest. */
-    pushTransform(transform: Transform): void;
-    popTransform(): void;
-    /** Confines drawing to the rectangle at `(x, y)` until `popClip`. Clips
-     * nest by narrowing. */
-    pushClip(x: number, y: number, w: number, h: number): void;
-    /** The arbitrary-shape form of `pushClip`: confines to the current path. */
-    pushClipPath(rule?: FillRule): void;
-    popClip(): void;
-
-    /** Draws `text` in `color` with its top-left corner at `(x, y)`. */
-    drawText(
-      x: number,
-      y: number,
-      text: string,
-      color: Color,
-      fontOrOptions?: Font | TextOptions,
-    ): void;
-    /** The pixel box `text` would occupy — a query, not a draw call. */
-    measureText(
-      text: string,
-      fontOrOptions?: Font | TextOptions,
-    ): import("ely:math").Size2d;
-
-    /** Draws `image` with its top-left corner at `(x, y)`. */
-    drawImage(
-      image: import("ely:image").Image | import("ely:image").ImageId,
-      x: number,
-      y: number,
-      options?: DrawImageOptions,
-    ): void;
-    /** Draws `image` turned `radians` about `(originX, originY)` within it. */
-    drawImageRotated(
-      image: import("ely:image").Image | import("ely:image").ImageId,
-      x: number,
-      y: number,
-      radians: number,
-      options?: DrawImageRotatedOptions,
-    ): void;
-
-    /** Draws another surface onto this one, like an image. A surface can't
-     * be drawn onto itself. */
-    drawSurface(
-      source: SurfaceHandle | Surface,
-      x: number,
-      y: number,
-      options?: DrawImageOptions,
-    ): void;
-    drawSurfaceRotated(
-      source: SurfaceHandle | Surface,
-      x: number,
-      y: number,
-      radians: number,
-      options?: DrawImageRotatedOptions,
-    ): void;
-  }
-
-  /** The screen — the surface the kernel presents at the end of every tick.
-   * Draw to it directly; nothing else needs to happen first. */
-  export const screen: Surface;
-
-  /** Makes a new, fully transparent surface and returns its handle — the
-   * thing to send to another process. Revive it with `useSurface`. */
-  export function createSurface(width: number, height: number): SurfaceHandle;
-
-  /** Revives a handle — yours, or one another process sent you — into a
-   * `Surface` you can draw with. Throws if the handle names no live
-   * surface. */
-  export function useSurface(handle: SurfaceHandle): Surface;
-
-  /** Drops this process's hold on `handle`. The surface goes away once no
-   * live process holds it. */
-  export function destroySurface(handle: SurfaceHandle): void;
+  /** Sets how many physical pixels the window draws each logical pixel as
+   * — an integer of at least 1. Takes effect on the next frame; unlike
+   * `clearScreen`/`fillRectangle`, can be called from anywhere, not just
+   * from inside a draw handler. There is one window shared by every
+   * process, so this is a global, last-writer-wins setting. */
+  export function setScale(scale: number): void;
 
   /** The palette entry closest to the RGB triplet `(r, g, b)` (each `0-255`). */
   export function nearestColor(r: number, g: number, b: number): Color;
 
-  /** Sets how many physical pixels the window draws each logical pixel as —
-   * an integer of at least 1. Takes effect on the next frame. One window
-   * shared by every process, last writer wins. */
-  export function setScale(scale: number): void;
+  /** How a path decides which of its regions count as inside, where its
+   * outline crosses over itself. `"nonzero"` counts a region inside when
+   * the outline winds around it at all; `"evenodd"` alternates, so a shape
+   * drawn inside another punches a hole in it. */
+  export type FillRule = "nonzero" | "evenodd";
+
+  /** How a stroke finishes at the two loose ends of an open path. */
+  export type LineCap = "butt" | "round" | "square";
+
+  /** How a stroke turns a corner where two segments meet. */
+  export type LineJoin = "miter" | "round" | "bevel";
+
+  /** Starts a new path, discarding whatever was being described before it.
+   * There is one path under construction at a time, and the shape calls
+   * that describe a whole path of their own start a new one. */
+  export function beginPath(): void;
+
+  /** Starts a new contour of the current path at `(x, y)`, without drawing
+   * anything on the way there. */
+  export function moveTo(x: number, y: number): void;
+
+  /** Extends the current path with a straight segment to `(x, y)`. */
+  export function lineTo(x: number, y: number): void;
+
+  /** Extends the current path with a curve to `(x, y)` that bends toward
+   * the single control point `(cx, cy)` without passing through it. */
+  export function quadraticTo(
+    cx: number,
+    cy: number,
+    x: number,
+    y: number,
+  ): void;
+
+  /** Extends the current path with a curve to `(x, y)` that leaves along
+   * `(c1x, c1y)` and arrives along `(c2x, c2y)`. */
+  export function cubicTo(
+    c1x: number,
+    c1y: number,
+    c2x: number,
+    c2y: number,
+    x: number,
+    y: number,
+  ): void;
+
+  /** Closes the current contour with a straight segment back to where it
+   * started. */
+  export function closePath(): void;
+
+  /** Fills the inside of the current path with `color`, leaving the path in
+   * place so it can be stroked afterwards. */
+  export function fillPath(color: Color, rule?: FillRule): void;
+
+  /** Draws a line of `thickness` along the current path in `color`,
+   * straddling the path with half its thickness to either side. */
+  export function strokePath(
+    color: Color,
+    thickness?: number,
+    cap?: LineCap,
+    join?: LineJoin,
+  ): void;
+
+  /** How `pushTransform` should move the coordinate space. Applied in the
+   * order written: a shape is scaled, then rotated, then shifted. */
+  export interface Transform {
+    /** Shifts by this much, in the coordinates outside the transform. */
+    translate?: import("ely:math").Vector2d;
+    /** Scales about the origin. A single number scales both axes alike. */
+    scale?: import("ely:math").Vector2d | number;
+    /** Turns about the origin, in radians — clockwise on screen, since `y`
+     * grows downward. */
+    rotate?: number;
+  }
+
+  /** Moves the coordinate space everything drawn afterwards is placed in,
+   * until the matching `popTransform`. Transforms nest: pushing a second
+   * one applies inside the first rather than replacing it. */
+  export function pushTransform(transform: Transform): void;
+
+  /** Restores the coordinate space in effect before the matching
+   * `pushTransform`. */
+  export function popTransform(): void;
+
+  /** Confines everything drawn afterwards to the rectangle at `(x, y)`,
+   * until the matching `popClip`. Clips nest by narrowing. Under a rotated
+   * or sheared transform the region is the turned rectangle itself, not its
+   * bounding box. */
+  export function pushClip(x: number, y: number, w: number, h: number): void;
+
+  /** Confines everything drawn afterwards to the inside of the current
+   * path, until the matching `popClip`. */
+  export function pushClipPath(rule?: FillRule): void;
+
+  /** Restores the region in effect before the matching `pushClip`. */
+  export function popClip(): void;
+
+  /** Draws the outline of an axis-aligned rectangle at `(x, y)`. The
+   * outline straddles the rectangle's edge, so it doesn't cover exactly the
+   * pixels `fillRectangle` would. */
+  export function strokeRectangle(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    color: Color,
+    thickness?: number,
+  ): void;
+
+  /** Fills a rectangle at `(x, y)` whose corners are rounded off by
+   * `radius`, clamped to half the shorter side. */
+  export function fillRoundedRectangle(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    radius: number,
+    color: Color,
+  ): void;
+
+  /** Draws the outline of a rectangle at `(x, y)` with corners rounded off
+   * by `radius`. */
+  export function strokeRoundedRectangle(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    radius: number,
+    color: Color,
+    thickness?: number,
+  ): void;
+
+  /** Draws a straight line from `(x1, y1)` to `(x2, y2)`. A line straddles
+   * the coordinates it runs along, so run it down the middle of a pixel
+   * column — `x + 0.5` — for one crisp line. */
+  export function drawLine(
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    color: Color,
+    thickness?: number,
+  ): void;
+
+  /** Draws straight lines through `points` in order, leaving the two ends
+   * loose. Fewer than two points draws nothing. */
+  export function drawPolyline(
+    points: readonly import("ely:math").Vector2d[],
+    color: Color,
+    thickness?: number,
+  ): void;
+
+  /** Fills a circle of radius `r` centred on `(cx, cy)`. */
+  export function fillCircle(
+    cx: number,
+    cy: number,
+    r: number,
+    color: Color,
+  ): void;
+
+  /** Draws the outline of a circle of radius `r` centred on `(cx, cy)`. */
+  export function strokeCircle(
+    cx: number,
+    cy: number,
+    r: number,
+    color: Color,
+    thickness?: number,
+  ): void;
+
+  /** Fills an axis-aligned ellipse centred on `(cx, cy)`, reaching `rx` to
+   * either side and `ry` above and below. */
+  export function fillEllipse(
+    cx: number,
+    cy: number,
+    rx: number,
+    ry: number,
+    color: Color,
+  ): void;
+
+  /** Draws the outline of an axis-aligned ellipse centred on `(cx, cy)`. */
+  export function strokeEllipse(
+    cx: number,
+    cy: number,
+    rx: number,
+    ry: number,
+    color: Color,
+    thickness?: number,
+  ): void;
+
+  /** Draws the piece of a circle's rim running from `startRad` to `endRad`,
+   * in radians measured from `+x` and increasing clockwise on screen. The
+   * sweep follows which way round the two angles are named. */
+  export function drawArc(
+    cx: number,
+    cy: number,
+    r: number,
+    startRad: number,
+    endRad: number,
+    color: Color,
+    thickness?: number,
+  ): void;
+
+  /** Fills the triangle with corners `a`, `b` and `c`. */
+  export function fillTriangle(
+    a: import("ely:math").Vector2d,
+    b: import("ely:math").Vector2d,
+    c: import("ely:math").Vector2d,
+    color: Color,
+  ): void;
+
+  /** Fills the shape enclosed by `points`, joined in order and closed back
+   * to the first. Fewer than three points draws nothing. `rule` decides
+   * what counts as inside where the outline crosses itself. */
+  export function fillPolygon(
+    points: readonly import("ely:math").Vector2d[],
+    color: Color,
+    rule?: FillRule,
+  ): void;
+
+  /** Draws the outline of the shape enclosed by `points`, closed back to
+   * the first — unlike `drawPolyline`, which leaves its ends loose. */
+  export function strokePolygon(
+    points: readonly import("ely:math").Vector2d[],
+    color: Color,
+    thickness?: number,
+  ): void;
+
+  /** Sets the single pixel that `(x, y)` falls inside. Coordinates name the
+   * corners of the pixel grid, so `(3, 4)` and `(3.5, 4.5)` both set the
+   * same pixel. */
+  export function setPixel(x: number, y: number, color: Color): void;
+
+  /** Sets every pixel in `points` to the same color. */
+  export function drawPixels(
+    points: readonly import("ely:math").Vector2d[],
+    color: Color,
+  ): void;
 }
 
 declare module "ely:math" {
@@ -1300,7 +1392,7 @@ declare module "ely:image" {
   export type ImageId = number;
 
   /** A loaded, palette-quantized picture, ready to be drawn with
-   * a surface's `drawImage`. */
+   * `ely:framebuffer`'s `drawImage`. */
   export interface Image {
     readonly id: ImageId;
     readonly width: number;

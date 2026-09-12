@@ -10,10 +10,10 @@ use crate::transform;
 /// their source is baked into the executable at build time instead of being
 /// read from disk at runtime (only *building* the VM needs these files to
 /// exist under `runtime_modules/`). Every module the VM provides — today
-/// `jsx` and `graphics` — lives under the one `ely:` namespace: `jsx` reaches
+/// `jsx` and `framebuffer` — lives under the one `ely:` namespace: `jsx` reaches
 /// it through the bare-specifier rewrite below (and is additionally
-/// bootstrapped as globals, see `bootstrap_jsx_runtime`), while `graphics` is
-/// imported by a program writing the full `"ely:graphics"` specifier out
+/// bootstrapped as globals, see `bootstrap_jsx_runtime`), while `framebuffer` is
+/// imported by a program writing the full `"ely:framebuffer"` specifier out
 /// explicitly. To add another, drop the file under `runtime_modules/` and
 /// add an entry here.
 ///
@@ -22,10 +22,13 @@ use crate::transform;
 /// these bindings directly — keep the two in sync by hand when this list, or
 /// any of these modules' exported signatures, changes. The one part that is
 /// mechanized is the color palette, generated into both files from
-/// `kernel/graphics/palette.rs` and checked by its tests.
+/// `kernel/framebuffer/palette.rs` and checked by its tests.
 const EMBEDDED_RUNTIME_MODULES: &[(&str, &str)] = &[
     ("jsx", include_str!("runtime_modules/jsx-runtime.ts")),
-    ("graphics", include_str!("runtime_modules/graphics.ts")),
+    (
+        "framebuffer",
+        include_str!("runtime_modules/framebuffer.ts"),
+    ),
     ("lifecycle", include_str!("runtime_modules/lifecycle.ts")),
     ("math", include_str!("runtime_modules/math.ts")),
     ("input", include_str!("runtime_modules/input.ts")),
@@ -85,7 +88,7 @@ fn declare_embedded_module<'js>(ctx: &Ctx<'js>, name: &str) -> Result<Module<'js
 
 /// Resolves specifiers naming a [`EMBEDDED_RUNTIME_MODULES`] entry to its
 /// canonical `ely:`-prefixed form — either because a program already wrote
-/// it out explicitly (`"ely:graphics"`, passed through unchanged) or
+/// it out explicitly (`"ely:framebuffer"`, passed through unchanged) or
 /// because it's a bare specifier this rewrites internally (`"jsx"` ->
 /// `"ely:jsx"`, today used only by `jsx`'s global bootstrap, not written by
 /// programs). A relative import (`"./util.ts"`) resolves to a real file's
