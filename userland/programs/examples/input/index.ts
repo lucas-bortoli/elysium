@@ -23,7 +23,7 @@ import {
   getHeight,
   getWidth,
   strokeCircle,
-} from "ely:framebuffer";
+} from "ely:graphics";
 import type { Vector2d } from "ely:math";
 import {
   Key,

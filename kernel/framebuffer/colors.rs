@@ -3,12 +3,12 @@
 //!
 //! The palette itself — every entry's name and sRGB value — lives in
 //! `kernel/framebuffer/palette.rs`, the one table the `Color` enum here, the
-//! `Color` constant `ely:framebuffer` exports, and the ambient declaration
+//! `Color` constant `ely:graphics` exports, and the ambient declaration
 //! userland typechecks against are all generated from. The enum and its
 //! `hex` match are emitted into `$OUT_DIR/palette.rs` at build time and
 //! included below, the same way `kernel/text.rs` includes its generated
 //! fonts; a discriminant here is exactly the numeric id a program passes
-//! across the `ely:framebuffer` boundary. Program-supplied colors are always
+//! across the `ely:graphics` boundary. Program-supplied colors are always
 //! one of these named shades, never raw, unconstrained RGBA channels.
 //!
 //! What stays hand-written here is everything that reasons *about* the
@@ -20,7 +20,7 @@ include!(concat!(env!("OUT_DIR"), "/palette.rs"));
 impl Color {
     /// Straight-line lookup: valid discriminants are exactly `0..COUNT`,
     /// contiguous and dense, so this can't fail for any id a correctly
-    /// generated `ely:framebuffer` constant could send.
+    /// generated `ely:graphics` constant could send.
     pub fn from_id(id: u16) -> Option<Color> {
         if (id as usize) < COUNT {
             // SAFETY: `Color` is `#[repr(u16)]` with dense discriminants

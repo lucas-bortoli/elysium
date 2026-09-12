@@ -3,7 +3,7 @@
 // palette), never raw RGBA channels a program could get wrong.
 
 import type { Size2d, Vector2d } from "ely:math";
-import type { DrawTickerId } from "ely:framebuffer";
+import type { DrawTickerId } from "ely:graphics";
 import type { Image, ImageId } from "ely:image";
 
 declare function __framebuffer_clear_screen(color: Color): void;

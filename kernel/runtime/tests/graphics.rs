@@ -1,4 +1,4 @@
-//! `ely:framebuffer`'s drawing surface: the draw-handler gate every drawing
+//! `ely:graphics`'s drawing surface: the draw-handler gate every drawing
 //! call sits behind, paths and shapes, the transform and clip stacks, and
 //! individual pixels. Text lives in `text.rs`, and what a frame's commands
 //! actually rasterize to is tested against a bare pixmap in
@@ -9,7 +9,7 @@ use super::*;
 #[test]
 fn draw_calls_outside_a_handler_throw_draw_outside_handler_error() {
     let runtime = eval(
-        "import { clearScreen, DrawOutsideHandlerError } from 'ely:framebuffer'; \
+        "import { clearScreen, DrawOutsideHandlerError } from 'ely:graphics'; \
          globalThis.threw = false; \
          globalThis.correctType = false; \
          try { \
@@ -26,7 +26,7 @@ fn draw_calls_outside_a_handler_throw_draw_outside_handler_error() {
 #[test]
 fn draw_calls_inside_a_registered_handler_succeed() {
     let runtime = eval(
-        "import { clearScreen, addDrawHandler, Color } from 'ely:framebuffer'; \
+        "import { clearScreen, addDrawHandler, Color } from 'ely:graphics'; \
          globalThis.drawn = false; \
          addDrawHandler(() => { \
              clearScreen(Color.Slate900); \
@@ -41,7 +41,7 @@ fn draw_calls_inside_a_registered_handler_succeed() {
 fn path_calls_outside_a_handler_throw_draw_outside_handler_error() {
     let runtime = eval(
         "import { beginPath, moveTo, fillPath, pushClip, popClip, pushTransform, \
-                   DrawOutsideHandlerError } from 'ely:framebuffer'; \
+                   DrawOutsideHandlerError } from 'ely:graphics'; \
          globalThis.threw = []; \
          for (const call of [ \
              () => beginPath(), \
@@ -67,7 +67,7 @@ fn path_calls_outside_a_handler_throw_draw_outside_handler_error() {
 fn describing_filling_and_stroking_a_path_inside_a_handler_succeeds() {
     let runtime = eval(
         "import { addDrawHandler, beginPath, moveTo, lineTo, quadraticTo, cubicTo, \
-                   closePath, fillPath, strokePath, Color } from 'ely:framebuffer'; \
+                   closePath, fillPath, strokePath, Color } from 'ely:graphics'; \
          globalThis.drawn = false; \
          addDrawHandler(() => { \
              beginPath(); \
@@ -88,7 +88,7 @@ fn describing_filling_and_stroking_a_path_inside_a_handler_succeeds() {
 #[test]
 fn an_unknown_fill_rule_throws() {
     let runtime = eval(
-        "import { addDrawHandler, beginPath, moveTo, lineTo, fillPath } from 'ely:framebuffer'; \
+        "import { addDrawHandler, beginPath, moveTo, lineTo, fillPath } from 'ely:graphics'; \
          globalThis.threw = false; \
          addDrawHandler(() => { \
              beginPath(); moveTo(0, 0); lineTo(10, 10); \
@@ -103,7 +103,7 @@ fn an_unknown_fill_rule_throws() {
 #[test]
 fn an_unknown_line_cap_or_join_throws() {
     let runtime = eval(
-        "import { addDrawHandler, beginPath, moveTo, lineTo, strokePath } from 'ely:framebuffer'; \
+        "import { addDrawHandler, beginPath, moveTo, lineTo, strokePath } from 'ely:graphics'; \
          globalThis.threw = []; \
          addDrawHandler(() => { \
              beginPath(); moveTo(0, 0); lineTo(10, 10); \
@@ -120,7 +120,7 @@ fn an_unknown_line_cap_or_join_throws() {
 #[test]
 fn a_stroke_thickness_of_zero_or_less_throws() {
     let runtime = eval(
-        "import { addDrawHandler, beginPath, moveTo, lineTo, strokePath } from 'ely:framebuffer'; \
+        "import { addDrawHandler, beginPath, moveTo, lineTo, strokePath } from 'ely:graphics'; \
          globalThis.threw = []; \
          addDrawHandler(() => { \
              beginPath(); moveTo(0, 0); lineTo(10, 10); \
@@ -139,7 +139,7 @@ fn pushing_and_popping_transforms_and_clips_inside_a_handler_succeeds() {
     let runtime = eval(
         "import { addDrawHandler, pushTransform, popTransform, pushClip, popClip, \
                    pushClipPath, beginPath, moveTo, lineTo, fillRectangle, Color } \
-             from 'ely:framebuffer'; \
+             from 'ely:graphics'; \
          globalThis.drawn = false; \
          addDrawHandler(() => { \
              pushTransform({ translate: { x: 10, y: 5 }, scale: 2, rotate: 0.5 }); \
@@ -161,7 +161,7 @@ fn pushing_and_popping_transforms_and_clips_inside_a_handler_succeeds() {
 fn popping_more_than_was_pushed_throws_unbalanced_stack_error() {
     let runtime = eval(
         "import { addDrawHandler, pushClip, popClip, popTransform, \
-                   UnbalancedStackError } from 'ely:framebuffer'; \
+                   UnbalancedStackError } from 'ely:graphics'; \
          globalThis.threw = []; \
          addDrawHandler(() => { \
              pushClip(0, 0, 10, 10); \
@@ -182,7 +182,7 @@ fn a_handler_that_leaves_its_stacks_unbalanced_starts_the_next_frame_clean() {
     // and the frame after it must not inherit that debt.
     let runtime = eval(
         "import { addDrawHandler, pushClip, popClip, UnbalancedStackError } \
-             from 'ely:framebuffer'; \
+             from 'ely:graphics'; \
          globalThis.frames = 0; \
          globalThis.threw = false; \
          addDrawHandler(() => { \
@@ -210,7 +210,7 @@ fn every_shape_call_draws_inside_a_handler() {
         "import { addDrawHandler, Color, strokeRectangle, fillRoundedRectangle, \
                    strokeRoundedRectangle, drawLine, drawPolyline, fillCircle, \
                    strokeCircle, fillEllipse, strokeEllipse, drawArc, fillTriangle, \
-                   fillPolygon, strokePolygon } from 'ely:framebuffer'; \
+                   fillPolygon, strokePolygon } from 'ely:graphics'; \
          globalThis.error = ''; \
          const square = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }, { x: 0, y: 10 }]; \
          addDrawHandler(() => { \
@@ -240,7 +240,7 @@ fn every_shape_call_draws_inside_a_handler() {
 fn a_polygon_or_polyline_too_short_to_enclose_anything_draws_nothing() {
     let runtime = eval(
         "import { addDrawHandler, Color, drawPolyline, fillPolygon, strokePolygon } \
-             from 'ely:framebuffer'; \
+             from 'ely:graphics'; \
          globalThis.error = ''; \
          addDrawHandler(() => { \
              try { \
@@ -260,7 +260,7 @@ fn a_polygon_or_polyline_too_short_to_enclose_anything_draws_nothing() {
 fn shape_calls_outside_a_handler_throw_draw_outside_handler_error() {
     let runtime = eval(
         "import { fillCircle, strokeRectangle, drawArc, fillPolygon, \
-                   DrawOutsideHandlerError } from 'ely:framebuffer'; \
+                   DrawOutsideHandlerError } from 'ely:graphics'; \
          globalThis.threw = []; \
          for (const call of [ \
              () => fillCircle(0, 0, 5, 0), \
@@ -280,7 +280,7 @@ fn shape_calls_outside_a_handler_throw_draw_outside_handler_error() {
 #[test]
 fn setting_pixels_inside_a_handler_succeeds() {
     let runtime = eval(
-        "import { addDrawHandler, setPixel, drawPixels, Color } from 'ely:framebuffer'; \
+        "import { addDrawHandler, setPixel, drawPixels, Color } from 'ely:graphics'; \
          globalThis.error = ''; \
          addDrawHandler(() => { \
              try { \
@@ -298,7 +298,7 @@ fn setting_pixels_inside_a_handler_succeeds() {
 #[test]
 fn setting_a_pixel_to_an_unknown_color_throws() {
     let runtime = eval(
-        "import { addDrawHandler, setPixel } from 'ely:framebuffer'; \
+        "import { addDrawHandler, setPixel } from 'ely:graphics'; \
          globalThis.threw = false; \
          addDrawHandler(() => { \
              try { setPixel(1, 1, 60000); } \
@@ -316,7 +316,7 @@ fn a_handler_that_leaves_a_clip_pushed_does_not_confine_the_next_one() {
     // its own.
     let runtime = eval(
         "import { addDrawHandler, pushClip, popClip, UnbalancedStackError } \
-             from 'ely:framebuffer'; \
+             from 'ely:graphics'; \
          globalThis.leakedIn = false; \
          addDrawHandler(() => { pushClip(0, 0, 10, 10); }); \
          addDrawHandler(() => { \

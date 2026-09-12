@@ -12,7 +12,7 @@ import {
   fillRectangle,
   getWidth,
   strokeRectangle,
-} from "ely:framebuffer";
+} from "ely:graphics";
 import { getPointerPosition } from "ely:input";
 
 // The 26 hue families, in the order their ids run. Each has eleven shades,

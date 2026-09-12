@@ -24,7 +24,7 @@ Under the hood this is built entirely on `requestAnimationFrame` ([1]): a
 ticker is really a callback that reschedules itself for the next frame
 every time it runs, with `ely:lifecycle` doing that rescheduling and the
 delta-time bookkeeping so a program doesn't have to. Drawing has its own,
-separate per-frame registration (`addDrawHandler`, from `ely:framebuffer`
+separate per-frame registration (`addDrawHandler`, from `ely:graphics`
 ([2])) built the same way, since drawing calls are only valid from inside
 a draw handler and updating game state has no such restriction.
 

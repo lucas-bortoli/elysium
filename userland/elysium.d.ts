@@ -1,5 +1,5 @@
 // Ambient declarations for the Elysium host API: globals (print, timers,
-// the JSX factory), the ambient `JSX` namespace, and the `ely:framebuffer`/
+// the JSX factory), the ambient `JSX` namespace, and the `ely:graphics`/
 // `ely:lifecycle`/`ely:math`/`ely:input`/`ely:image`/`ely:filesystem`/
 // `ely:container`/`ely:process`/`ely:sound` namespaces.
 
@@ -64,7 +64,7 @@ declare function cancelAnimationFrame(id?: number): void;
  * finishes, before the next timer or frame. */
 declare function queueMicrotask(callback: () => void): void;
 
-declare module "ely:framebuffer" {
+declare module "ely:graphics" {
   /** The kernel's fixed, curated color palette. Every color a program can
    * draw with is one of these named entries — never a raw, unconstrained
    * RGBA value. */
@@ -1392,7 +1392,7 @@ declare module "ely:image" {
   export type ImageId = number;
 
   /** A loaded, palette-quantized picture, ready to be drawn with
-   * `ely:framebuffer`'s `drawImage`. */
+   * `ely:graphics`'s `drawImage`. */
   export interface Image {
     readonly id: ImageId;
     readonly width: number;

@@ -28,7 +28,7 @@ same per-frame accounting: movement and scroll accumulated since the
 previous frame, then reset.
 
 ```ts
-import { Color, addDrawHandler, clearScreen, fillRectangle } from "ely:framebuffer";
+import { Color, addDrawHandler, clearScreen, fillRectangle } from "ely:graphics";
 import { getPointerPosition, isPointerDown } from "ely:input";
 
 addDrawHandler(() => {

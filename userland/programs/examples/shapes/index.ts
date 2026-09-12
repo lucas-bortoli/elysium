@@ -24,7 +24,7 @@ import {
   strokePolygon,
   strokeRectangle,
   strokeRoundedRectangle,
-} from "ely:framebuffer";
+} from "ely:graphics";
 import { addUpdateTicker } from "ely:lifecycle";
 
 let elapsed = 0;

@@ -11,11 +11,11 @@
 include!(concat!(env!("OUT_DIR"), "/fonts.rs"));
 
 /// A built-in font, identified by its index in the generated `FONTS` slice.
-/// This is the value that crosses the `ely:framebuffer` boundary, mirroring
+/// This is the value that crosses the `ely:graphics` boundary, mirroring
 /// how a `Color` crosses it as a numeric id.
 pub type FontId = u16;
 
-/// The font used when a program doesn't name one. The `ely:framebuffer`
+/// The font used when a program doesn't name one. The `ely:graphics`
 /// module always sends an explicit id, so this is only referenced by tests
 /// and by anything that later needs a kernel-side default.
 #[allow(dead_code)]

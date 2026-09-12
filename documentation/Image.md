@@ -2,11 +2,11 @@
 
 A program can load a picture off disk and put it on the Framebuffer ([1])
 alongside whatever it draws with `clearScreen`/`fillRectangle`. `ely:image`
-loads a PNG file into an `Image`; `ely:framebuffer`'s `drawImage` puts it on
+loads a PNG file into an `Image`; `ely:graphics`'s `drawImage` puts it on
 screen.
 
 ```ts
-import { addDrawHandler, drawImage } from "ely:framebuffer";
+import { addDrawHandler, drawImage } from "ely:graphics";
 import { loadImage } from "ely:image";
 
 const sprite = loadImage(`${import.meta.directoryName}/sprite.png`);

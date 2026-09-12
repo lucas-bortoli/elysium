@@ -2,7 +2,7 @@
 //! copy of it is generated from.
 //!
 //! A palette entry has to be spelled out in three places: the kernel's
-//! `Color` enum, the `Color` constant `ely:framebuffer` exports, and the
+//! `Color` enum, the `Color` constant `ely:graphics` exports, and the
 //! ambient declaration userland typechecks against. Keeping three hand-written
 //! copies in step was never mechanized, so this table is the one place an
 //! entry is written down and the other three are rendered from it — the Rust
@@ -11,7 +11,7 @@
 //! disk by this module's tests.
 //!
 //! An entry's index in this table is the numeric id that crosses the
-//! `ely:framebuffer` boundary, so entries may be appended but never reordered
+//! `ely:graphics` boundary, so entries may be appended but never reordered
 //! or removed without breaking every program that names a color after them.
 //!
 //! The palette is 26 hue families x 11 shades (50-950, the familiar Tailwind
@@ -327,7 +327,7 @@ pub fn render_rust() -> String {
     out.push_str("// Generated from kernel/framebuffer/palette.rs. Do not edit.\n\n");
 
     out.push_str("/// One shade from the palette. `#[repr(u16)]` with dense discriminants\n");
-    out.push_str("/// because the numeric value *is* the wire format `ely:framebuffer`'s\n");
+    out.push_str("/// because the numeric value *is* the wire format `ely:graphics`'s\n");
     out.push_str("/// functions receive from JS. Most variants are only ever constructed\n");
     out.push_str("/// from that numeric id via `Color::from_id`, never named directly in\n");
     out.push_str("/// Rust, so dead-code analysis can't see them as used.\n");
@@ -354,8 +354,8 @@ pub fn render_rust() -> String {
 // Rendered for the checked-in TypeScript copies, which the build script
 // doesn't touch — reached only from this module's tests, so its copy of
 // this file sees these as unused.
-/// The body of `ely:framebuffer`'s exported `Color` constant, for the
-/// generated region of `kernel/runtime_modules/framebuffer.ts`.
+/// The body of `ely:graphics`'s exported `Color` constant, for the
+/// generated region of `kernel/runtime_modules/graphics.ts`.
 #[allow(dead_code)]
 pub fn render_typescript() -> String {
     let mut out = String::from("export const Color = {\n");
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn the_typescript_palette_matches_the_table() {
-        assert_generated_region("kernel/runtime_modules/framebuffer.ts", render_typescript());
+        assert_generated_region("kernel/runtime_modules/graphics.ts", render_typescript());
     }
 
     #[test]
