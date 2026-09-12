@@ -59,6 +59,21 @@ Draw calls are batched. What a program draws during a draw handler doesn't
 appear on screen call by call. That means later calls draw over earlier
 ones where they overlap.
 
+The framebuffer is one surface every running program shares, so this
+ordering matters across programs too, not just within one program's own
+calls: without anything saying otherwise, which program's drawing lands on
+top of another's is left to whatever order the kernel happened to run them
+in that frame. `setZOrdering(z)` lets a program say explicitly where it
+wants to sit — a lower z is painted first, so a higher z's drawing lands on
+top of it wherever the two overlap, regardless of which program the kernel
+actually ran first. It resets to `0` at the start of every frame, so a
+program that cares about its place has to say so again each time; two
+programs at the same z fall back to whatever order the kernel ran them in,
+same as if neither had called it at all. There's no nesting to it the way
+transforms and clips have — a program's whole frame sits at one z, not a
+stack of them, since "above" and "below" don't compose the way an inner
+transform composes with an outer one.
+
 ## Shapes
 
 Beyond `fillRectangle` there is a vocabulary of shapes, and every one of
