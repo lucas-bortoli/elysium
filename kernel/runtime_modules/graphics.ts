@@ -37,6 +37,7 @@ declare function __framebuffer_nearest_color(
   b: number,
 ): Color;
 declare function __framebuffer_set_scale(scale: number): void;
+declare function __framebuffer_set_z_ordering(z: number): void;
 declare function __framebuffer_path_begin(): void;
 declare function __framebuffer_path_move_to(x: number, y: number): void;
 declare function __framebuffer_path_line_to(x: number, y: number): void;
@@ -470,6 +471,7 @@ let frameScheduled = false;
 function frame() {
   frameScheduled = false;
   insideDrawHandler = true;
+  __framebuffer_set_z_ordering(0);
   try {
     for (const handler of [...drawHandlers.values()]) {
       try {
@@ -675,6 +677,18 @@ export function nearestColor(r: number, g: number, b: number): Color {
  * from inside a draw handler. */
 export function setScale(scale: number): void {
   __framebuffer_set_scale(scale);
+}
+
+/** Sets where this program's drawing sits in the paint order relative to
+ * every other running program's, this frame — a lower z is painted first
+ * (so a higher z's drawing lands on top wherever the two overlap). Resets to
+ * `0` at the start of every frame, so a program that wants a z other than
+ * the default sets it again each time. Only takes effect from inside a
+ * running draw handler; set it before drawing anything you want it to
+ * apply to. */
+export function setZOrdering(z: number): void {
+  if (!insideDrawHandler) throw new DrawOutsideHandlerError();
+  __framebuffer_set_z_ordering(z);
 }
 
 /** How a path decides which of its regions count as inside, where its

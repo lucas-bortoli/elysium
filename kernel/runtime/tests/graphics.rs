@@ -38,10 +38,24 @@ fn draw_calls_inside_a_registered_handler_succeed() {
 }
 
 #[test]
+fn set_z_ordering_inside_a_registered_handler_succeeds() {
+    let runtime = eval(
+        "import { setZOrdering, addDrawHandler } from 'ely:graphics'; \
+         globalThis.drawn = false; \
+         addDrawHandler(() => { \
+             setZOrdering(5); \
+             globalThis.drawn = true; \
+         });",
+    );
+    runtime.run_due_timers().unwrap();
+    assert!(global::<bool>(&runtime, "drawn"));
+}
+
+#[test]
 fn path_calls_outside_a_handler_throw_draw_outside_handler_error() {
     let runtime = eval(
         "import { beginPath, moveTo, fillPath, pushClip, popClip, pushTransform, \
-                   DrawOutsideHandlerError } from 'ely:graphics'; \
+                   setZOrdering, DrawOutsideHandlerError } from 'ely:graphics'; \
          globalThis.threw = []; \
          for (const call of [ \
              () => beginPath(), \
@@ -50,13 +64,14 @@ fn path_calls_outside_a_handler_throw_draw_outside_handler_error() {
              () => pushClip(0, 0, 1, 1), \
              () => popClip(), \
              () => pushTransform({}), \
+             () => setZOrdering(1), \
          ]) { \
              try { call(); globalThis.threw.push(false); } \
              catch (err) { globalThis.threw.push(err instanceof DrawOutsideHandlerError); } \
          }",
     );
     let threw = global::<Vec<bool>>(&runtime, "threw");
-    assert_eq!(threw.len(), 6);
+    assert_eq!(threw.len(), 7);
     assert!(
         threw.iter().all(|&t| t),
         "every path call should have thrown"

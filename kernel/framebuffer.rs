@@ -129,6 +129,12 @@ pub enum DrawCommand {
         rule: tiny_skia::FillRule,
     },
     PopClip,
+    /// Marks where the z-ordering in effect changes for everything appended
+    /// after it, until the next one. Not itself drawn — [`group_by_z`]
+    /// consumes these before [`rasterize`] ever sees the command list.
+    SetZOrdering {
+        z: i32,
+    },
 }
 
 /// Binds the hidden globals `ely:graphics`'s embedded module wraps, path
@@ -286,39 +292,51 @@ pub fn bootstrap_framebuffer_bindings(
         )?;
     }
 
-    bind(
-        ctx,
-        "__framebuffer_draw_image_transformed",
-        move |ctx: Ctx<'_>, id: u32, source: Vec<f32>, transform: Vec<f32>| -> Result<()> {
-            let image = crate::image::resolve_image(&ctx, &images, id)?;
-            // `[x, y, w, h]` and the six numbers of a 2x3 matrix, both
-            // assembled on the JS side — too many to pass one by one.
-            let ([sx, sy, sw, sh], [a, b, c, d, e, f]) = (
-                <[f32; 4]>::try_from(source.as_slice()).map_err(|_| {
-                    rquickjs::Exception::throw_type(&ctx, "a source rect needs four numbers")
-                })?,
-                <[f32; 6]>::try_from(transform.as_slice()).map_err(|_| {
-                    rquickjs::Exception::throw_type(&ctx, "a transform needs six numbers")
-                })?,
-            );
-            let Some(source) = tiny_skia::Rect::from_xywh(sx, sy, sw, sh) else {
-                return Ok(()); // nothing of the image asked for
-            };
-            draw_commands
-                .borrow_mut()
-                .push(DrawCommand::DrawImageTransformed {
-                    pixmap: image.pixmap,
-                    opaque: image.opaque,
-                    source,
-                    transform: tiny_skia::Transform::from_row(a, b, c, d, e, f),
-                });
-            Ok(())
-        },
-    )?;
+    {
+        let draw_commands = Rc::clone(&draw_commands);
+        bind(
+            ctx,
+            "__framebuffer_draw_image_transformed",
+            move |ctx: Ctx<'_>, id: u32, source: Vec<f32>, transform: Vec<f32>| -> Result<()> {
+                let image = crate::image::resolve_image(&ctx, &images, id)?;
+                // `[x, y, w, h]` and the six numbers of a 2x3 matrix, both
+                // assembled on the JS side — too many to pass one by one.
+                let ([sx, sy, sw, sh], [a, b, c, d, e, f]) = (
+                    <[f32; 4]>::try_from(source.as_slice()).map_err(|_| {
+                        rquickjs::Exception::throw_type(&ctx, "a source rect needs four numbers")
+                    })?,
+                    <[f32; 6]>::try_from(transform.as_slice()).map_err(|_| {
+                        rquickjs::Exception::throw_type(&ctx, "a transform needs six numbers")
+                    })?,
+                );
+                let Some(source) = tiny_skia::Rect::from_xywh(sx, sy, sw, sh) else {
+                    return Ok(()); // nothing of the image asked for
+                };
+                draw_commands
+                    .borrow_mut()
+                    .push(DrawCommand::DrawImageTransformed {
+                        pixmap: image.pixmap,
+                        opaque: image.opaque,
+                        source,
+                        transform: tiny_skia::Transform::from_row(a, b, c, d, e, f),
+                    });
+                Ok(())
+            },
+        )?;
+    }
 
     bind(ctx, "__framebuffer_nearest_color", |r: u8, g: u8, b: u8| {
         Color::nearest(r, g, b) as u16
     })?;
+
+    {
+        let draw_commands = Rc::clone(&draw_commands);
+        bind(ctx, "__framebuffer_set_z_ordering", move |z: i32| {
+            draw_commands
+                .borrow_mut()
+                .push(DrawCommand::SetZOrdering { z })
+        })?;
+    }
 
     bind(
         ctx,
@@ -440,7 +458,7 @@ impl Framebuffer {
             self.apply_scale(requested_scale);
         }
 
-        rasterize(&mut self.pixmap, commands);
+        rasterize(&mut self.pixmap, &group_by_z(commands));
         self.present();
     }
 
@@ -506,6 +524,44 @@ impl Framebuffer {
 
         buffer.present().expect("failed to present the frame");
     }
+}
+
+/// Reorders `commands` by the z-ordering in effect when each was appended —
+/// `0` until the first `SetZOrdering`, and whatever that named afterward —
+/// so that a lower z always ends up earlier in the result and thus painted
+/// before (under) a higher one, however the processes that produced them
+/// happened to be scheduled. A run of commands under the same z keeps its
+/// original relative order, and so does a tie between two different runs at
+/// the same z — the same "whoever appended later paints on top" rule
+/// `rasterize` already follows, just applied within a z instead of across
+/// the whole frame.
+///
+/// Splitting only at `SetZOrdering` boundaries — rather than sorting
+/// individual commands — relies on each run starting and ending with
+/// balanced transform/clip stacks, which holds as long as a process sets its
+/// z once, before it starts drawing, and doesn't leave a transform or clip
+/// open across a later `SetZOrdering` call.
+fn group_by_z(commands: &[DrawCommand]) -> Vec<DrawCommand> {
+    let mut runs: Vec<(i32, &[DrawCommand])> = Vec::new();
+    let mut z = 0;
+    let mut start = 0;
+    for (i, command) in commands.iter().enumerate() {
+        if let DrawCommand::SetZOrdering { z: new_z } = command {
+            if i > start {
+                runs.push((z, &commands[start..i]));
+            }
+            z = *new_z;
+            start = i + 1;
+        }
+    }
+    if start < commands.len() {
+        runs.push((z, &commands[start..]));
+    }
+
+    runs.sort_by_key(|(z, _)| *z);
+    runs.into_iter()
+        .flat_map(|(_, run)| run.iter().cloned())
+        .collect()
 }
 
 /// Draws `commands` onto `pixmap`, in order.
@@ -610,6 +666,9 @@ pub fn rasterize(pixmap: &mut tiny_skia::Pixmap, commands: &[DrawCommand]) {
             DrawCommand::PushClipRect { x, y, w, h } => state.push_clip_rect(*x, *y, *w, *h),
             DrawCommand::PushClip { path, rule } => state.push_clip(path.as_ref(), *rule),
             DrawCommand::PopClip => state.pop_clip(),
+            // Consumed by `group_by_z` before a command list ever reaches
+            // here.
+            DrawCommand::SetZOrdering { .. } => {}
             DrawCommand::DrawImage {
                 pixmap: image,
                 opaque,
@@ -836,7 +895,7 @@ fn over(
 
 #[cfg(test)]
 mod tests {
-    use super::{Color, DrawCommand, rasterize};
+    use super::{Color, DrawCommand, group_by_z, rasterize};
 
     fn surface() -> tiny_skia::Pixmap {
         tiny_skia::Pixmap::new(64, 64).expect("failed to allocate a test surface")
@@ -983,6 +1042,38 @@ mod tests {
         assert_eq!(pixel_at(&pixmap, 45, 5), Color::Amber400.hex());
         assert_eq!(pixel_at(&pixmap, 5, 5), Color::Slate900.hex());
         assert_eq!(pixel_at(&pixmap, 5, 25), Color::Teal300.hex());
+    }
+
+    #[test]
+    fn a_higher_z_paints_over_a_lower_one_appended_after_it() {
+        let mut pixmap = surface();
+        // Appended in the "wrong" order — the lower z last — the way two
+        // processes ticked in the wrong order would append them.
+        let commands = group_by_z(&[
+            DrawCommand::ClearScreen {
+                color: Color::Slate900,
+            },
+            DrawCommand::SetZOrdering { z: 5 },
+            fill(rect_path(0.0, 0.0, 20.0, 20.0), Color::Amber400),
+            DrawCommand::SetZOrdering { z: 1 },
+            fill(rect_path(0.0, 0.0, 20.0, 20.0), Color::Teal300),
+        ]);
+        rasterize(&mut pixmap, &commands);
+        assert_eq!(pixel_at(&pixmap, 5, 5), Color::Amber400.hex());
+    }
+
+    #[test]
+    fn commands_at_the_same_z_keep_their_append_order() {
+        let mut pixmap = surface();
+        let commands = group_by_z(&[
+            DrawCommand::ClearScreen {
+                color: Color::Slate900,
+            },
+            fill(rect_path(0.0, 0.0, 20.0, 20.0), Color::Amber400),
+            fill(rect_path(0.0, 0.0, 20.0, 20.0), Color::Teal300),
+        ]);
+        rasterize(&mut pixmap, &commands);
+        assert_eq!(pixel_at(&pixmap, 5, 5), Color::Teal300.hex());
     }
 
     #[test]
